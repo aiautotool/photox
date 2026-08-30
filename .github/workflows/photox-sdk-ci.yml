@@ -8,6 +8,7 @@ on:
       - 'packages/sync/**'
       - 'packages/media/**'
       - 'packages/media-cloud/**'
+      - 'packages/media-api/**'
       - 'packages/integrity/**'
       - 'packages/jobs/**'
       - 'packages/reconciliation/**'
@@ -44,6 +45,7 @@ jobs:
           npm --workspace @photox/sync run build
           npm --workspace @photox/media run build
           npm --workspace @photox/media-cloud run build
+          npm --workspace @photox/media-api run build
           npm --workspace @photox/integrity run build
           npm --workspace @photox/jobs run build
           npm --workspace @photox/reconciliation run build
@@ -70,6 +72,7 @@ jobs:
           npm --workspace @photox/sync run typecheck
           npm --workspace @photox/media run typecheck
           npm --workspace @photox/media-cloud run typecheck
+          npm --workspace @photox/media-api run typecheck
           npm --workspace @photox/integrity run typecheck
           npm --workspace @photox/jobs run typecheck
           npm --workspace @photox/reconciliation run typecheck
