@@ -12,6 +12,7 @@ on:
       - 'packages/update-core/**'
       - 'packages/provider-local/**'
       - 'packages/provider-google-drive/**'
+      - 'packages/provider-telegram/**'
       - 'packages/desktop-sdk/**'
       - 'packages/mobile-sdk/**'
       - '.github/workflows/photox-sdk-ci.yml'
@@ -43,6 +44,7 @@ jobs:
         run: |
           npm --workspace @photox/provider-local run build
           npm --workspace @photox/provider-google-drive run build
+          npm --workspace @photox/provider-telegram run build
       - name: Build platform SDKs
         run: |
           npm --workspace @photox/desktop-sdk run build
@@ -60,5 +62,6 @@ jobs:
           npm --workspace @photox/update-core run typecheck
           npm --workspace @photox/provider-local run typecheck
           npm --workspace @photox/provider-google-drive run typecheck
+          npm --workspace @photox/provider-telegram run typecheck
           npm --workspace @photox/desktop-sdk run typecheck
           npm --workspace @photox/mobile-sdk run typecheck
