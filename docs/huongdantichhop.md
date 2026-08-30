@@ -1,8 +1,8 @@
 # Hướng dẫn tích hợp PhotoX SDK vào app Mobile và Desktop hiện tại
 
-> Áp dụng cho code SDK trên branch `photox-sdk-v2` và app hiện tại của `main`.
+> Áp dụng cho SDK trên branch `photox-sdk-v2` và app hiện tại của `main`.
 >
-> **Nguyên tắc:** chưa xoá/rewrite code cũ. Tích hợp từng lớp bằng adapter/repository, test xong mới chuyển behavior cũ sang SDK.
+> **Nguyên tắc:** thư viện trước, wiring sau. Không xoá/rewrite code cũ; tích hợp từng lớp bằng adapter/repository rồi mới thay behavior hiện tại.
 
 ---
 
@@ -14,6 +14,7 @@ packages/
 ├── storage
 ├── media
 ├── media-cloud
+├── media-api
 ├── integrity
 ├── jobs
 ├── reconciliation
@@ -36,14 +37,15 @@ Phân vai:
 contracts       type/contract chung
 storage         provider registry + replication execution
 media           metadata/index abstraction
-media-cloud     control-plane biết mỗi media có bao nhiêu replica và nằm ở đâu
-integrity       verify file/replica thật sự còn tốt
-jobs            durable queue cho tác vụ dài/retry/checkpoint
+media-cloud     source of truth: media có bao nhiêu replica và nằm ở đâu
+media-api       DTO/query/content/auth contract cho Mobile ↔ Desktop API
+integrity       verify replica còn tồn tại/đọc được/hash đúng
+jobs            durable queue, retry, checkpoint, pause/resume
 reconciliation  đối chiếu catalog với provider thực tế
-catalog-backup  backup/restore chính catalog PhotoX
+catalog-backup  backup/restore catalog PhotoX
 replica-policy  policy nâng cao + provider scoring
 providers       nơi thực thi upload/download
-image-editor    non-destructive Photo Editor SDK
+image-editor    non-destructive editor SDK
 mobile-sdk      facade mobile
 desktop-sdk     facade desktop
 ```
@@ -51,29 +53,33 @@ desktop-sdk     facade desktop
 Kiến trúc đích:
 
 ```text
-Mobile
-  ↓
-Transport / Sync
-  ↓
-Desktop Node
-  ├── Media Cloud Catalog
-  ├── Durable Job Queue
-  ├── Integrity Verification
-  ├── Reconciliation
-  ├── Catalog Backup / Recovery
-  ├── Advanced Replica Policy
-  └── Storage Provider Registry
+Mobile UI
+   ↓
+@photox/mobile-sdk
+   ↓ Bearer access token
+HTTP / LAN / Tunnel
+   ↓
+@photox/media-api
+   ↓
+Desktop services
+   ├── Media index
+   ├── Media Cloud Catalog
+   ├── Integrity
+   ├── Jobs
+   ├── Reconciliation
+   ├── Catalog Backup
+   ├── Replica Policy
+   └── Provider Registry
         ├── Local
-        ├── Google Drive accounts
-        ├── Telegram Bot accounts
-        └── provider tương lai
+        ├── Google Drive
+        └── Telegram Bot
 ```
 
-**Media Cloud Catalog là nguồn sự thật về vị trí media. Provider chỉ là nơi thực thi lưu trữ.**
+**Provider không phải source of truth. `@photox/media-cloud` mới là nguồn sự thật về vị trí replica. `@photox/media-api` là public contract cho UI/client.**
 
 ---
 
-# 2. Tạo branch tích hợp từ main
+# 2. Chuẩn bị tích hợp
 
 ```bash
 git checkout main
@@ -81,77 +87,63 @@ git pull
 git checkout -b integrate-photox-sdk
 ```
 
-Merge/cherry-pick code từ `photox-sdk-v2` sang branch tích hợp. Không merge thẳng vào `main` trước khi build/test Mobile + Desktop.
-
-Root workspace đã dùng `packages/*`, vì vậy chạy:
+Merge/cherry-pick từ `photox-sdk-v2`, sau đó:
 
 ```bash
 npm install
-```
-
-Build các library trước app:
-
-```bash
 npm --workspace @photox/contracts run build
 npm --workspace @photox/storage run build
 npm --workspace @photox/media run build
 npm --workspace @photox/media-cloud run build
+npm --workspace @photox/media-api run build
 npm --workspace @photox/integrity run build
 npm --workspace @photox/jobs run build
 npm --workspace @photox/reconciliation run build
 npm --workspace @photox/catalog-backup run build
 npm --workspace @photox/replica-policy run build
-npm --workspace @photox/sync run build
-npm --workspace @photox/transport run build
-npm --workspace @photox/image-editor run build
 npm --workspace @photox/provider-local run build
 npm --workspace @photox/provider-google-drive run build
 npm --workspace @photox/provider-telegram run build
+npm --workspace @photox/image-editor run build
 npm --workspace @photox/desktop-sdk run build
 npm --workspace @photox/mobile-sdk run build
 ```
 
 ---
 
-# 3. Tích hợp Desktop mà không phá code cũ
+# 3. Desktop wiring — không phá code cũ
 
-Không xoá `desktop/electron/main.ts` ngay. Hiện file này đang giữ Mobile API, local index, Google OAuth/Drive, upload/download, replica policy và IPC.
+Không xoá `desktop/electron/main.ts` ở giai đoạn đầu.
 
-Tạo lớp wiring riêng, ví dụ:
+Tạo wiring riêng:
 
 ```text
 desktop/electron/services/photoxSdk.ts
 ```
 
-Luồng migration:
+Migration:
 
 ```text
 legacy main.ts
    ↓ adapter
-PhotoX SDK services
+PhotoX SDK
    ↓
-Catalog / Jobs / Policy / Providers
+Media API / Catalog / Jobs / Policy / Providers
 ```
 
-Chuyển từng chức năng một; không chuyển toàn bộ trong một commit.
+Chuyển từng route/service một, không đổi toàn hệ thống cùng lúc.
 
 ---
 
-# 4. Provider Local / Google Drive / Telegram
+# 4. Storage Providers
 
 ## Local
 
-```ts
-photoX.registerStorageProvider(
-  new LocalStorageProvider(localStoragePath)
-);
-```
-
-`localStoragePath` lấy từ Electron config hoặc `app.getPath('userData')`.
+`@photox/provider-local` dùng path lấy từ Electron config hoặc `app.getPath('userData')`.
 
 ## Google Drive
 
-Giữ OAuth/Drive hiện tại, bọc thành `GoogleDriveAdapter` cho `GoogleDriveProvider`.
+Giữ OAuth/Drive hiện tại, bọc bằng adapter cho `GoogleDriveProvider`.
 
 Replica chuẩn:
 
@@ -163,7 +155,7 @@ Replica chuẩn:
 }
 ```
 
-Replica legacy không có `providerId` được normalize khi đọc thành `google-drive`.
+Legacy replica không có `providerId` được normalize khi đọc thành `google-drive`.
 
 ## Telegram Bot
 
@@ -173,31 +165,22 @@ Package:
 @photox/provider-telegram
 ```
 
-Hỗ trợ nhiều bot/account, target chat/channel riêng, Cloud Bot API hoặc Local Bot API Server, media stats, upload/download và health check.
+Hỗ trợ nhiều bot/account, mỗi bot có `chatId`, Cloud Bot API hoặc Local Bot API Server, health check và media stats.
 
-Config account:
+Config chỉ lưu reference tới secret:
 
 ```ts
 {
   accountId: 'telegram-backup-1',
   displayName: 'Telegram Backup 1',
-  chatId: '-1001234567890',
+  chatId: '-100...',
   botTokenSecretKey: 'telegram.bot.telegram-backup-1',
   enabled: true,
   apiMode: 'cloud'
 }
 ```
 
-Không lưu token plaintext trong config/database thường. Production `SecretStore` dùng Keychain/DPAPI/Credential Manager/keyring.
-
-Desktop UI sau này:
-
-```text
-Settings > Storage > Telegram Bot
-Add / Edit / Enable / Disable / Test / Remove
-```
-
-File/video lớn phải dùng streaming/local-path adapter; không đọc file hàng GB vào RAM.
+Token thật phải nằm trong Keychain / Credential Manager / DPAPI / keyring, không lưu plaintext trong DB/config/log.
 
 ---
 
@@ -209,7 +192,7 @@ Package:
 @photox/media-cloud
 ```
 
-Một media có thể có:
+Ví dụ:
 
 ```text
 IMG_001.HEIC
@@ -218,19 +201,7 @@ IMG_001.HEIC
 └── Telegram Bot / Backup Bot 1   VERIFIED
 ```
 
-Catalog lưu tối thiểu:
-
-```text
-assetId
-filename
-mimeType
-sizeBytes
-sha256
-targetReplicas
-replicas[]
-```
-
-Replica identity bắt buộc:
+Mỗi replica cần:
 
 ```text
 replicaId
@@ -239,6 +210,8 @@ providerId
 accountId
 state
 remoteFileId (nếu remote)
+webViewLink (nếu có)
+verifiedAt
 ```
 
 Health:
@@ -251,47 +224,294 @@ lost
 unknown
 ```
 
-Production cần persistent `MediaCloudRepository`; `MemoryMediaCloudRepository` chỉ dành cho test/dev.
-
-Khuyến nghị database:
+Production cần persistent `MediaCloudRepository`, ví dụ SQLite:
 
 ```text
 media_cloud_assets
 media_cloud_replicas
 ```
 
-Khi Desktop nhận media:
+Luồng upload:
 
 ```text
 receive media
-→ hash/metadata
-→ cloudCatalog.registerAsset()
-→ attach local replica VERIFIED
-→ enqueue remote replication jobs
+→ hash + metadata
+→ catalog.registerAsset
+→ local replica VERIFIED
+→ policy chọn destinations
+→ job upload
+→ provider.upload
+→ catalog UPLOADED
+→ integrity.verify
+→ catalog VERIFIED
 ```
 
-Mỗi upload remote phải cập nhật catalog qua `ReplicationCatalogBridge`:
-
-```text
-QUEUED → UPLOADING → UPLOADED → VERIFIED
-                         ↘ ERROR
-```
-
-Không tính upload thành công là backup tốt cho tới khi được verify.
+Upload API trả success **chưa đủ** để tính backup an toàn; phải verify.
 
 ---
 
-# 6. Integrity Verification Engine
+# 6. Media API — contract mới cho Mobile/Desktop
 
 Package:
 
 ```text
-@photox/integrity
+@photox/media-api
 ```
 
-Mục tiêu: kiểm tra replica có **thật sự tồn tại và đọc được**, không chỉ dựa vào record trong database.
+Mục tiêu: Mobile/Desktop UI không đọc raw DB row, local path hoặc provider record. API trả một DTO ổn định đã aggregate từ Media Index + Cloud Catalog + Edit + Sync.
 
-Các trạng thái:
+## 6.1 Endpoint đề xuất
+
+```text
+POST /api/v1/auth/pair/exchange
+POST /api/v1/auth/refresh
+POST /api/v1/auth/revoke
+
+GET  /api/v1/media
+GET  /api/v1/media/:id
+GET  /api/v1/media/:id/thumbnail
+GET  /api/v1/media/:id/preview
+GET  /api/v1/media/:id/content
+GET  /api/v1/media/:id/replicas
+```
+
+Có thể giữ route legacy `/api/v1/library` trong migration và map dần sang service mới.
+
+## 6.2 MediaDTO
+
+Response public nên giống:
+
+```ts
+{
+  id: 'asset_123',
+  type: 'photo',
+  filename: 'IMG_001.HEIC',
+  mimeType: 'image/heic',
+  width: 4032,
+  height: 3024,
+  sizeBytes: 8123456,
+  createdAt: '...',
+  favorite: false,
+
+  thumbnail: { url: '/api/v1/media/asset_123/thumbnail' },
+  preview: { url: '/api/v1/media/asset_123/preview' },
+  original: { url: '/api/v1/media/asset_123/content' },
+
+  cloud: {
+    health: 'protected',
+    requiredReplicas: 2,
+    verifiedReplicas: 3,
+    locations: [
+      { providerId: 'local', accountId: 'local-primary', status: 'VERIFIED' },
+      { providerId: 'google-drive', accountId: 'drive-a', status: 'VERIFIED' },
+      { providerId: 'telegram-bot', accountId: 'telegram-1', status: 'VERIFIED' }
+    ]
+  },
+
+  edit: {
+    edited: true,
+    editedAssetId: 'asset_edit_456',
+    recipeVersion: 1
+  },
+
+  sync: { state: 'synced', lastSyncedAt: '...' }
+}
+```
+
+Không trả qua API:
+
+```text
+Google access/refresh token
+Telegram bot token
+local absolute filesystem path
+DB internal secret fields
+provider credential
+recovery key
+```
+
+## 6.3 MediaViewService
+
+`MediaViewService` aggregate:
+
+```text
+MediaRepository
+      +
+MediaCloudCatalog
+      +
+EditInfoProvider
+      +
+SyncInfoProvider
+      ↓
+MediaDTO
+```
+
+UI chỉ dùng DTO, không gọi trực tiếp 4–5 repositories.
+
+## 6.4 Cursor pagination
+
+Dùng:
+
+```text
+GET /api/v1/media?cursor=...&limit=100
+```
+
+Response:
+
+```ts
+{
+  items: [...],
+  nextCursor: '...',
+  hasMore: true
+}
+```
+
+Không nên dùng offset/page cho library rất lớn.
+
+Repository thật nên biến cursor thành stable sort key, ví dụ:
+
+```text
+createdAt DESC + assetId DESC
+```
+
+Cursor public nên opaque; không để UI phụ thuộc schema DB.
+
+## 6.5 Query/filter
+
+Hỗ trợ:
+
+```text
+type=photo|video
+from=
+to=
+favorite=true
+albumId=
+health=under_replicated|degraded
+providerId=google-drive
+edited=true
+search=
+```
+
+Ví dụ:
+
+```text
+GET /api/v1/media?type=video&health=under_replicated
+```
+
+## 6.6 Thumbnail / Preview / Original
+
+Không nhét binary hoặc base64 vào JSON media list.
+
+```text
+/media/:id/thumbnail   → nhỏ, cache mạnh
+/media/:id/preview     → medium-res
+/media/:id/content     → original/edited stream
+```
+
+`MediaContentResolver` chịu trách nhiệm tìm file thật; controller không biết file nằm Local/Drive/Telegram.
+
+## 6.7 Video HTTP Range
+
+Video phải forward header:
+
+```http
+Range: bytes=1048576-2097151
+```
+
+Resolver/provider trả tương ứng:
+
+```text
+206 Partial Content
+Accept-Ranges: bytes
+Content-Range: ...
+```
+
+Không tải toàn video rồi mới play.
+
+Sau này `@photox/media-delivery` nên chịu trách nhiệm chọn replica tốt nhất dựa trên Local/LAN/range support/latency/health.
+
+---
+
+# 7. Có cần JWT/JWS không?
+
+**Có cho tunnel/internet/multi-device; nhưng không bắt buộc core phải phụ thuộc JWT.**
+
+`@photox/media-api` đã có abstraction:
+
+```text
+AccessTokenIssuer
+AccessTokenVerifier
+RefreshSessionStore
+AuthorizationService
+AuthSessionService
+```
+
+Production Desktop nên implement issuer/verifier bằng JOSE/JWT library uy tín. Core không hard-code library crypto cụ thể.
+
+## 7.1 Luồng khuyến nghị
+
+Pair QR/pair code chỉ dùng để bootstrap:
+
+```text
+Mobile scan QR
+→ pairCode + deviceId
+→ POST /auth/pair/exchange
+→ Desktop verify pairing
+→ accessToken ngắn hạn
+→ refreshToken/session credential dài hơn
+```
+
+Sau đó request:
+
+```http
+Authorization: Bearer <access-token>
+```
+
+Access token nên ngắn hạn, ví dụ ~15 phút. Refresh session có thể 30 ngày nhưng phải revoke/rotate được.
+
+## 7.2 Claims JWT/JWS đề xuất
+
+```text
+iss   = photox-desktop
+aud   = photox-mobile
+sub   = user/device principal
+sid   = session id
+did   = paired device id
+scope = media:read media:download cloud:read
+iat   = issued at
+exp   = expiry
+jti   = unique token id
+```
+
+Không đặt credential provider vào JWT payload.
+
+## 7.3 Scope
+
+Đã có scope contract:
+
+```text
+media:read
+media:download
+media:write
+media:delete
+cloud:read
+cloud:manage
+```
+
+Ví dụ thumbnail/detail cần `media:read`; tải original cần `media:download`; repair/reconcile sau này cần `cloud:manage`.
+
+## 7.4 Local LAN có cần JWT không?
+
+Nếu chỉ một Desktop + Mobile trong LAN, random opaque session token cũng đủ nếu entropy tốt, có expiry và revoke.
+
+Tuy nhiên PhotoX đã có mục tiêu tunnel/internet và nhiều device nên nên chuẩn hoá **Bearer access token** ngay từ API contract. JWT/JWS là implementation phù hợp vì stateless verify và có scope/expiry rõ ràng.
+
+Refresh token không nên là JWT bắt buộc; tốt hơn có thể là opaque random secret được hash trong `RefreshSessionStore` để revoke/rotate dễ.
+
+---
+
+# 8. Integrity Verification
+
+Package `@photox/integrity` hỗ trợ:
 
 ```text
 UNKNOWN
@@ -302,95 +522,32 @@ UNREADABLE
 STALE
 ```
 
-Adapter provider implement `IntegrityProbe`:
-
-```ts
-interface IntegrityProbe {
-  probe(target): Promise<{
-    exists: boolean;
-    readable: boolean;
-    sizeBytes?: number;
-    sha256?: string;
-    checkedAt: string;
-  }>;
-}
-```
-
 Verify:
 
-```ts
-const report = await integrity.verify({
-  assetId,
-  providerId,
-  accountId,
-  remoteFileId,
-  expectedSizeBytes,
-  expectedSha256,
-});
-```
-
-Nếu file mất → `MISSING`.
-
-Nếu đọc không được → `UNREADABLE`.
-
-Nếu size/hash lệch → `CORRUPTED`.
-
-Nếu OK → `HEALTHY`.
-
-Persist report vào database, ví dụ:
-
 ```text
-integrity_reports
-```
-
-Nên lưu:
-
-```text
-assetId
-replicaId
-state
+exists
+readable
+size
+SHA256
 checkedAt
-sizeMatches
-checksumMatches
-message
 ```
 
-## Restore Verification
-
-`RestoreVerificationService` thực hiện test mạnh hơn:
+Restore Verification mạnh hơn:
 
 ```text
-Download replica về temporary/cache
-→ hash SHA256
-→ so với original
-→ xoá temporary
+download replica temp
+→ SHA256
+→ compare original
+→ delete temp
 ```
 
-Nên chạy ngẫu nhiên theo lịch để xác nhận backup thật sự restore được.
+Replica không healthy không được tính đủ protection target.
 
 ---
 
-# 7. Durable Job Queue
+# 9. Durable Jobs
 
-Package:
-
-```text
-@photox/jobs
-```
-
-Các tác vụ dài không chạy bằng Promise rời rạc nữa. Dùng durable job:
-
-```text
-QUEUED
-RUNNING
-PAUSED
-RETRY_WAIT
-COMPLETED
-FAILED
-CANCELLED
-```
-
-Các job nên chuyển vào queue:
+Package `@photox/jobs` dùng cho:
 
 ```text
 media.upload
@@ -405,72 +562,33 @@ thumbnail.generate
 edit.export
 ```
 
-Register handler:
-
-```ts
-jobs.register('replica.verify', async (payload, ctx) => {
-  // verify
-  await ctx.checkpoint({ step: 'verified-provider-object' });
-});
-```
-
-Enqueue:
-
-```ts
-await jobs.enqueue('replica.verify', payload, {
-  priority: 10,
-  maxAttempts: 5,
-});
-```
-
-Engine đã có retry exponential backoff, checkpoint, pause/resume/cancel.
-
-**Production phải thay `MemoryJobRepository` bằng persistent repository** như SQLite.
-
-Bảng đề xuất:
+State:
 
 ```text
-jobs
-job_events (optional)
+QUEUED
+RUNNING
+PAUSED
+RETRY_WAIT
+COMPLETED
+FAILED
+CANCELLED
 ```
 
-Khi Desktop restart, worker đọc lại `QUEUED` / `RETRY_WAIT` và tiếp tục.
-
-Không để một upload đang chạy mất trạng thái chỉ vì app đóng.
+Production thay memory repository bằng SQLite repository. Restart Desktop phải tiếp tục được jobs chưa hoàn tất.
 
 ---
 
-# 8. Reconciliation Engine
+# 10. Reconciliation
 
-Package:
-
-```text
-@photox/reconciliation
-```
-
-Mục tiêu:
+Package `@photox/reconciliation` đối chiếu:
 
 ```text
 Media Cloud Catalog
         ↕
-Provider Inventory thực tế
+Provider Inventory
 ```
 
-Ví dụ catalog nói:
-
-```text
-IMG_001 → Drive A / file123 VERIFIED
-```
-
-nhưng user đã vào Google Drive xoá `file123` thủ công. Reconciliation phải phát hiện:
-
-```text
-MISSING_REMOTE
-```
-
-và schedule repair để tạo replica mới.
-
-Issue types:
+Issue:
 
 ```text
 MISSING_REMOTE
@@ -478,368 +596,122 @@ UNKNOWN_REMOTE
 STATE_DRIFT
 ```
 
-`ProviderInventory` được implement riêng theo provider:
-
-```ts
-interface ProviderInventory {
-  list(providerId, accountId): Promise<ProviderReplicaRef[]>;
-}
-```
-
-`RepairScheduler` thường được adapter sang `@photox/jobs`:
+Ví dụ user xoá file trực tiếp trên Drive:
 
 ```text
-MISSING_REMOTE
+reconcile
+→ MISSING_REMOTE
 → enqueue replica.repair
-→ AdvancedReplicaPolicyEngine chọn destination
-→ provider upload
+→ policy/scoring chọn destination mới
+→ upload
 → verify
-→ catalog VERIFIED
+→ protected lại
 ```
-
-Không chạy full reconciliation liên tục. Gợi ý:
-
-```text
-startup lightweight check
-nightly incremental reconciliation
-weekly deeper provider reconciliation
-```
-
-Provider API đắt/rate-limited phải dùng paging/checkpoint.
 
 ---
 
-# 9. Catalog Backup / Recovery
+# 11. Catalog Backup / Disaster Recovery
 
-Package:
-
-```text
-@photox/catalog-backup
-```
-
-Đây là phần rất quan trọng: nếu laptop hỏng nhưng catalog chỉ nằm local thì rất khó biết file nào nằm ở provider nào.
-
-Catalog phải được backup như một asset hệ thống:
+Package `@photox/catalog-backup` backup chính catalog PhotoX.
 
 ```text
-PhotoX Catalog
-├── local DB
-├── Google Drive account A
-└── provider/account khác
+Catalog local DB
+├── Google Drive backup
+└── provider độc lập thứ hai
 ```
 
-`CatalogSerializer` chịu trách nhiệm export/import database thành payload snapshot.
+Snapshot có checksum và có thể encrypt.
 
-Backup:
-
-```ts
-await catalogBackup.backup({
-  encrypt: true,
-  minimumSuccessfulTargets: 2,
-});
-```
-
-Một snapshot có:
+Recovery:
 
 ```text
-schemaVersion
-createdAt
-catalogVersion
-payload
-checksum
-encrypted
-```
-
-Nếu chưa đủ số destination thành công, service báo `CATALOG_BACKUP_REDUNDANCY_NOT_MET`.
-
-## Encryption
-
-Production nên cung cấp `CatalogCrypto` để encrypt catalog trước upload.
-
-Recovery key không lưu cùng snapshot/provider.
-
-## Disaster Recovery
-
-Luồng máy mới:
-
-```text
-Install PhotoX
-→ nhập/import recovery credential/key
-→ tìm catalog snapshot mới nhất
-→ verify snapshot checksum
+máy mới
+→ lấy snapshot mới nhất
+→ verify checksum
 → decrypt
-→ restore catalog DB
-→ load provider configs/credentials theo cơ chế riêng
-→ reconciliation toàn hệ thống
+→ import catalog
+→ restore provider configs/credentials riêng
+→ reconciliation
 → rebuild local index/cache
-→ restore media khi user yêu cầu
 ```
 
-`CatalogRecoveryService.chooseLatest()` chọn snapshot mới nhất từ các backup target.
-
-**Catalog snapshot checksum phải được verify trước import.**
+Recovery key không lưu cùng snapshot.
 
 ---
 
-# 10. Advanced Replica Policy + Provider Scoring
+# 12. Advanced Replica Policy
 
-Package:
-
-```text
-@photox/replica-policy
-```
-
-Policy không còn chỉ là `targetReplicas = 2`.
-
-Context có thể gồm:
+Package `@photox/replica-policy` resolve rule theo:
 
 ```text
-mediaType
-sizeBytes
-albumIds
+media type
+size
+album
 favorite
 important
 edited
 ```
 
-Ví dụ rule:
+Provider scoring dùng:
 
 ```text
-Important media
-→ 3 replicas
-→ ít nhất 3 accounts
-→ ít nhất 2 providers
-→ backup original + edit recipe + rendered copy
-```
-
-```text
-Large video
-→ 2 replicas
-→ loại provider không phù hợp max object size
-```
-
-```text
-Edited photo
-→ original + editRecipe bắt buộc
-→ rendered copy tùy policy
-```
-
-Khởi tạo:
-
-```ts
-const policy = new AdvancedReplicaPolicyEngine(DEFAULT_PHOTOX_RULES);
-const resolved = policy.resolve(context);
-```
-
-## Provider Scoring
-
-`ProviderScoringEngine` chấm ứng viên dựa trên:
-
-```text
-provider/account health
+health
 free bytes
 max object size
 latency
-recent failure rate
-account đã được dùng chưa
-provider đã được dùng chưa
-allow/deny provider
+failure rate
+provider/account diversity
+allow/deny rules
 ```
 
-Ví dụ:
+Ví dụ important media:
 
 ```text
-Drive A        1280
-Drive B        1190
-Telegram A      940
-Drive C FULL       0 / ineligible
+3 replicas
+>= 3 accounts
+>= 2 providers
+backup original
+backup editRecipe
+optional rendered copy
 ```
-
-Storage orchestration lấy ranking cao nhất nhưng vẫn phải đáp ứng minimum distinct account/provider.
-
-**Lưu ý:** rule `large-video` mặc định có thể deny Telegram Cloud; khi dùng Telegram Local Bot API với object size lớn hơn, app có thể cung cấp policy/rule khác thay vì hard-code behavior UI.
 
 ---
 
-# 11. Luồng backup hoàn chỉnh sau khi tích hợp
+# 13. Luồng hoàn chỉnh
 
 ```text
-Mobile sends media
-        ↓
-Desktop receives
-        ↓
-Hash + metadata
-        ↓
-MediaCloudCatalog.registerAsset
-        ↓
-Local replica VERIFIED
-        ↓
-AdvancedReplicaPolicyEngine.resolve
-        ↓
-ProviderScoringEngine.rank
-        ↓
-DurableJobQueue enqueue upload jobs
-        ↓
-Provider.upload
-        ↓
-Catalog = UPLOADED
-        ↓
-IntegrityVerificationEngine.verify
-        ↓
-Catalog = VERIFIED
-        ↓
-ReplicaPlanner evaluates protection
-        ↓
-protected / under_replicated / degraded
+Mobile
+→ access token
+→ Media API upload/sync endpoint
+→ Desktop receive
+→ hash/metadata
+→ Media Cloud Catalog
+→ Advanced Policy
+→ Provider Scoring
+→ Durable Job
+→ Provider upload
+→ Integrity verify
+→ VERIFIED
+→ Protection health
 ```
 
-Nếu remote bị xoá sau này:
+Sau này:
 
 ```text
 Reconciliation
-→ MISSING_REMOTE
-→ catalog degraded/under-replicated
-→ enqueue replica.repair
-→ policy + scoring chọn destination mới
+→ missing/corrupt replica
+→ repair job
+→ new destination
 → upload + verify
-→ protected trở lại
+→ protected
 ```
 
 ---
 
-# 12. Desktop Cloud Management UI sau này
-
-**Chỉ triển khai UI khi library integration ổn.**
-
-Màn Cloud Overview:
+# 14. Database/repository production đề xuất
 
 ```text
-Protection Score: 98%
-
-50,243 media
-49,981 Protected
-201 Need Backup
-41 Degraded
-4 Lost/Corrupted
-16 Verification Overdue
-```
-
-View theo media:
-
-```text
-IMG_001.HEIC
-Protected • 3 copies
-├── Local / Mac SSD
-├── Google Drive / A
-└── Telegram Bot / Backup 1
-```
-
-View theo storage:
-
-```text
-Google Drive
-├── Account A   22,000 replicas
-└── Account B   20,100 replicas
-
-Telegram Bot
-├── Bot 1       15,000 replicas
-└── Bot 2       10,300 replicas
-```
-
-Actions sau này:
-
-```text
-Open remote
-Download
-Verify now
-Create another replica
-Repair
-Move/Rebalance replica
-Remove replica
-```
-
-Không cho UI tự gọi provider trực tiếp; UI gọi service/orchestrator.
-
----
-
-# 13. API Desktop đề xuất sau này
-
-Không cần thêm ngay, nhưng khi gắn Mobile/Desktop UI có thể expose:
-
-```text
-GET  /api/v1/cloud/summary
-GET  /api/v1/cloud/media/:assetId
-GET  /api/v1/cloud/media?health=under_replicated
-GET  /api/v1/cloud/providers
-GET  /api/v1/cloud/jobs
-POST /api/v1/cloud/media/:assetId/verify
-POST /api/v1/cloud/media/:assetId/repair
-POST /api/v1/cloud/reconcile
-POST /api/v1/cloud/catalog/backup
-```
-
-Không trả credential/token qua API.
-
----
-
-# 14. Mobile integration
-
-Mobile không cần biết replica nằm Google Drive hay Telegram.
-
-Mobile chỉ hỏi Desktop:
-
-```text
-asset status
-protection state
-available/download
-```
-
-Nút Download/Delete/Edit tiếp tục dùng `@photox/mobile-sdk`.
-
-Nếu muốn hiển thị backup status trên mobile, chỉ expose summary:
-
-```text
-Protected
-Backing up
-Needs attention
-Offline
-```
-
-Không gửi provider secret.
-
----
-
-# 15. Photo Editor integration
-
-`@photox/image-editor` vẫn là non-destructive.
-
-Persist:
-
-```text
-originalAssetId
-editedAssetId
-editRecipe
-presetId
-recipeVersion
-```
-
-Advanced policy dùng `edited=true` để quyết định:
-
-```text
-backup original
-backup editRecipe
-backup rendered copy hay không
-```
-
-Không upload JPEG mới mỗi lần kéo slider.
-
----
-
-# 16. Database đề xuất
-
-Các persistent repository sau này có thể dùng SQLite/Postgres-compatible abstraction:
-
-```text
+media_assets
 media_cloud_assets
 media_cloud_replicas
 integrity_reports
@@ -850,30 +722,109 @@ provider_accounts
 telegram_accounts
 telegram_media
 edit_records
+auth_sessions
 ```
 
-Credential/token không lưu plaintext trong các bảng trên.
+`auth_sessions` lưu refresh-session metadata/hash, không lưu raw refresh token nếu tránh được.
 
-Mọi schema nên có version/migration.
+Mọi schema cần migration/version.
 
 ---
 
-# 17. Lịch background khuyến nghị
+# 15. Desktop UI sau này
+
+Cloud Overview:
+
+```text
+Protection Score 98%
+50,243 media
+49,981 Protected
+201 Need Backup
+41 Degraded
+4 Lost/Corrupted
+```
+
+Media Detail:
+
+```text
+IMG_001.HEIC
+Protected • 3 copies
+├── Local / Mac SSD
+├── Google Drive / Account A
+└── Telegram / Backup Bot 1
+```
+
+Settings:
+
+```text
+Storage Providers
+Auth / Paired Devices
+Active Sessions
+Revoke Device
+Background Jobs
+Integrity / Repair
+```
+
+UI gọi service/controller; không gọi provider trực tiếp.
+
+---
+
+# 16. Mobile integration
+
+Mobile không cần biết original nằm Drive hay Telegram.
+
+Mobile chỉ dùng Media API:
+
+```text
+list media
+media detail
+thumbnail
+preview
+content stream
+cloud health summary
+```
+
+PairingStore sau này nên persist:
+
+```text
+desktopBaseUrl
+deviceId
+refresh/session credential
+access token + expiry (cache)
+```
+
+Access token hết hạn → refresh → retry request một lần.
+
+Không yêu cầu scan QR lại trừ khi session bị revoke/mất credential.
+
+---
+
+# 17. Photo Editor
+
+`@photox/image-editor` vẫn dùng non-destructive `EditRecipe`.
+
+Media API chỉ expose trạng thái edit cần cho UI; recipe đầy đủ nên có endpoint/service riêng khi thực sự cần edit/resume.
+
+Original asset immutable.
+
+---
+
+# 18. Background schedule khuyến nghị
 
 ```text
 Realtime
 - upload
-- upload verification
-- repair critical replicas
+- verify
+- critical repair
 
 Mỗi vài giờ
-- account/provider health
+- provider/account health
 - lightweight integrity sample
 
 Nightly
-- incremental reconciliation
+- reconciliation incremental
 - catalog backup
-- protection health recalculation
+- protection recalculation
 
 Weekly
 - deeper reconciliation
@@ -881,79 +832,70 @@ Weekly
 - rebalance recommendation
 ```
 
-Các lịch này sau này phải enqueue vào durable job queue, không chạy trực tiếp trên UI thread.
+Tất cả task dài enqueue vào durable jobs, không chạy trên UI thread.
 
 ---
 
-# 18. Thứ tự tích hợp vào main
+# 19. Thứ tự tích hợp vào main
 
 ## Phase 1 — Library only
 
-- merge packages
-- build/typecheck
+- build/typecheck all SDK packages
 - chưa đổi UI
-- implement persistent repositories
+- persistent repositories
 
-## Phase 2 — Catalog
+## Phase 2 — Media API read path
 
-1. MediaCloudRepository SQLite
-2. migrate/normalize legacy replicas
-3. register new incoming assets
-4. attach existing Local/Drive/Telegram replicas
+1. implement `MediaRepository` từ index hiện tại
+2. implement Media URL factory
+3. wire `MediaCloudCatalog`
+4. expose `GET /api/v1/media`
+5. expose detail/thumbnail/preview/content
+6. giữ `/api/v1/library` compatibility trong transition
 
-## Phase 3 — Durable jobs
+## Phase 3 — Auth
 
-1. SQLite JobRepository
-2. worker lifecycle Electron
-3. upload job
-4. verification job
-5. recovery after restart
+1. implement secure pairing verifier
+2. implement JWT/JWS issuer + verifier hoặc opaque access-token adapter
+3. implement persistent `RefreshSessionStore`
+4. exchange pair code → access + refresh
+5. Mobile Bearer middleware
+6. session revoke UI
 
-## Phase 4 — Integrity
+## Phase 4 — Media delivery
 
-1. Local probe
-2. Google Drive probe
-3. Telegram probe
-4. persist reports
-5. update catalog health
+1. local resolver
+2. Drive fallback
+3. Telegram fallback
+4. HTTP Range video
+5. cache headers
+6. sau này tách `@photox/media-delivery`
 
-## Phase 5 — Advanced policy
+## Phase 5 — Catalog + Jobs + Integrity
 
-1. map asset → PolicyContext
-2. resolve policy
-3. map provider accounts → ProviderCandidate
-4. score/rank
-5. replication respects diversity rules
+1. persistent catalog
+2. durable queue
+3. provider upload jobs
+4. integrity probes
+5. repair jobs
 
-## Phase 6 — Reconciliation
+## Phase 6 — Reconciliation + Recovery
 
-1. provider inventory adapters
-2. catalog adapter
-3. repair scheduler → jobs
-4. incremental reconciliation
-5. deep reconciliation
-
-## Phase 7 — Catalog backup/recovery
-
-1. serializer DB
-2. Google Drive backup target
-3. second independent target
-4. encryption adapter
-5. restore dry-run
-6. disaster recovery test
-
-## Phase 8 — UI
-
-Sau khi các engine ổn mới thêm Cloud Overview, Risk Dashboard, Jobs, Integrity/Repair actions.
+1. inventories
+2. incremental reconcile
+3. catalog backup
+4. restore dry-run
+5. full disaster recovery test
 
 ---
 
-# 19. CI
+# 20. CI
 
-CI phải build/typecheck các package mới:
+CI phải build/typecheck:
 
 ```bash
 npm --workspace @photox/media-cloud run build
+npm --workspace @photox/media-api run build
 npm --workspace @photox/integrity run build
 npm --workspace @photox/jobs run build
 npm --workspace @photox/reconciliation run build
@@ -961,86 +903,62 @@ npm --workspace @photox/catalog-backup run build
 npm --workspace @photox/replica-policy run build
 ```
 
-và tương ứng `run typecheck`.
-
-Sau đó mới build provider/platform SDK.
+và tương ứng `run typecheck` trước platform build.
 
 ---
 
-# 20. Checklist trước khi merge main
+# 21. Checklist API/Auth trước khi gắn main
 
-## Catalog
+- [ ] MediaDTO không leak local path/token/secret
+- [ ] cursor ổn định khi library lớn
+- [ ] list endpoint không trả binary/base64
+- [ ] thumbnail/preview cache được
+- [ ] video Range trả 206 đúng
+- [ ] resolver fallback replica khỏe khác
+- [ ] access token có expiry
+- [ ] scope enforcement hoạt động
+- [ ] refresh session revoke được
+- [ ] pair code không trở thành credential vĩnh viễn
+- [ ] token không xuất hiện trong URL/query/log
+- [ ] tunnel/internet chỉ dùng HTTPS/WSS
+- [ ] brute-force pairing có rate limit ở HTTP layer
+- [ ] provider credentials không bao giờ nằm trong JWT
 
-- [ ] media biết tất cả replica
-- [ ] providerId + accountId + remoteFileId đầy đủ
-- [ ] legacy Google replica normalize đúng
-- [ ] Telegram replica map đúng bot account
-- [ ] restart Desktop không mất catalog
+---
 
-## Integrity
+# 22. Checklist hệ cloud
 
-- [ ] missing remote bị phát hiện
-- [ ] size mismatch bị phát hiện
-- [ ] checksum mismatch thành CORRUPTED
-- [ ] unreadable replica không được tính protected
-- [ ] restore verification test chạy được
-
-## Jobs
-
-- [ ] restart app không mất QUEUED jobs
-- [ ] retry/backoff hoạt động
-- [ ] checkpoint persist
-- [ ] pause/resume/cancel đúng
-- [ ] failed job không làm crash worker
-
-## Reconciliation
-
-- [ ] xóa file thủ công trên Drive được phát hiện
-- [ ] provider object không có catalog được report
-- [ ] missing replica schedule repair
-- [ ] rate limit/paging được xử lý ở adapter
-
-## Catalog Recovery
-
-- [ ] snapshot checksum đúng
+- [ ] catalog biết toàn bộ replicas
+- [ ] verified replica đủ policy mới `protected`
+- [ ] checksum mismatch thành corrupted
+- [ ] missing remote được reconcile
+- [ ] repair dùng durable job
+- [ ] account full/auth error bị loại khỏi scoring
+- [ ] restart app không mất pending jobs
+- [ ] catalog có >= 2 backup targets
 - [ ] encrypted snapshot restore được
-- [ ] ít nhất 2 backup targets
-- [ ] restore trên máy/database mới đã được thử
-- [ ] recovery key không nằm cùng provider
-
-## Policy
-
-- [ ] image/video rules đúng
-- [ ] large file không chọn account không đủ khả năng
-- [ ] important media đạt diversity policy
-- [ ] account full/auth error bị loại
-- [ ] provider failure rate ảnh hưởng scoring
-
-## Security
-
-- [ ] Telegram token không plaintext
-- [ ] Google token không leak API/UI
-- [ ] catalog backup có thể encrypt
-- [ ] log không chứa credential
+- [ ] disaster recovery đã được test trên DB/máy mới
 
 ---
 
-# 21. Nguyên tắc kiến trúc lâu dài
+# 23. Nguyên tắc kiến trúc lâu dài
 
 ```text
-UI chỉ hiển thị và phát command.
+UI chỉ hiển thị/phát command.
+Media API là public contract; không expose raw persistence/provider model.
+Pairing chỉ bootstrap session, không làm credential vĩnh viễn.
+Access token ngắn hạn; refresh session phải revoke được.
 Durable jobs thực thi tác vụ dài.
-Media Cloud Catalog là nguồn sự thật về vị trí media.
+Media Cloud Catalog là source of truth về vị trí media.
 Provider chỉ thực hiện storage operation.
 Upload success chưa phải backup success; phải verify.
-Replica không healthy không được tính vào protection target.
-Reconciliation phải phát hiện drift giữa catalog và provider.
-Catalog cũng phải được backup và restore thử.
-Original media immutable.
-EditRecipe là nguồn sự thật của chỉnh sửa non-destructive.
-Credential tách khỏi config/catalog thường.
-Provider mới không được yêu cầu rewrite cloud/catalog core.
-Một provider lỗi không được kéo sập toàn bộ hệ thống.
+Replica không healthy không được tính protection target.
+Reconciliation phát hiện drift giữa catalog và provider.
+Catalog cũng phải backup và restore thử.
+Original immutable; EditRecipe non-destructive.
+Credential tách khỏi config/catalog/API.
+Provider mới không được yêu cầu rewrite media API/cloud core.
+Một provider lỗi không được kéo sập toàn hệ thống.
 ```
 
-Giữ các nguyên tắc này để PhotoX phát triển từ app sync ảnh thành một personal media cloud có khả năng tự kiểm tra, tự phát hiện mất replica, tự sửa redundancy và khôi phục sau sự cố.
+Giữ các nguyên tắc này để PhotoX phát triển thành personal media cloud có API ổn định, session bảo mật, streaming tốt, tự kiểm tra replica và khôi phục được sau sự cố.
