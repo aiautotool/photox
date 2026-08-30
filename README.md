@@ -1,5 +1,7 @@
 # PhotoSync Suite
 
+# photox
+
 Photo/video sync and storage management for **iOS + Android + Windows + macOS**.
 
 ## Architecture
