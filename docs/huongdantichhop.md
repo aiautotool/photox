@@ -1,36 +1,37 @@
 # Hướng dẫn tích hợp PhotoX SDK vào app Mobile và Desktop hiện tại
 
-> Tài liệu này mô tả cách tích hợp các thư viện mới trên branch `photox-sdk-v2` vào code ứng dụng hiện tại của `main`.
+> Tài liệu này mô tả cách tích hợp các thư viện trên branch `photox-sdk-v2` vào code hiện tại của `main`.
 >
-> **Nguyên tắc:** không xoá hoặc rewrite toàn bộ code cũ. Tích hợp theo từng lớp, dùng adapter để bọc logic hiện có, kiểm thử từng chức năng rồi mới chuyển UI sang SDK.
+> **Nguyên tắc bắt buộc:** chưa xoá/rewrite code cũ. Tích hợp theo adapter, chuyển từng chức năng một, test xong mới thay implementation cũ.
 
-## 1. Mục tiêu
+---
 
-Các package mới được thiết kế để app Mobile và Desktop dùng chung contract/business logic:
+# 1. Kiến trúc SDK hiện có
 
 ```text
 packages/
-├── contracts              # Contract chung
-├── storage                # Storage registry/policy/replication
-├── sync                   # Sync engine + queue + event bus
-├── media                  # Media services/index
-├── transport              # Transport abstraction
-├── update-core            # Update manifest/checking
-├── provider-local         # Local storage provider
-├── provider-google-drive  # Google Drive provider adapter
-├── desktop-sdk            # Facade cho Desktop
-├── mobile-sdk             # Facade cho Mobile
-└── image-editor           # Photo Editor SDK non-destructive
+├── contracts
+├── storage
+├── sync
+├── media
+├── transport
+├── update-core
+├── provider-local
+├── provider-google-drive
+├── provider-telegram
+├── desktop-sdk
+├── mobile-sdk
+└── image-editor
 ```
 
-Mục tiêu tích hợp cuối cùng:
+Mục tiêu cuối:
 
 ```text
 Mobile UI
    ↓
 @photox/mobile-sdk
    ↓
-contracts / media / transport / image-editor
+media / transport / image-editor
    ↓ HTTP / Tunnel
 Desktop API
    ↓
@@ -38,18 +39,16 @@ Desktop API
    ↓
 storage / sync / providers
    ↓
-Local / Google Drive / provider tương lai
+Local / Google Drive / Telegram Bot / provider tương lai
 ```
+
+`StorageProvider` là contract chung. UI không được chứa logic riêng cho Google Drive hay Telegram.
 
 ---
 
-# PHẦN A — CHUẨN BỊ TÍCH HỢP
+# 2. Chuẩn bị branch tích hợp
 
-## 2. Merge/copy SDK vào nhánh tích hợp
-
-Không merge thẳng vào `main` khi chưa test.
-
-Khuyến nghị tạo branch:
+Không merge SDK trực tiếp vào `main` khi chưa test.
 
 ```bash
 git checkout main
@@ -57,19 +56,13 @@ git pull
 git checkout -b integrate-photox-sdk
 ```
 
-Sau đó merge/cherry-pick code SDK từ `photox-sdk-v2` vào branch này.
+Sau đó merge/cherry-pick code từ `photox-sdk-v2`.
 
-Chỉ sau khi Mobile + Desktop build/test thành công mới tạo PR về `main`.
-
-## 3. Workspace
-
-Root repo đã dùng:
+Root repo đã có:
 
 ```json
 "workspaces": ["mobile", "desktop", "relay", "packages/*"]
 ```
-
-Vì vậy các package trong `packages/*` tự động trở thành npm workspace.
 
 Chạy:
 
@@ -77,7 +70,7 @@ Chạy:
 npm install
 ```
 
-Sau đó build SDK trước app:
+Build SDK:
 
 ```bash
 npm --workspace @photox/contracts run build
@@ -89,31 +82,37 @@ npm --workspace @photox/update-core run build
 npm --workspace @photox/image-editor run build
 npm --workspace @photox/provider-local run build
 npm --workspace @photox/provider-google-drive run build
+npm --workspace @photox/provider-telegram run build
 npm --workspace @photox/desktop-sdk run build
 npm --workspace @photox/mobile-sdk run build
 ```
 
 ---
 
-# PHẦN B — TÍCH HỢP DESKTOP
+# 3. Tích hợp Desktop SDK
 
-## 4. Không xoá `desktop/electron/main.ts`
+Không xoá `desktop/electron/main.ts` trong bước đầu.
 
-`main.ts` hiện đang chứa nhiều logic legacy: Mobile API, local media index, Google OAuth/Drive, quota, upload/download, replica và Electron IPC.
+File này đang giữ nhiều logic legacy:
 
-Không rewrite file này ngay.
+- Mobile HTTP API
+- local media index
+- Google OAuth
+- Google Drive
+- quota
+- upload/download
+- replica policy
+- Electron IPC
 
-Tích hợp theo adapter:
+Tích hợp theo hướng:
 
 ```text
-Legacy main.ts
-    ↓ callback/adapter
+legacy main.ts
+    ↓ adapter/callback
 PhotoX Desktop SDK
     ↓
-StorageProvider contract
+StorageProviderRegistry
 ```
-
-## 5. Khởi tạo Desktop SDK
 
 Tạo ví dụ:
 
@@ -127,43 +126,41 @@ import { PhotoXDesktopSDK } from '@photox/desktop-sdk';
 export const photoX = new PhotoXDesktopSDK();
 ```
 
-Sau đó đăng ký provider.
+---
 
-## 6. Tích hợp Local Storage
+# 4. Local Storage Provider
 
 ```ts
 import { LocalStorageProvider } from '@photox/provider-local';
 
 photoX.registerStorageProvider(
-  new LocalStorageProvider('/path/to/photox/storage')
+  new LocalStorageProvider(localStoragePath)
 );
 ```
 
-Đường dẫn thực tế nên lấy từ Electron `app.getPath('userData')` hoặc cấu hình Storage Location hiện có.
+`localStoragePath` nên lấy từ Electron config hoặc `app.getPath('userData')`.
 
-Không hard-code đường dẫn production.
+Không hard-code path production.
 
-## 7. Tích hợp Google Drive hiện tại
+---
 
-Không bỏ code OAuth/Google Drive cũ.
+# 5. Google Drive Provider
 
-Dùng code hiện tại làm implementation cho adapter của `GoogleDriveProvider`.
+Không bỏ Google OAuth/Drive hiện tại.
 
-Luồng:
+Bọc code cũ bằng adapter:
 
 ```text
 GoogleDriveProvider
        ↓
 GoogleDriveAdapter
        ↓
-OAuth/access token hiện tại
-       ↓
-@photosync/google-drive
+Google OAuth + @photosync/google-drive hiện tại
 ```
 
-Adapter cần map các chức năng hiện có:
+Adapter map:
 
-- list account
+- list accounts
 - quota
 - upload
 - download
@@ -171,71 +168,416 @@ Adapter cần map các chức năng hiện có:
 - health check
 - remove account nếu hỗ trợ
 
-Mỗi replica phải có identity chuẩn:
+Replica chuẩn:
 
 ```ts
 {
   providerId: 'google-drive',
-  accountId: '...',
+  accountId: 'drive-account-a',
   remoteFileId: '...'
 }
 ```
 
-Replica legacy không có `providerId` được migrate logic thành:
+Record legacy không có `providerId` được normalize khi đọc:
 
 ```ts
 providerId = 'google-drive'
 ```
 
-Không cần rewrite database ngay; có thể normalize khi đọc record cũ.
+Không cần migrate toàn database ngay lập tức.
 
-## 8. Chuyển replica policy sang Storage Engine
+---
 
-Thay vì để UI hoặc `main.ts` tự quyết định tài khoản Drive, dần chuyển sang:
+# 6. Telegram Bot Storage Provider
+
+Package:
 
 ```text
-StorageProviderRegistry
-        ↓
-StoragePolicyEngine
-        ↓
-ReplicationService
+@photox/provider-telegram
 ```
 
-Policy khuyến nghị:
+Provider ID:
 
-```ts
-{
-  targetReplicas: 2,
-  distinctAccounts: true,
-  preferDistinctProviders: true,
-  reserveBytes: 100 * 1024 * 1024
-}
+```text
+telegram-bot
 ```
 
 Mục tiêu:
 
+- lưu ảnh/video qua Telegram Bot
+- nhiều bot/account giống Google Drive
+- mỗi account dùng một bot token + target chat/channel
+- desktop có config riêng cho từng Telegram account
+- theo dõi số media đã lưu theo account
+- theo dõi tổng số media và tổng bytes
+- tham gia StoragePolicy/ReplicationService giống provider khác
+- không để UI biết chi tiết Telegram Bot API
+
+## 6.1 Thành phần thư viện
+
+```text
+provider-telegram/
+├── TelegramStorageProvider
+├── TelegramAccountService
+├── TelegramHttpBotApiAdapter
+├── TelegramMediaStatsService
+├── TelegramConfigStore
+├── TelegramMediaRepository
+├── SecretStore
+└── contracts/types
+```
+
+## 6.2 Config nhiều Telegram account
+
+Mỗi account có config dạng:
+
+```ts
+{
+  accountId: 'telegram-backup-1',
+  displayName: 'Telegram Backup 1',
+  chatId: '-1001234567890',
+  botTokenSecretKey: 'telegram.bot.telegram-backup-1',
+  enabled: true,
+  apiMode: 'cloud'
+}
+```
+
+Account khác:
+
+```ts
+{
+  accountId: 'telegram-backup-2',
+  displayName: 'Telegram Backup 2',
+  chatId: '-1009876543210',
+  botTokenSecretKey: 'telegram.bot.telegram-backup-2',
+  enabled: true,
+  apiMode: 'cloud'
+}
+```
+
+Có thể đăng ký nhiều account đồng thời.
+
+## 6.3 Không lưu bot token plaintext trong config
+
+Desktop config chỉ persist:
+
+```text
+botTokenSecretKey
+```
+
+Bot token thật đi qua `SecretStore`.
+
+Production nên implement SecretStore bằng:
+
+```text
+macOS → Keychain
+Windows → Credential Manager / DPAPI
+Linux → secret service/keyring
+```
+
+Không ghi bot token vào JSON/log/database plaintext.
+
+## 6.4 Lưu config từ Desktop
+
+UI sau này nên có:
+
+```text
+Settings
+└── Storage
+    └── Telegram Bot
+        ├── Add Bot
+        ├── Edit Bot
+        ├── Enable/Disable
+        ├── Test Connection
+        └── Remove Bot
+```
+
+Form:
+
+```text
+Name
+Bot Token
+Chat ID / Channel ID
+API Mode
+  - Telegram Cloud
+  - Local Bot API Server
+API Base URL (nếu local)
+Enabled
+```
+
+Khi user bấm Save:
+
+```ts
+await telegramAccounts.save(
+  {
+    accountId,
+    displayName,
+    chatId,
+    botTokenSecretKey,
+    enabled: true,
+    apiMode: 'cloud'
+  },
+  botToken
+);
+```
+
+Sau đó test:
+
+```ts
+const account = await telegramAccounts.resolve(accountId);
+const identity = await telegramApi.verifyBot(account);
+```
+
+Nếu `getMe` fail thì UI báo account invalid nhưng không crash app.
+
+## 6.5 Telegram Cloud vs Local Bot API Server
+
+Telegram Bot API cloud có giới hạn file thấp hơn local server.
+
+Provider đã có config:
+
+```text
+uploadLimitBytes
+downloadLimitBytes
+apiMode
+apiBaseUrl
+```
+
+Cloud defaults trong SDK:
+
+```text
+upload ~50 MB
+download ~20 MB
+```
+
+Local Bot API Server mặc định trong SDK:
+
+```text
+upload ~2000 MB
+```
+
+Khi dùng Local Bot API Server:
+
+```ts
+{
+  apiMode: 'local-bot-api',
+  apiBaseUrl: 'http://127.0.0.1:8081'
+}
+```
+
+Video lớn không nên dùng HTTP adapter đọc toàn bộ file vào RAM. Nên implement adapter streaming/local-path riêng cho desktop và inject vào `TelegramStorageProvider`.
+
+## 6.6 Khởi tạo Telegram provider
+
+Ví dụ wiring sau này:
+
+```ts
+import {
+  TelegramAccountService,
+  TelegramStorageProvider,
+  TelegramHttpBotApiAdapter,
+  TelegramMediaStatsService,
+} from '@photox/provider-telegram';
+
+const telegramAccounts = new TelegramAccountService(
+  telegramConfigStore,
+  desktopSecretStore
+);
+
+const telegramMedia = telegramMediaRepository;
+
+const telegramApi = new TelegramHttpBotApiAdapter({
+  loadFile: loadDesktopFile,
+});
+
+const telegramProvider = new TelegramStorageProvider(
+  telegramAccounts,
+  telegramApi,
+  telegramMedia
+);
+
+photoX.registerStorageProvider(telegramProvider);
+```
+
+Không register provider nếu feature đang disabled toàn cục.
+
+## 6.7 Telegram replica identity
+
+Khi upload thành công:
+
+```ts
+{
+  providerId: 'telegram-bot',
+  accountId: 'telegram-backup-1',
+  remoteFileId: '<telegram file_id>',
+  metadata: {
+    telegramMessageId: 12345,
+    telegramFileUniqueId: '...',
+    telegramChatId: '-100...'
+  }
+}
+```
+
+`file_id` thuộc bot cụ thể, vì vậy luôn phải giữ `accountId` cùng `remoteFileId`.
+
+Không được dùng file_id của bot A bằng bot B.
+
+## 6.8 Thống kê media Telegram trên Desktop
+
+Library đã có:
+
+```text
+TelegramMediaRepository
+TelegramMediaStatsService
+```
+
+Mỗi upload thành công sẽ lưu metadata index:
+
+```ts
+{
+  accountId,
+  chatId,
+  messageId,
+  fileId,
+  fileUniqueId,
+  filename,
+  mimeType,
+  mediaType,
+  sizeBytes,
+  sha256,
+  storedAt,
+  sourceKey
+}
+```
+
+Lấy stats:
+
+```ts
+const stats = await telegramStats.getStats(displayNames);
+```
+
+Kết quả dạng:
+
+```ts
+{
+  providerId: 'telegram-bot',
+  totalMedia: 12340,
+  totalBytes: 9876543210,
+  accounts: [
+    {
+      accountId: 'telegram-backup-1',
+      mediaCount: 7000,
+      imageCount: 6200,
+      videoCount: 780,
+      otherCount: 20,
+      totalBytes: 5000000000,
+      lastStoredAt: '...'
+    }
+  ]
+}
+```
+
+Desktop UI sau này nên hiển thị card:
+
+```text
+Telegram Bot Storage
+12,340 media
+9.2 GB indexed
+
+Telegram Backup 1
+7,000 media
+6,200 photos
+780 videos
+
+Telegram Backup 2
+5,340 media
+```
+
+Lưu ý: đây là số liệu **PhotoX đã index/upload**, không phải quota Telegram chính thức.
+
+## 6.9 Persistent repositories cho Desktop
+
+Library có Memory repositories phục vụ test/dev.
+
+Khi gắn thật vào desktop phải implement persistent:
+
+```text
+TelegramConfigStore
+TelegramMediaRepository
+SecretStore
+```
+
+Khuyến nghị database:
+
+```text
+telegram_accounts
+telegram_media
+```
+
+Không lưu token trong bảng account.
+
+## 6.10 Telegram không phải bản backup duy nhất
+
+Không đặt Telegram là replica duy nhất.
+
+Khuyến nghị:
+
+```text
+Local
++ Google Drive A
++ Telegram Bot A
+```
+
+hoặc:
+
+```text
+Google Drive A
++ Google Drive B
++ Telegram Bot A
+```
+
+Telegram nên được xem là provider bổ sung/archive.
+
+---
+
+# 7. Storage Policy sau khi có Telegram
+
+Storage engine vẫn chọn provider/account, không UI.
+
+Ví dụ target 2 remote replicas:
+
 ```text
 Asset
  ↓
-Local copy
+Google Drive account A
  ↓
-Replica 1 → Google Drive account A
- ↓
-Replica 2 → Google Drive account B
+Telegram Bot account A
 ```
 
-Khi có OneDrive/S3/NAS sau này:
+Hoặc:
 
 ```text
-Replica 1 → Google Drive
-Replica 2 → OneDrive
+Google Drive A
+Google Drive B
 ```
 
-mà business logic không phải sửa.
+Policy nên ưu tiên provider khác nhau nếu khả dụng.
 
-## 9. Mobile API Desktop
+Một account phải bị loại trước upload nếu:
 
-Giữ API legacy hoạt động trong giai đoạn migration:
+- disabled
+- auth invalid
+- health check fail
+- file lớn hơn configured upload limit
+- provider không phù hợp media type/policy
+
+Sau này nên bổ sung `maxObjectSizeBytes` vào candidate scoring chung để StoragePolicyEngine không phải thử upload rồi mới fail.
+
+---
+
+# 8. Mobile API Desktop
+
+Giữ API legacy trong migration:
 
 ```text
 GET  /api/v1/status
@@ -244,25 +586,23 @@ POST /api/v1/media
 GET  /api/v1/media/:key
 ```
 
-Sau đó chuyển implementation phía sau API sang SDK từng route một.
+Chuyển backend từng route:
 
-Không đổi protocol Mobile + Desktop cùng lúc.
-
-Thứ tự nên là:
-
-1. `/status`
-2. `/library`
-3. download media
-4. upload media
+1. status
+2. library
+3. media download
+4. media upload
 5. storage providers
 6. delete
 7. edit recipe sync
 
+Không đổi mobile protocol và desktop backend cùng lúc.
+
+Khi expose provider info cho mobile, không bao giờ gửi bot token.
+
 ---
 
-# PHẦN C — TÍCH HỢP MOBILE
-
-## 10. Khởi tạo Mobile SDK
+# 9. Tích hợp Mobile SDK
 
 Tạo:
 
@@ -270,11 +610,7 @@ Tạo:
 mobile/src/services/photoxSdk.ts
 ```
 
-Khởi tạo `PhotoXMobileSDK` với adapter storage/network tương ứng.
-
-Pairing credential nên lưu bằng Expo SecureStore thông qua `KeyValueStore`, không cho SDK import trực tiếp Expo.
-
-Ví dụ adapter:
+Pairing credentials dùng Expo SecureStore thông qua adapter:
 
 ```ts
 import * as SecureStore from 'expo-secure-store';
@@ -286,59 +622,29 @@ export const secureStoreAdapter = {
 };
 ```
 
-## 11. Pairing
-
-UI QR hiện tại sau khi scan chỉ cần chuyển kết quả pairing vào:
-
-```ts
-await sdk.pair({
-  baseUrl,
-  pairCode,
-  deviceId,
-  pairedAt: new Date().toISOString(),
-});
-```
-
-Khi app khởi động:
+Khởi động:
 
 ```ts
 await sdk.restorePairing();
 ```
 
-Không yêu cầu user scan QR lại nếu credential vẫn hợp lệ.
+Pair lần đầu:
+
+```ts
+await sdk.pair(credentials);
+```
 
 ---
 
-# PHẦN D — NÚT DOWNLOAD / DELETE / EDIT TRÊN MOBILE
+# 10. Mobile Download / Delete
 
-## 12. Download ảnh/video
-
-UI không tự xử lý permission/download nữa.
-
-Button handler chỉ gọi:
+Download:
 
 ```ts
 await sdk.media.download(asset);
 ```
 
-`MediaActions` chịu trách nhiệm orchestration.
-
-Expo-specific behavior nằm trong `ExpoMediaLibraryAdapter`.
-
-UI chỉ xử lý trạng thái:
-
-```text
-idle
-loading
-success
-error
-```
-
-và toast/snackbar tương ứng.
-
-## 13. Delete
-
-Khi user chọn Delete:
+Delete:
 
 ```ts
 await sdk.media.delete(asset, {
@@ -347,29 +653,25 @@ await sdk.media.delete(asset, {
 });
 ```
 
-Không nên hard delete cloud ngay trong UI.
+Remote delete phải qua desktop/provider orchestration.
 
-Khuyến nghị sau này thêm Trash policy:
+Không để mobile biết ảnh đang nằm ở Google Drive hay Telegram.
+
+Khuyến nghị Trash trước hard delete:
 
 ```text
-User Delete
-   ↓
-Move to PhotoX Trash
-   ↓
-30 ngày
-   ↓
+Delete
+ ↓
+PhotoX Trash
+ ↓ 30 days
 Permanent Delete
 ```
 
-Remote delete phải đi qua Desktop/storage provider để đảm bảo các replica được quản lý đồng nhất.
-
 ---
 
-# PHẦN E — PHOTO EDITOR MOBILE
+# 11. Photo Editor Mobile
 
-## 14. Kiến trúc Editor
-
-UI Mobile không phụ thuộc renderer cụ thể.
+Kiến trúc:
 
 ```text
 Photo Editor Screen
@@ -385,22 +687,18 @@ HistoryEngine
 ExportEngine
        ↓
 RendererAdapter
-       ↓
-IMG.LY / Native / GPU renderer
 ```
 
-## 15. Khởi tạo Editor
+Khởi tạo:
 
 ```ts
-import { PhotoEditorSDK } from '@photox/image-editor';
-
 const editor = new PhotoEditorSDK({
   renderer,
   sceneAnalyzer,
 });
 ```
 
-Khi mở ảnh:
+Session:
 
 ```ts
 const session = editor.createSession({
@@ -410,11 +708,7 @@ const session = editor.createSession({
 });
 ```
 
-Session phải tồn tại trong suốt vòng đời màn Edit.
-
-## 16. Layout Mobile Editor
-
-UI khuyến nghị:
+UI mobile:
 
 ```text
 ┌───────────────────────────────────┐
@@ -423,10 +717,8 @@ UI khuyến nghị:
 │                                   │
 │             CANVAS                │
 │                                   │
-│       Hold to see original        │
-│                                   │
 ├───────────────────────────────────┤
-│ ↶   ↷     Edited • 8 adjustments │
+│ ↶   ↷     Edited • adjustments   │
 ├───────────────────────────────────┤
 │ dynamic editor panel              │
 ├───────────────────────────────────┤
@@ -434,44 +726,37 @@ UI khuyến nghị:
 └───────────────────────────────────┘
 ```
 
-Canvas cần hỗ trợ:
+Canvas:
 
 - pinch zoom
 - double tap zoom
-- pan khi zoom
-- hold Before / release After
+- pan
+- hold Before
 - Compare
-- crop interaction mode
+- crop mode
 
-Gesture thuộc UI/render adapter, không đưa vào business recipe.
+Gesture là UI state, không persist vào recipe.
 
-## 17. Preset
+---
 
-Toolbar đặt `Presets` đầu tiên.
+# 12. Preset / Smart Preset
+
+Preset đứng đầu toolbar.
 
 ```ts
 const presets = editor.presets.list();
-```
-
-Khi chọn preset:
-
-```ts
 editor.presets.apply(session, presetId, intensity);
 ```
 
-Preset phải tạo các adjustment operation trong recipe, không bake trực tiếp pixel.
+Preset non-destructive: apply thành adjustment operations.
 
-Sau khi apply preset, user vẫn chỉnh từng thông số trong Adjust.
-
-## 18. Smart Preset
-
-Khi mở Editor:
+Smart Preset:
 
 ```ts
 const recommendations = await editor.smartPresets?.recommend(source, 3);
 ```
 
-Scene analyzer có thể trả:
+Scene:
 
 ```text
 portrait
@@ -483,91 +768,80 @@ document
 landscape
 ```
 
-Không để `SmartPresetEngine` phụ thuộc CoreML/TFLite cụ thể.
+Model AI đi qua `SceneAnalyzer`, không hard-code CoreML/TFLite vào core.
 
-Mobile tạo adapter:
+---
 
-```text
-CoreML/TFLite
-      ↓
-SceneAnalyzer
-      ↓
-SmartPresetEngine
-```
+# 13. Manual Adjust
 
-## 19. Adjust
-
-UI chia tab:
+Nhóm UI:
 
 ```text
 Light | Color | Detail | Effects | Geometry
 ```
 
-Khi slider thay đổi, tạo/update operation qua `AdjustmentEngine`.
-
-Không render full-resolution cho mỗi pixel slider movement.
-
-Khuyến nghị:
+Light:
 
 ```text
-Slider move
- ↓
-low-resolution preview
- ↓ debounce/cancel stale render
-User release slider
- ↓
-high-quality preview
-Save
- ↓
-full-resolution render
+Exposure
+Brightness
+Contrast
+Highlights
+Shadows
+Whites
+Blacks
+Tone Curve
 ```
 
-## 20. HSL / Color Mixer
+Color:
 
-UI:
+```text
+Temperature
+Tint
+Vibrance
+Saturation
+HSL / Color Mixer
+```
+
+HSL:
 
 ```text
 Red Orange Yellow Green Aqua Blue Purple Magenta
+Hue / Saturation / Luminance
 ```
 
-Mỗi channel:
+Detail:
 
 ```text
-Hue
-Saturation
-Luminance
+Sharpness
+Clarity
+Texture
+Dehaze
+Noise Reduction
+Color Noise Reduction
 ```
 
-Giá trị được lưu trong recipe để desktop có thể render cùng kết quả.
-
-## 21. Tone Curve
-
-Channels:
+Effects:
 
 ```text
-RGB
-Red
-Green
-Blue
+Vignette
+Grain
+Fade
+Bloom
+Glow
 ```
 
-UI chỉ chỉnh control points; `AdjustmentEngine` chịu trách nhiệm recipe representation.
+---
 
-## 22. Crop & Geometry
+# 14. Crop / Geometry
 
 Ratio:
 
 ```text
-Free
-Original
-1:1
-4:3
-3:4
-16:9
-9:16
+Free Original 1:1 4:3 3:4 16:9 9:16
 ```
 
-Các action:
+Actions:
 
 ```text
 Rotate
@@ -578,7 +852,7 @@ Perspective Vertical
 Perspective Horizontal
 ```
 
-Grid là UI-only state:
+Grid UI-only:
 
 ```text
 Rule of thirds
@@ -586,11 +860,11 @@ Golden ratio
 Center
 ```
 
-Không cần persist grid vào edit recipe.
+---
 
-## 23. Retouch
+# 15. Retouch / Filter
 
-UI map vào `RetouchEngine`:
+Retouch:
 
 ```text
 Heal
@@ -598,7 +872,7 @@ Remove Object
 Face
 ```
 
-Face controls:
+Face:
 
 ```text
 Skin Smooth
@@ -609,22 +883,16 @@ Eye Brightness
 Eye Detail
 ```
 
-Các operation AI phải lưu mask/parameter/reference cần thiết trong recipe hoặc persistent edit assets để có thể re-edit.
-
-Không bake thẳng vào original.
-
-## 24. Filters và LUT
+AI output phải lưu operation/mask/reference cần thiết để re-edit.
 
 Filter khác Preset:
 
 ```text
-Preset = tập adjustment
+Preset = nhiều adjustment
 Filter = LUT/color transformation
 ```
 
-UI filter sau này map vào filter operation.
-
-Để hỗ trợ `.cube LUT`, nên lưu:
+LUT recipe chỉ lưu reference:
 
 ```ts
 {
@@ -634,26 +902,20 @@ UI filter sau này map vào filter operation.
 }
 ```
 
-Không nên nhúng toàn bộ LUT binary vào recipe.
+Không nhúng `.cube` binary vào recipe.
 
-LUT file được quản lý riêng trong asset/cache repository.
+---
 
-## 25. Undo / Redo / History
+# 16. History / Draft
 
-Button:
+Undo/Redo:
 
 ```ts
 session.undo();
 session.redo();
 ```
 
-History screen lấy timeline từ `HistoryEngine`.
-
-User chọn một history step thì tạo recipe tại state tương ứng, không sửa ảnh gốc.
-
-## 26. Thoát Editor
-
-Nếu session dirty:
+Nếu thoát khi dirty:
 
 ```text
 Discard changes
@@ -661,17 +923,13 @@ Save draft
 Cancel
 ```
 
-`Save draft` chỉ persist recipe, không bắt buộc render ảnh full resolution.
-
-Đây là cách giúp thoát Editor nhanh.
+Save Draft chỉ persist recipe, không cần full-resolution render.
 
 ---
 
-# PHẦN F — SAVE / EXPORT
+# 17. Save / Export
 
-## 27. Save Copy
-
-Luồng:
+Save Copy:
 
 ```text
 EditRecipe
@@ -680,7 +938,7 @@ ExportEngine
  ↓
 RendererAdapter
  ↓
-new local file
+new file
  ↓
 Media Library
  ↓
@@ -689,57 +947,21 @@ PhotoX DB
 
 Không overwrite original.
 
-## 28. Replace Edited Version
-
-`Replace Edited Version` trong PhotoX nên hiểu là thay **current rendered edited version**, không xoá original.
-
-Database vẫn giữ:
+Export:
 
 ```text
-originalAssetId
-editedAssetId
-editRecipe
+Resolution: Original / 4K / 2K / Custom
+Format: JPEG / PNG / HEIC / WebP
+Quality: 60–100
+Metadata: Keep EXIF / Remove location / Remove all
+Color: sRGB / Display P3
 ```
-
-## 29. Export
-
-Bottom sheet:
-
-```text
-Resolution
-- Original
-- 4K
-- 2K
-- Custom
-
-Format
-- JPEG
-- PNG
-- HEIC
-- WebP
-
-Quality
-- 60–100
-
-Metadata
-- Keep EXIF
-- Remove location
-- Remove all metadata
-
-Color
-- sRGB
-- Display P3
-```
-
-Map UI vào `ExportEngine`, không để screen tự encode ảnh.
 
 ---
 
-# PHẦN G — DATABASE / NON-DESTRUCTIVE EDITING
+# 18. Non-destructive database
 
-## 30. Edit record
-
-Persist tối thiểu:
+Persist:
 
 ```ts
 {
@@ -752,7 +974,7 @@ Persist tối thiểu:
 }
 ```
 
-Có thể bổ sung:
+Có thể thêm:
 
 ```text
 recipeVersion
@@ -762,31 +984,18 @@ lastExportPreset
 syncState
 ```
 
-## 31. Không sửa ảnh gốc
-
-Quy tắc bắt buộc:
+Quy tắc:
 
 ```text
 ORIGINAL IMMUTABLE
 ```
 
-Không có engine nào được phép overwrite original asset.
+---
 
-Edit luôn tạo:
-
-```text
-Original
-  + EditRecipe
-  + optional Preview
-  + optional Exported/Edited Asset
-```
-
-## 32. Đồng bộ recipe Mobile → Desktop
-
-Về sau nên sync cả recipe:
+# 19. Sync edit recipe Mobile → Desktop
 
 ```text
-Mobile edit
+Mobile Edit
  ↓
 EditRecipe JSON
  ↓
@@ -795,58 +1004,27 @@ Desktop
 EditRepository
 ```
 
-Desktop có thể render/export lại bằng renderer tương thích.
+Không upload JPEG mới sau mỗi slider movement.
 
-Không cần upload một bản JPEG mới sau mỗi lần kéo slider.
-
-Chỉ upload rendered copy khi policy yêu cầu.
+Chỉ render/upload bản mới khi Save hoặc policy yêu cầu.
 
 ---
 
-# PHẦN H — PREVIEW PERFORMANCE
+# 20. Preview performance
 
-## 33. Không render full resolution khi kéo slider
-
-Đây là yêu cầu quan trọng để Editor mượt.
-
-Nên có ba cấp:
+Ba cấp render:
 
 ```text
-Thumbnail Preview
-~256–512 px
-→ preset gallery
-
-Interactive Preview
-~1080–1600 px
-→ slider/crop realtime
-
-Full Resolution
-original resolution
-→ Save/Export
+Thumbnail ~256–512 px
+Interactive ~1080–1600 px
+Full Resolution → Save/Export
 ```
 
-## 34. Render cancellation
+Mỗi render có request ID.
 
-Mỗi preview render có `requestId`.
+Stale render phải cancel hoặc bỏ kết quả.
 
-Ví dụ user kéo Exposure liên tục:
-
-```text
-render #100
-render #101
-render #102
-render #103
-```
-
-Khi #103 được yêu cầu, #100–#102 có thể cancel hoặc kết quả bị bỏ.
-
-Không để render cũ overwrite preview mới.
-
-## 35. Preset thumbnail cache
-
-Không render toàn bộ preset mỗi lần mở panel.
-
-Cache key nên gồm:
+Preset thumbnail cache key:
 
 ```text
 assetId
@@ -856,24 +1034,16 @@ presetVersion
 intensityBucket
 ```
 
-Cache invalid khi source/recipe thay đổi.
-
 ---
 
-# PHẦN I — DESKTOP PHOTO EDITOR
+# 21. Desktop Photo Editor
 
-## 36. Dùng chung recipe
-
-Desktop không tạo format edit riêng.
-
-Cả hai phải dùng:
+Mobile và Desktop dùng chung:
 
 ```text
 @photox/image-editor
 EditRecipe
 ```
-
-Desktop UI có thể khác Mobile nhưng engine giống nhau.
 
 ```text
 Mobile Editor UI ─┐
@@ -881,43 +1051,13 @@ Mobile Editor UI ─┐
 Desktop Editor UI ┘
 ```
 
-## 37. Desktop renderer
-
-Desktop có thể dùng:
-
-- native image engine
-- WebGL/WebGPU
-- WASM
-- IMG.LY desktop/web nếu phù hợp
-
-Nhưng phải implement `RendererAdapter`.
-
-Business SDK không import Electron/React.
+Desktop renderer implement `RendererAdapter` bằng WebGL/WebGPU/WASM/native/engine phù hợp.
 
 ---
 
-# PHẦN J — UPDATE SDK / CI-CD
+# 22. CI/CD
 
-## 38. Update check
-
-`@photox/update-core` chỉ chịu trách nhiệm:
-
-```text
-fetch manifest
-compare version
-select artifact
-verify metadata/integrity
-```
-
-Không để update-core tự quyết định native install.
-
-Desktop installer/update adapter riêng.
-
-iOS phải tuân theo cơ chế phân phối của Apple/TestFlight/App Store; không thiết kế cơ chế tự thay binary iOS ngoài hệ thống được phép.
-
-## 39. CI
-
-Trước khi build app, CI phải chạy:
+CI trước app build:
 
 ```bash
 npm --workspace @photox/contracts run typecheck
@@ -927,123 +1067,130 @@ npm --workspace @photox/media run typecheck
 npm --workspace @photox/image-editor run build
 npm --workspace @photox/image-editor test
 npm --workspace @photox/image-editor run typecheck
+npm --workspace @photox/provider-local run typecheck
+npm --workspace @photox/provider-google-drive run typecheck
+npm --workspace @photox/provider-telegram run typecheck
 npm --workspace @photox/desktop-sdk run typecheck
 npm --workspace @photox/mobile-sdk run typecheck
 ```
 
-Sau đó mới build Mobile/Desktop.
+Update core chỉ check manifest/version/artifact/integrity.
+
+Native installer thuộc platform adapter riêng.
+
+iOS update phải qua cơ chế được Apple cho phép.
 
 ---
 
-# PHẦN K — THỨ TỰ TÍCH HỢP KHUYẾN NGHỊ
+# 23. Thứ tự tích hợp khuyến nghị
 
-## 40. Phase 1 — Không thay đổi behavior
+## Phase 1 — SDK only
 
-- đưa packages vào workspace
-- build/typecheck SDK
-- tạo adapters
-- chưa chuyển UI
-- test SDK riêng
+- merge packages vào integration branch
+- build/typecheck
+- tạo persistent adapters
+- chưa đổi UI
 
-## 41. Phase 2 — Mobile media actions
-
-Gắn lần lượt:
+## Phase 2 — Mobile media actions
 
 1. Download
 2. Delete local
 3. Delete remote
-4. Edit button → Photo Editor screen
+4. Edit button
 
-Không gắn cả ba trong một commit lớn.
+## Phase 3 — Photo Editor
 
-## 42. Phase 3 — Photo Editor cơ bản
-
-Gắn:
-
-1. canvas
-2. session
+1. Canvas
+2. Session
 3. Before/After
 4. Undo/Redo
 5. Presets
-6. Adjust Light/Color
+6. Adjust
 7. Crop
 8. Save Copy
+9. HSL/Tone Curve
+10. Retouch/AI
 
-Sau khi ổn mới thêm HSL/Tone Curve/Retouch/AI.
+## Phase 4 — Desktop storage
 
-## 43. Phase 4 — Desktop storage
+1. Google Drive legacy adapter
+2. Local provider
+3. Telegram config repositories
+4. Telegram SecretStore
+5. Telegram Bot API adapter
+6. register Telegram provider
+7. Telegram stats UI
+8. StoragePolicyEngine
+9. ReplicationService
 
-1. wrap Google Drive legacy
-2. register provider
-3. local provider
-4. migrate replica identity
-5. chuyển replica policy sang StoragePolicyEngine
-6. chuyển upload/download sang ReplicationService
-
-## 44. Phase 5 — Edit persistence/sync
+## Phase 5 — Edit persistence
 
 1. EditRepository Mobile
 2. EditRepository Desktop
-3. draft persistence
-4. recipe sync
-5. edited asset relation
-6. preview cache
-
-## 45. Phase 6 — Smart/AI editing
-
-Sau khi editor thường ổn mới thêm:
-
-- Smart Preset
-- Auto Enhance model
-- Heal
-- Remove Object
-- Face detection/retouch
-- denoise
-- deblur
-- super resolution
-- background/sky tools
-
-AI luôn đi qua adapter/plugin contract để có thể thay model sau này.
+3. Draft
+4. Recipe sync
+5. preview cache
 
 ---
 
-# PHẦN L — CHECKLIST TRƯỚC KHI MERGE MAIN
+# 24. Checklist Telegram trước khi gắn vào main
+
+- [ ] Bot token không lưu plaintext config
+- [ ] Add nhiều Telegram accounts
+- [ ] Edit account
+- [ ] Enable/disable account
+- [ ] Test connection
+- [ ] Invalid token không crash desktop
+- [ ] Invalid chat ID báo lỗi rõ
+- [ ] Cloud upload limit được check trước transfer
+- [ ] Local Bot API mode hỗ trợ custom URL
+- [ ] File lớn dùng streaming/local adapter, không đọc 2GB vào RAM
+- [ ] Upload trả về file_id/messageId
+- [ ] Replica lưu providerId + accountId + fileId
+- [ ] Media repository persist sau upload thành công
+- [ ] Stats count đúng ảnh/video/other
+- [ ] Stats tổng bytes đúng
+- [ ] Restart desktop vẫn đọc lại account/stats
+- [ ] Telegram account lỗi không làm block Google Drive account khác
+- [ ] Storage policy fallback provider khác khi Telegram fail
+- [ ] Không dùng Telegram làm bản backup duy nhất
+
+---
+
+# 25. Checklist Mobile/Desktop chung
 
 Mobile:
 
-- [ ] app cũ vẫn mở được
 - [ ] pairing cũ không mất
 - [ ] sync cũ không bị phá
 - [ ] download hoạt động
-- [ ] delete permission đúng iOS/Android
-- [ ] edit original không bị overwrite
-- [ ] undo/redo ổn
-- [ ] Save Draft hoạt động
-- [ ] Save Copy hoạt động
-- [ ] app restart vẫn re-edit được
-- [ ] memory không tăng vô hạn khi edit ảnh lớn
-- [ ] slider preview không block UI thread
+- [ ] delete permissions đúng
+- [ ] original không overwrite
+- [ ] undo/redo
+- [ ] Save Draft
+- [ ] Save Copy
+- [ ] re-edit sau restart
+- [ ] preview không block UI thread
 
 Desktop:
 
-- [ ] Google OAuth cũ vẫn hoạt động
-- [ ] Drive account cũ vẫn đọc được
-- [ ] media index cũ vẫn đọc được
-- [ ] replica legacy được normalize
+- [ ] Google OAuth cũ hoạt động
+- [ ] Drive accounts cũ đọc được
+- [ ] media index cũ đọc được
+- [ ] replica legacy normalize
 - [ ] local provider hoạt động
-- [ ] target 2 replicas hoạt động
-- [ ] account hết dung lượng được bỏ qua
-- [ ] download fallback qua replica khác
-- [ ] remote webViewLink vẫn mở được
+- [ ] Telegram provider hoạt động độc lập
+- [ ] target replicas đạt policy
+- [ ] fallback replica download
 
 SDK:
 
 - [ ] contracts không phụ thuộc Expo/Electron
-- [ ] image-editor không phụ thuộc UI framework
 - [ ] provider không chứa UI
+- [ ] token không leak qua provider metadata/API
+- [ ] image-editor không phụ thuộc UI framework
 - [ ] recipe có version
-- [ ] migration strategy tồn tại khi recipe version đổi
-- [ ] test pass
+- [ ] tests pass
 - [ ] typecheck pass
 - [ ] CI pass
 
@@ -1061,22 +1208,22 @@ Cài iPhone thật:
 ./scripts/install-ios-device.sh
 ```
 
-Chỉ merge về `main` sau khi checklist quan trọng đã pass.
-
 ---
 
-# 46. Nguyên tắc kiến trúc cần giữ lâu dài
+# 26. Nguyên tắc kiến trúc lâu dài
 
 ```text
 UI chỉ hiển thị và phát command.
 SDK giữ business logic.
 Adapter kết nối platform/library/provider.
+Provider credential phải tách khỏi config thường.
 Original asset luôn immutable.
 EditRecipe là nguồn sự thật của chỉnh sửa.
-StorageReplica luôn định danh bằng providerId + accountId + remoteFileId.
+StorageReplica luôn có providerId + accountId + remoteFileId.
 Mobile và Desktop dùng chung contracts.
 Provider mới không được yêu cầu rewrite storage core.
-Renderer mới không được yêu cầu rewrite Photo Editor UI/business recipe.
+Renderer mới không được yêu cầu rewrite Photo Editor recipe/business logic.
+Một provider lỗi không được kéo sập toàn bộ replication pipeline.
 ```
 
-Nếu giữ các nguyên tắc này, PhotoX có thể mở rộng storage provider, renderer, AI model và platform mà không phải liên tục viết lại app hiện tại.
+Giữ các nguyên tắc này để PhotoX có thể mở rộng Google Drive, Telegram Bot, OneDrive, S3, WebDAV, NAS, renderer và AI model mà không phải viết lại app hiện tại.
