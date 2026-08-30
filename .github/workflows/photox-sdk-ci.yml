@@ -7,6 +7,7 @@ on:
       - 'packages/storage/**'
       - 'packages/sync/**'
       - 'packages/media/**'
+      - 'packages/media-cloud/**'
       - 'packages/image-editor/**'
       - 'packages/transport/**'
       - 'packages/update-core/**'
@@ -37,6 +38,7 @@ jobs:
           npm --workspace @photox/storage run build
           npm --workspace @photox/sync run build
           npm --workspace @photox/media run build
+          npm --workspace @photox/media-cloud run build
           npm --workspace @photox/image-editor run build
           npm --workspace @photox/transport run build
           npm --workspace @photox/update-core run build
@@ -57,6 +59,7 @@ jobs:
           npm --workspace @photox/storage run typecheck
           npm --workspace @photox/sync run typecheck
           npm --workspace @photox/media run typecheck
+          npm --workspace @photox/media-cloud run typecheck
           npm --workspace @photox/image-editor run typecheck
           npm --workspace @photox/transport run typecheck
           npm --workspace @photox/update-core run typecheck
