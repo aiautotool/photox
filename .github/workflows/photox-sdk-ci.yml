@@ -1,0 +1,59 @@
+name: PhotoX SDK CI
+on:
+  push:
+    branches: [main, photox-sdk-v2]
+    paths:
+      - 'packages/contracts/**'
+      - 'packages/storage/**'
+      - 'packages/sync/**'
+      - 'packages/media/**'
+      - 'packages/transport/**'
+      - 'packages/update-core/**'
+      - 'packages/provider-local/**'
+      - 'packages/provider-google-drive/**'
+      - 'packages/desktop-sdk/**'
+      - 'packages/mobile-sdk/**'
+      - '.github/workflows/photox-sdk-ci.yml'
+  pull_request:
+    paths:
+      - 'packages/**'
+      - '.github/workflows/photox-sdk-ci.yml'
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Build contracts
+        run: npm --workspace @photox/contracts run build
+      - name: Build engines
+        run: |
+          npm --workspace @photox/storage run build
+          npm --workspace @photox/sync run build
+          npm --workspace @photox/media run build
+          npm --workspace @photox/transport run build
+          npm --workspace @photox/update-core run build
+      - name: Build providers
+        run: |
+          npm --workspace @photox/provider-local run build
+          npm --workspace @photox/provider-google-drive run build
+      - name: Build platform SDKs
+        run: |
+          npm --workspace @photox/desktop-sdk run build
+          npm --workspace @photox/mobile-sdk run build
+      - name: Typecheck SDK
+        run: |
+          npm --workspace @photox/contracts run typecheck
+          npm --workspace @photox/storage run typecheck
+          npm --workspace @photox/sync run typecheck
+          npm --workspace @photox/media run typecheck
+          npm --workspace @photox/transport run typecheck
+          npm --workspace @photox/update-core run typecheck
+          npm --workspace @photox/provider-local run typecheck
+          npm --workspace @photox/provider-google-drive run typecheck
+          npm --workspace @photox/desktop-sdk run typecheck
+          npm --workspace @photox/mobile-sdk run typecheck

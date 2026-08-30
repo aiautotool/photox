@@ -1,0 +1,8 @@
+import type { StorageAccount, StorageDownloadInput, StorageDownloadResult, StorageObject, StorageProvider, StorageProviderDescriptor, StorageUploadInput } from '@photox/contracts';
+export interface GoogleDriveAdapter { listAccounts():Promise<StorageAccount[]>; upload(input:StorageUploadInput):Promise<StorageObject>; download(input:StorageDownloadInput):Promise<StorageDownloadResult>; connectAccount?():Promise<StorageAccount>; removeAccount?(accountId:string):Promise<void>; delete?(accountId:string,remoteFileId:string):Promise<void>; healthCheck?(accountId:string):Promise<boolean>; }
+export class GoogleDriveProvider implements StorageProvider {
+  readonly id='google-drive'; readonly name='Google Drive';
+  constructor(private readonly adapter:GoogleDriveAdapter){}
+  descriptor():StorageProviderDescriptor{return{id:this.id,name:this.name,capabilities:['UPLOAD','DOWNLOAD','DELETE','QUOTA','WEB_LINK','RESUMABLE_UPLOAD']};}
+  listAccounts(){return this.adapter.listAccounts();} upload(input:StorageUploadInput){return this.adapter.upload(input);} download(input:StorageDownloadInput){return this.adapter.download(input);} connectAccount(){if(!this.adapter.connectAccount)throw new Error('connectAccount not implemented'); return this.adapter.connectAccount();} removeAccount(accountId:string){if(!this.adapter.removeAccount)throw new Error('removeAccount not implemented'); return this.adapter.removeAccount(accountId);} delete(accountId:string,remoteFileId:string){if(!this.adapter.delete)throw new Error('delete not implemented'); return this.adapter.delete(accountId,remoteFileId);} healthCheck(accountId:string){return this.adapter.healthCheck?this.adapter.healthCheck(accountId):Promise.resolve(true);}
+}
