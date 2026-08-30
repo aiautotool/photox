@@ -1,0 +1,40 @@
+name: SDK CI
+
+on:
+  push:
+    branches: [main, sdk-foundation]
+    paths:
+      - 'packages/sdk-contracts/**'
+      - 'packages/desktop-sdk/**'
+      - 'packages/mobile-sdk/**'
+      - '.github/workflows/sdk-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/sdk-contracts/**'
+      - 'packages/desktop-sdk/**'
+      - 'packages/mobile-sdk/**'
+      - '.github/workflows/sdk-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install
+      - name: Build shared contracts
+        run: npm --workspace @photosync/sdk-contracts run build
+      - name: Build desktop SDK
+        run: npm --workspace @photosync/desktop-sdk run build
+      - name: Build mobile SDK
+        run: npm --workspace @photosync/mobile-sdk run build
+      - name: Typecheck SDKs
+        run: |
+          npm --workspace @photosync/sdk-contracts run typecheck
+          npm --workspace @photosync/desktop-sdk run typecheck
+          npm --workspace @photosync/mobile-sdk run typecheck
