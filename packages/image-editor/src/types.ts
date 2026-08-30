@@ -23,9 +23,10 @@ export interface TextStyle {
 }
 
 export type AdjustmentName =
-  | 'exposure' | 'brightness' | 'contrast' | 'highlights' | 'shadows'
-  | 'saturation' | 'vibrance' | 'temperature' | 'tint' | 'clarity'
-  | 'sharpness' | 'vignette' | 'grain' | 'fade';
+  | 'exposure' | 'brightness' | 'contrast' | 'highlights' | 'shadows' | 'whites' | 'blacks'
+  | 'saturation' | 'vibrance' | 'temperature' | 'tint'
+  | 'clarity' | 'sharpness' | 'texture' | 'dehaze' | 'noiseReduction' | 'colorNoiseReduction'
+  | 'vignette' | 'grain' | 'fade' | 'bloom' | 'glow';
 
 export type EditOperation =
   | { id: string; type: 'crop'; rect: CropRect }
@@ -96,3 +97,7 @@ export interface EditPlugin {
   validate(operation: EditOperation): void;
   normalize?(operation: EditOperation): EditOperation;
 }
+
+export type EditRecipe = ImageEditRecipe;
+export type EditSource = ImageSource;
+export type RendererAdapter = ImageRendererAdapter;
