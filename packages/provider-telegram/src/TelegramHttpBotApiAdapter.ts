@@ -57,10 +57,14 @@ export class TelegramHttpBotApiAdapter implements TelegramBotApiAdapter {
     const bytes = input.data ?? (input.localUri && this.loadFile ? await this.loadFile(input.localUri) : undefined);
     if (!bytes) throw new Error('TelegramHttpBotApiAdapter requires input.data or a loadFile adapter for localUri');
 
+    // Copy into a plain ArrayBuffer so DOM Blob typing never receives SharedArrayBuffer/ArrayBufferLike.
+    const blobBytes = new Uint8Array(bytes.byteLength);
+    blobBytes.set(bytes);
+
     const body = new FormData();
     body.set('chat_id', account.chatId);
     body.set('caption', `PhotoX:${input.key}`);
-    body.set('document', new Blob([bytes], { type: input.mimeType }), input.filename);
+    body.set('document', new Blob([blobBytes.buffer], { type: input.mimeType }), input.filename);
 
     const message = await this.call<TelegramMessageResult>(account, 'sendDocument', { method: 'POST', body });
     const document = message.document;
