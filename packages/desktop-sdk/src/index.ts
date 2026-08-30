@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import { pipeline } from 'node:stream/promises';
+import fs from 'node:fs/promises';
 import type { StorageAccount, StorageProviderDescriptor, StorageReplica, UpdateArtifact, UpdateManifest } from '@photosync/sdk-contracts';
 import { compareVersions } from '@photosync/sdk-contracts';
 
@@ -44,7 +43,7 @@ export class StorageProviderRegistry {
   unregister(providerId: string): void { this.providers.delete(providerId); }
   get(providerId: string): StorageProvider | undefined { return this.providers.get(providerId); }
   list(): StorageProvider[] { return [...this.providers.values()]; }
-  descriptors(): StorageProviderDescriptor[] { return this.list().map(p => p.descriptor()); }
+  descriptors(): StorageProviderDescriptor[] { return this.list().map(provider => provider.descriptor()); }
 }
 
 export type ReplicaPolicy = {
@@ -54,12 +53,17 @@ export type ReplicaPolicy = {
 };
 
 export class ReplicaPlanner {
-  constructor(private readonly registry: StorageProviderRegistry, private readonly policy: ReplicaPolicy = { targetReplicas: 2 }) {}
+  constructor(
+    private readonly registry: StorageProviderRegistry,
+    private readonly policy: ReplicaPolicy = { targetReplicas: 2 },
+  ) {}
 
   async candidates(fileSize: number, existing: StorageReplica[] = []): Promise<Array<{ provider: StorageProvider; account: StorageAccount }>> {
-    const usedAccounts = new Set(existing.filter(r => r.state === 'VERIFIED' || r.state === 'UPLOADED').map(r => `${r.providerId}:${r.accountId}`));
-    const usedProviders = new Set(existing.filter(r => r.state === 'VERIFIED' || r.state === 'UPLOADED').map(r => r.providerId));
+    const verified = existing.filter(replica => replica.state === 'VERIFIED' || replica.state === 'UPLOADED');
+    const usedAccounts = new Set(verified.map(replica => `${replica.providerId}:${replica.accountId}`));
+    const usedProviders = new Set(verified.map(replica => replica.providerId));
     const result: Array<{ provider: StorageProvider; account: StorageAccount }> = [];
+
     for (const provider of this.registry.list()) {
       if (this.policy.distinctProviders && usedProviders.has(provider.descriptor().id)) continue;
       for (const account of await provider.listAccounts()) {
@@ -70,42 +74,54 @@ export class ReplicaPlanner {
         result.push({ provider, account });
       }
     }
+
     return result.sort((a, b) => (b.account.freeBytes ?? 0) - (a.account.freeBytes ?? 0));
+  }
+
+  missingReplicas(existing: StorageReplica[] = []): number {
+    const count = existing.filter(replica => replica.state === 'VERIFIED' || replica.state === 'UPLOADED').length;
+    return Math.max(0, this.policy.targetReplicas - count);
   }
 }
 
-export type UpdateCheck = { available: boolean; manifest: UpdateManifest; artifact?: UpdateArtifact; required: boolean };
+export type UpdateCheck = {
+  available: boolean;
+  manifest: UpdateManifest;
+  artifact?: UpdateArtifact;
+  required: boolean;
+};
 
 export class DesktopUpdateClient {
   constructor(private readonly manifestUrl: string, private readonly fetcher: typeof fetch = fetch) {}
 
-  async check(currentVersion: string, platform: 'desktop' = 'desktop', arch?: 'x64' | 'arm64' | 'universal'): Promise<UpdateCheck> {
+  async check(
+    currentVersion: string,
+    platform: 'desktop' = 'desktop',
+    arch?: 'x64' | 'arm64' | 'universal',
+  ): Promise<UpdateCheck> {
     const response = await this.fetcher(this.manifestUrl, { headers: { 'cache-control': 'no-cache' } });
     if (!response.ok) throw new Error(`Update manifest HTTP ${response.status}`);
     const manifest = await response.json() as UpdateManifest;
     if (manifest.schemaVersion !== 1) throw new Error(`Unsupported update manifest schema: ${manifest.schemaVersion}`);
     const available = compareVersions(manifest.version, currentVersion) > 0;
-    const required = Boolean(manifest.minimumSupportedVersion && compareVersions(currentVersion, manifest.minimumSupportedVersion) < 0);
-    const artifact = manifest.artifacts.find(a => a.platform === platform && (!arch || !a.arch || a.arch === arch || a.arch === 'universal'));
+    const required = Boolean(
+      manifest.minimumSupportedVersion && compareVersions(currentVersion, manifest.minimumSupportedVersion) < 0,
+    );
+    const artifact = manifest.artifacts.find(item =>
+      item.platform === platform && (!arch || !item.arch || item.arch === arch || item.arch === 'universal'),
+    );
     return { available, required, manifest, artifact };
   }
 
   async downloadAndVerify(artifact: UpdateArtifact, destination: string): Promise<string> {
     const response = await this.fetcher(artifact.url);
-    if (!response.ok || !response.body) throw new Error(`Update download HTTP ${response.status}`);
-    const writer = fs.createWriteStream(destination);
-    await pipeline(response.body as never, writer);
-    const hash = await new Promise<string>((resolve, reject) => {
-      const h = crypto.createHash('sha256');
-      const stream = fs.createReadStream(destination);
-      stream.on('data', chunk => h.update(chunk));
-      stream.on('error', reject);
-      stream.on('end', () => resolve(h.digest('hex')));
-    });
+    if (!response.ok) throw new Error(`Update download HTTP ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const hash = crypto.createHash('sha256').update(bytes).digest('hex');
     if (hash.toLowerCase() !== artifact.sha256.toLowerCase()) {
-      await fs.promises.rm(destination, { force: true });
       throw new Error('Downloaded update failed SHA-256 verification');
     }
+    await fs.writeFile(destination, bytes);
     return destination;
   }
 }
