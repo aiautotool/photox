@@ -25,7 +25,7 @@ export class ReplicaPlanner {
     if (requirement.requireDistinctAccounts && accountKeys.size < Math.min(required, verified.length || required)) {
       reasons.push('Verified replicas are not distributed across enough distinct accounts');
     }
-    if (verified.some((replica) => replica.availability === 'offline' || replica.state === 'ERROR' || replica.state === 'BLOCKED')) {
+    if (item.replicas.some((replica) => replica.availability === 'offline' || replica.state === 'ERROR' || replica.state === 'BLOCKED')) {
       reasons.push('One or more replicas are degraded or unavailable');
     }
 
