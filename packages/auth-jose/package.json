@@ -1,0 +1,1 @@
+{"name":"@photox/auth-jose","version":"0.1.0","private":true,"type":"module","main":"dist/index.js","types":"dist/index.d.ts","scripts":{"build":"tsc -p tsconfig.json","typecheck":"tsc --noEmit -p tsconfig.json"},"dependencies":{"@photox/media-api":"*","jose":"^6.0.0"},"devDependencies":{"typescript":"^5.9.3"}}
