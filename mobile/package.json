@@ -12,6 +12,7 @@
   "dependencies": {
     "@imgly/editor-react-native": "^1.81.1",
     "@photosync/core": "*",
+    "@photox/image-editor": "*",
     "exifr": "^7.1.3",
     "expo": "^57.0.0",
     "expo-background-task": "~57.0.14",
