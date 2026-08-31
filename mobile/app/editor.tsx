@@ -1,6 +1,8 @@
+import { useEffect, useState } from 'react';
 import { Alert } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as MediaLibrary from 'expo-media-library';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { EditorSettingsModel, SourceType } from '@imgly/editor-react-native';
 import { PhotoEditorScreen, type PhotoEditorAsset } from '../src/editor/PhotoEditorScreen';
 import { openNativePhotoEditor } from '../src/editor/EditorNavigationBridge';
@@ -16,7 +18,20 @@ export default function PhotoEditorRoute(){
   const id=Array.isArray(params.id)?params.id[0]:params.id;
   const filename=Array.isArray(params.filename)?params.filename[0]:params.filename;
   const mimeType=Array.isArray(params.mimeType)?params.mimeType[0]:params.mimeType;
-  const asset:PhotoEditorAsset|null=uri&&id?{id,uri,filename:filename||'photo.jpg',width:numberParam(params.width),height:numberParam(params.height),mimeType}:null;
+  const [measured,setMeasured]=useState<{width?:number;height?:number}>({});
+
+  useEffect(()=>{
+    let cancelled=false;
+    if(!uri)return;
+    const width=numberParam(params.width); const height=numberParam(params.height);
+    if(width&&height){setMeasured({width,height});return;}
+    void ImageManipulator.manipulateAsync(uri,[],{compress:1,format:ImageManipulator.SaveFormat.JPEG})
+      .then(result=>{if(!cancelled)setMeasured({width:result.width,height:result.height});})
+      .catch(()=>{});
+    return()=>{cancelled=true;};
+  },[uri,params.width,params.height]);
+
+  const asset:PhotoEditorAsset|null=uri&&id?{id,uri,filename:filename||'photo.jpg',width:numberParam(params.width)||measured.width,height:numberParam(params.height)||measured.height,mimeType}:null;
 
   async function saveRecipe(recipe:ImageEditRecipe, renderedUri?:string){
     if(!asset)return;
