@@ -14,6 +14,7 @@ on:
       - 'packages/media-delivery-node/**'
       - 'packages/video-media/**'
       - 'packages/video-ffmpeg/**'
+      - 'packages/persistence-sqlite/**'
       - 'packages/integrity/**'
       - 'packages/jobs/**'
       - 'packages/reconciliation/**'
