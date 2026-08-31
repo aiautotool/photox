@@ -1,0 +1,165 @@
+import { useMemo, useRef, useState } from 'react';
+import { Alert, Dimensions, Modal, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image } from 'expo-image';
+import { SymbolView } from 'expo-symbols';
+import { EditSession, type AdjustmentName, type CropAspect, type EditOperation, type ImageEditRecipe } from '@photox/image-editor';
+
+const PURPLE = '#8B5CF6';
+const BG = '#090A0C';
+const PANEL = '#111216';
+const MUTED = '#8A8D95';
+
+type Tool = 'presets'|'adjust'|'crop'|'retouch'|'filters'|'effects'|'draw'|'text';
+type AdjustTab = 'light'|'color'|'detail'|'effects'|'geometry';
+type PresetCategory = 'recommended'|'portrait'|'landscape'|'food'|'night'|'film'|'bw';
+
+export interface PhotoEditorAsset {
+  id: string;
+  uri: string;
+  filename: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+}
+
+export interface PhotoEditorScreenProps {
+  visible: boolean;
+  asset: PhotoEditorAsset | null;
+  onClose(): void;
+  onSave(recipe: ImageEditRecipe): Promise<void> | void;
+  onOpenAdvanced?(recipe: ImageEditRecipe): Promise<void> | void;
+}
+
+const PRESETS: Record<PresetCategory, {id:string;label:string;ops:Partial<Record<AdjustmentName,number>>}[]> = {
+  recommended: [
+    { id:'auto', label:'Auto Enhance', ops:{ exposure:.18, contrast:10, highlights:-12, shadows:18, vibrance:18, saturation:5 } },
+    { id:'clean', label:'Clean', ops:{ exposure:.08, contrast:6, whites:8, blacks:-5, vibrance:8 } },
+    { id:'vivid', label:'Vivid', ops:{ contrast:16, vibrance:28, saturation:10, clarity:8 } },
+    { id:'cinematic', label:'Cinematic', ops:{ contrast:18, highlights:-25, shadows:28, blacks:-12, saturation:-6, dehaze:8 } },
+    { id:'golden', label:'Golden Hour', ops:{ temperature:20, tint:3, vibrance:16, highlights:-10 } },
+    { id:'film01', label:'Film 01', ops:{ contrast:8, highlights:-18, shadows:12, fade:12, grain:14, saturation:-8 } },
+  ],
+  portrait:[{id:'soft',label:'Soft Portrait',ops:{exposure:.12,highlights:-12,shadows:12,texture:-8,clarity:-6,vibrance:8}}],
+  landscape:[{id:'land',label:'Landscape+',ops:{contrast:14,clarity:12,dehaze:14,vibrance:20,highlights:-18}}],
+  food:[{id:'food',label:'Fresh',ops:{temperature:8,vibrance:22,saturation:10,contrast:8}}],
+  night:[{id:'night',label:'Night',ops:{exposure:.22,shadows:30,highlights:-28,noiseReduction:24,dehaze:10}}],
+  film:[{id:'film2',label:'Matte Film',ops:{contrast:-4,fade:18,grain:20,saturation:-12,temperature:5}}],
+  bw:[{id:'mono',label:'B&W',ops:{saturation:-100,contrast:20,clarity:12,grain:10}}],
+};
+
+const ADJUSTMENTS: Record<AdjustTab, {name:AdjustmentName;label:string;min:number;max:number;step:number}[]> = {
+  light:[
+    {name:'exposure',label:'Exposure',min:-2,max:2,step:.05}, {name:'contrast',label:'Contrast',min:-100,max:100,step:1},
+    {name:'highlights',label:'Highlights',min:-100,max:100,step:1}, {name:'shadows',label:'Shadows',min:-100,max:100,step:1},
+    {name:'whites',label:'Whites',min:-100,max:100,step:1}, {name:'blacks',label:'Blacks',min:-100,max:100,step:1},
+  ],
+  color:[
+    {name:'temperature',label:'Temp',min:-100,max:100,step:1}, {name:'tint',label:'Tint',min:-100,max:100,step:1},
+    {name:'vibrance',label:'Vibrance',min:-100,max:100,step:1}, {name:'saturation',label:'Saturation',min:-100,max:100,step:1},
+  ],
+  detail:[
+    {name:'sharpness',label:'Sharpness',min:0,max:100,step:1}, {name:'clarity',label:'Clarity',min:-100,max:100,step:1},
+    {name:'texture',label:'Texture',min:-100,max:100,step:1}, {name:'dehaze',label:'Dehaze',min:-100,max:100,step:1},
+    {name:'noiseReduction',label:'Noise Reduction',min:0,max:100,step:1}, {name:'colorNoiseReduction',label:'Color Noise Reduction',min:0,max:100,step:1},
+  ],
+  effects:[
+    {name:'vignette',label:'Vignette',min:-100,max:100,step:1}, {name:'grain',label:'Grain',min:0,max:100,step:1},
+    {name:'fade',label:'Fade',min:0,max:100,step:1}, {name:'glow',label:'Glow',min:0,max:100,step:1},
+  ],
+  geometry:[],
+};
+
+const TOOL_ICONS: Record<Tool,string> = { presets:'wand.and.stars', adjust:'slider.horizontal.3', crop:'crop', retouch:'bandage', filters:'camera.filters', effects:'sparkles', draw:'pencil.tip', text:'textformat' };
+
+function AdjustmentSlider({ label, value, min, max, step, onChange }:{label:string;value:number;min:number;max:number;step:number;onChange(v:number):void}) {
+  const width = Math.min(Dimensions.get('window').width - 190, 260);
+  const ratio = (value-min)/(max-min);
+  const setFromX = (x:number) => { const raw=min + Math.max(0,Math.min(1,x/width))*(max-min); onChange(Math.round(raw/step)*step); };
+  return <View style={s.sliderRow}>
+    <Text style={s.sliderLabel}>{label}</Text>
+    <View style={[s.track,{width}]} onTouchStart={e=>setFromX(e.nativeEvent.locationX)} onTouchMove={e=>setFromX(e.nativeEvent.locationX)}>
+      <View style={[s.trackFill,{width:Math.max(0,ratio)*width}]} />
+      <View style={[s.thumb,{left:Math.max(0,Math.min(width-12,ratio*width-6))}]} />
+    </View>
+    <Text style={s.sliderValue}>{value>0?'+':''}{Number.isInteger(value)?value:value.toFixed(2)}</Text>
+  </View>;
+}
+
+export function PhotoEditorScreen({visible,asset,onClose,onSave,onOpenAdvanced}:PhotoEditorScreenProps){
+  const sessionRef=useRef<EditSession|null>(null);
+  const [revision,setRevision]=useState(0);
+  const [tool,setTool]=useState<Tool>('presets');
+  const [tab,setTab]=useState<AdjustTab>('light');
+  const [category,setCategory]=useState<PresetCategory>('recommended');
+  const [presetId,setPresetId]=useState('auto');
+  const [presetIntensity,setPresetIntensity]=useState(72);
+  const [compare,setCompare]=useState(false);
+  const [cropAspect,setCropAspect]=useState<CropAspect>('free');
+  const [historyVisible,setHistoryVisible]=useState(false);
+  const [exportVisible,setExportVisible]=useState(false);
+
+  if(asset && (!sessionRef.current || sessionRef.current.recipe().source.uri!==asset.uri)) sessionRef.current=new EditSession({uri:asset.uri,width:asset.width,height:asset.height,mimeType:asset.mimeType});
+  const session=sessionRef.current;
+  const operations=useMemo(()=>session?.list()??[],[session,revision]);
+  const adjustmentValue=(name:AdjustmentName)=> (operations.find(op=>op.type==='adjust'&&op.name===name) as Extract<EditOperation,{type:'adjust'}>|undefined)?.value??0;
+  const bump=()=>setRevision(v=>v+1);
+
+  function setAdjustment(name:AdjustmentName,value:number){ session?.apply({id:`adjust:${name}`,type:'adjust',name,value}); bump(); }
+  function applyPreset(id:string){
+    setPresetId(id); const p=PRESETS[category].find(x=>x.id===id); if(!p||!session)return;
+    const factor=presetIntensity/100;
+    Object.entries(p.ops).forEach(([name,value])=>session.apply({id:`preset:${id}:${name}`,type:'adjust',name:name as AdjustmentName,value:(value??0)*factor})); bump();
+  }
+  function reset(){session?.reset();setPresetId('');bump();}
+  function undo(){session?.undo();bump();}
+  function redo(){session?.redo();bump();}
+  function close(){ if(!session?.length){onClose();return;} Alert.alert('Thoát chỉnh sửa?','Bạn có thay đổi chưa lưu.',[
+    {text:'Hủy',style:'cancel'},{text:'Bỏ thay đổi',style:'destructive',onPress:onClose},{text:'Lưu',onPress:()=>void saveNow()}
+  ]); }
+  async function saveNow(){if(!session||!asset)return; await onSave(session.recipe({assetId:asset.id,filename:asset.filename}));setExportVisible(false);}
+  function selectCrop(aspect:CropAspect){setCropAspect(aspect);session?.apply({id:'crop',type:'crop',rect:{x:0,y:0,width:1,height:1,aspect}});bump();}
+
+  if(!asset||!session)return null;
+  return <Modal visible={visible} animationType="slide" onRequestClose={close}>
+    <SafeAreaView style={s.root}>
+      <View style={s.header}><Pressable onPress={close}><Text style={s.x}>×</Text></Pressable><Pressable onPress={undo}><Text style={[s.undo,!session.canUndo&&s.disabled]}>↶</Text></Pressable><View style={s.headerTitle}><Text style={s.title}>Edit⌄</Text></View><Pressable style={s.compareButton} onPress={()=>setCompare(v=>!v)}><Text style={s.compareText}>{compare?'Edited':'Compare'}</Text></Pressable><Pressable style={s.saveButton} onPress={()=>setExportVisible(true)}><Text style={s.saveText}>Save</Text></Pressable></View>
+
+      <View style={s.previewWrap}><Image source={{uri:asset.uri}} style={s.preview} contentFit="contain" /><View style={s.previewBadge}><Text style={s.badgeText}>{compare?'Original':'Edited'}  •  <Text style={s.purple}>{operations.length} adjustments</Text></Text></View><Pressable style={s.beforeButton} onPressIn={()=>setCompare(true)} onPressOut={()=>setCompare(false)}><Text style={s.beforeText}>◐</Text></Pressable></View>
+
+      {tool==='presets' && <View style={s.panel}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.categoryRow}>{(['recommended','portrait','landscape','food','night','film','bw'] as PresetCategory[]).map(c=><Pressable key={c} onPress={()=>setCategory(c)} style={[s.category,c===category&&s.categoryActive]}><Text style={[s.categoryText,c===category&&s.activeText]}>{c==='recommended'?'Recommended':c==='bw'?'B&W':c[0].toUpperCase()+c.slice(1)}</Text></Pressable>)}</ScrollView>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.presetRow}>{PRESETS[category].map(p=><Pressable key={p.id} onPress={()=>applyPreset(p.id)} style={[s.presetCard,presetId===p.id&&s.presetActive]}><Image source={{uri:asset.uri}} style={s.presetImage} contentFit="cover"/><Text numberOfLines={1} style={s.presetLabel}>{p.label}</Text></Pressable>)}</ScrollView>
+        <AdjustmentSlider label="Intensity" value={presetIntensity} min={0} max={100} step={1} onChange={v=>{setPresetIntensity(v); if(presetId) applyPreset(presetId);}} />
+      </View>}
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tools}>{(Object.keys(TOOL_ICONS) as Tool[]).map(t=><Pressable key={t} style={[s.tool,t===tool&&s.toolActive]} onPress={()=>setTool(t)}><SymbolView name={TOOL_ICONS[t] as any} size={22} tintColor={t===tool?PURPLE:'#C9CBD0'} /><Text style={[s.toolText,t===tool&&s.activeText]}>{t[0].toUpperCase()+t.slice(1)}</Text></Pressable>)}</ScrollView>
+
+      {tool==='adjust' || tool==='presets' ? <View style={s.adjustPanel}>
+        <View style={s.tabs}>{(['light','color','detail','effects','geometry'] as AdjustTab[]).map(t=><Pressable key={t} onPress={()=>setTab(t)} style={[s.tab,t===tab&&s.tabActive]}><Text style={[s.tabText,t===tab&&s.activeText]}>{t[0].toUpperCase()+t.slice(1)}</Text></Pressable>)}</View>
+        <ScrollView style={s.adjustScroll} contentContainerStyle={{paddingBottom:28}}>{tab==='geometry'?<GeometryPanel aspect={cropAspect} onCrop={selectCrop} onRotate={d=>{session.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees:d});bump();}} onFlip={axis=>{session.apply({id:`flip:${axis}`,type:'flip',axis});bump();}}/>:ADJUSTMENTS[tab].map(a=><AdjustmentSlider key={a.name} label={a.label} value={adjustmentValue(a.name)} min={a.min} max={a.max} step={a.step} onChange={v=>setAdjustment(a.name,v)} />)}</ScrollView>
+      </View>:null}
+
+      {tool==='crop' && <CropPanel aspect={cropAspect} onCrop={selectCrop} onRotate={d=>{session.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees:d});bump();}} onFlip={axis=>{session.apply({id:`flip:${axis}`,type:'flip',axis});bump();}} />}
+      {tool==='retouch' && <SimpleToolPanel title="Retouch" items={['Heal','Remove Object','Face','Skin','Details']} note="Brush-based retouch operations are stored in the edit recipe and rendered by the platform adapter." />}
+      {tool==='filters' && <SimpleToolPanel title="Filters" items={['Natural','Faded Gold','Fuji Pro','Cinematic C','Moody','Retro']} note="Choose a filter, then use Intensity to control its strength." onItem={id=>{session.apply({id:'filter:active',type:'filter',filterId:id.toLowerCase().replaceAll(' ','-'),intensity:.7});bump();}} />}
+      {tool==='effects' && <SimpleToolPanel title="Effects" items={['Vignette','Grain','Glow','Bokeh','Light Leak']} note="Effects are non-destructive and remain editable in History." />}
+      {tool==='draw' && <SimpleToolPanel title="Draw" items={['Pen','Marker','Highlighter','Eraser']} note="Draw strokes are stored as vector points in the recipe." />}
+      {tool==='text' && <SimpleToolPanel title="Text" items={['Add Text','Caption','Title','Watermark']} note="Text stays editable until export." />}
+
+      <View style={s.bottom}><Pressable onPress={()=>setHistoryVisible(true)} style={s.bottomItem}><Text style={s.bottomIcon}>↶</Text><Text style={s.bottomText}>History</Text></Pressable><Pressable onPress={reset} style={s.bottomItem}><Text style={s.bottomIcon}>↻</Text><Text style={s.bottomText}>Reset</Text></Pressable><Pressable onPress={()=>void onOpenAdvanced?.(session.recipe())} style={s.bottomItem}><Text style={s.bottomIcon}>•••</Text><Text style={s.bottomText}>More</Text></Pressable></View>
+
+      <Modal visible={historyVisible} transparent animationType="slide"><Pressable style={s.shade} onPress={()=>setHistoryVisible(false)}/><View style={s.sheet}><Text style={s.sheetTitle}>History</Text><ScrollView>{operations.length?operations.map((op,i)=><View key={`${op.id}:${i}`} style={s.historyRow}><Text style={s.historyThumb}>{i+1}</Text><Text style={s.historyName}>{historyName(op)}</Text></View>):<Text style={s.empty}>No adjustments yet.</Text>}</ScrollView><View style={s.historyActions}><Pressable onPress={undo}><Text style={s.link}>Undo</Text></Pressable><Pressable onPress={redo}><Text style={s.link}>Redo</Text></Pressable></View></View></Modal>
+
+      <Modal visible={exportVisible} transparent animationType="slide"><Pressable style={s.shade} onPress={()=>setExportVisible(false)}/><View style={s.exportSheet}><Text style={s.sheetTitle}>Export</Text><View style={s.exportRow}><Text style={s.exportLabel}>Resolution</Text><Text style={s.exportValue}>Original⌄</Text></View><View style={s.exportRow}><Text style={s.exportLabel}>Format</Text><Text style={s.exportValue}>JPEG⌄</Text></View><View style={s.exportRow}><Text style={s.exportLabel}>Quality</Text><Text style={s.exportValue}>90%</Text></View><View style={s.exportRow}><Text style={s.exportLabel}>Keep EXIF</Text><Text style={s.purple}>ON</Text></View><View style={s.exportRow}><Text style={s.exportLabel}>Color Profile</Text><Text style={s.exportValue}>sRGB⌄</Text></View><Pressable style={s.exportButton} onPress={()=>void saveNow()}><Text style={s.saveText}>Export</Text></Pressable></View></Modal>
+    </SafeAreaView>
+  </Modal>;
+}
+
+function GeometryPanel({aspect,onCrop,onRotate,onFlip}:{aspect:CropAspect;onCrop(a:CropAspect):void;onRotate(d:90|180|270):void;onFlip(a:'horizontal'|'vertical'):void}){return <CropPanel aspect={aspect} onCrop={onCrop} onRotate={onRotate} onFlip={onFlip}/>}
+function CropPanel({aspect,onCrop,onRotate,onFlip}:{aspect:CropAspect;onCrop(a:CropAspect):void;onRotate(d:90|180|270):void;onFlip(a:'horizontal'|'vertical'):void}){const ratios:CropAspect[]=['free','original','1:1','4:3','3:4','16:9','9:16'];return <View style={s.cropPanel}><Text style={s.sectionLabel}>Aspect ratio</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{ratios.map(r=><Pressable key={r} onPress={()=>onCrop(r)} style={[s.ratio,r===aspect&&s.ratioActive]}><Text style={[s.ratioText,r===aspect&&s.activeText]}>{r}</Text></Pressable>)}</ScrollView><Text style={s.sectionLabel}>Rotate & Flip</Text><View style={s.rotateRow}><Pressable style={s.rotateButton} onPress={()=>onFlip('horizontal')}><Text style={s.rotateText}>⇆</Text></Pressable><Pressable style={s.rotateButton} onPress={()=>onFlip('vertical')}><Text style={s.rotateText}>⇅</Text></Pressable><Pressable style={s.rotateButton} onPress={()=>onRotate(90)}><Text style={s.rotateText}>↻ 90°</Text></Pressable></View></View>}
+function SimpleToolPanel({title,items,note,onItem}:{title:string;items:string[];note:string;onItem?(id:string):void}){return <View style={s.simplePanel}><Text style={s.sectionLabel}>{title}</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{items.map(x=><Pressable key={x} style={s.simpleButton} onPress={()=>onItem?.(x)}><Text style={s.simpleGlyph}>◇</Text><Text style={s.simpleLabel}>{x}</Text></Pressable>)}</ScrollView><Text style={s.note}>{note}</Text></View>}
+function historyName(op:EditOperation){if(op.type==='adjust')return `${op.name}  ${op.value>0?'+':''}${op.value}`;if(op.type==='filter')return `Filter: ${op.filterId}`;if(op.type==='crop')return `Crop ${op.rect.aspect??'free'}`;if(op.type==='rotate')return `Rotate ${op.degrees}°`;if(op.type==='flip')return `Flip ${op.axis}`;return op.type;}
+
+const s=StyleSheet.create({
+  root:{flex:1,backgroundColor:BG},header:{height:62,flexDirection:'row',alignItems:'center',paddingHorizontal:16,gap:18,borderBottomWidth:StyleSheet.hairlineWidth,borderColor:'#22242A'},x:{fontSize:34,color:'#F1F2F4',fontWeight:'200'},undo:{fontSize:28,color:'#D9DBDF'},disabled:{opacity:.3},headerTitle:{flex:1,alignItems:'center'},title:{fontSize:18,fontWeight:'700',color:'#F5F5F7'},compareButton:{borderWidth:1,borderColor:'#4A4C52',borderRadius:8,paddingHorizontal:14,paddingVertical:9},compareText:{color:'#F3F3F5',fontSize:12},saveButton:{backgroundColor:PURPLE,borderRadius:8,paddingHorizontal:16,paddingVertical:10},saveText:{color:'#FFF',fontWeight:'700'},previewWrap:{height:Dimensions.get('window').height*.33,backgroundColor:'#050506',justifyContent:'center',overflow:'hidden'},preview:{width:'100%',height:'100%'},previewBadge:{position:'absolute',bottom:14,alignSelf:'center',backgroundColor:'#0A0B0DDD',paddingHorizontal:15,paddingVertical:8,borderRadius:18},badgeText:{color:'#DADCE1',fontSize:12},purple:{color:PURPLE},beforeButton:{position:'absolute',right:13,bottom:12,width:40,height:40,borderRadius:10,backgroundColor:'#101115CC',alignItems:'center',justifyContent:'center'},beforeText:{color:'#FFF',fontSize:22},panel:{backgroundColor:PANEL,borderBottomWidth:1,borderColor:'#24252B'},categoryRow:{paddingHorizontal:14,gap:24},category:{paddingVertical:12},categoryActive:{borderBottomWidth:2,borderColor:PURPLE},categoryText:{color:'#B5B7BD',fontSize:11},activeText:{color:PURPLE},presetRow:{paddingHorizontal:14,paddingTop:10,paddingBottom:4,gap:9},presetCard:{width:76,height:82,borderRadius:8,overflow:'hidden',backgroundColor:'#191A1F',borderWidth:1,borderColor:'transparent'},presetActive:{borderColor:PURPLE,borderWidth:2},presetImage:{width:'100%',height:58},presetLabel:{color:'#E5E6E8',fontSize:9,paddingHorizontal:5,paddingVertical:5},tools:{minHeight:82,paddingHorizontal:12,backgroundColor:'#111216',borderBottomWidth:1,borderColor:'#282A30'},tool:{width:72,alignItems:'center',justifyContent:'center',gap:5},toolActive:{borderBottomWidth:2,borderColor:PURPLE},toolText:{fontSize:10,color:'#C2C4CA'},adjustPanel:{flex:1,backgroundColor:'#101115'},tabs:{height:54,flexDirection:'row',alignItems:'stretch',borderBottomWidth:1,borderColor:'#2A2B30'},tab:{flex:1,alignItems:'center',justifyContent:'center'},tabActive:{borderBottomWidth:2,borderColor:PURPLE},tabText:{fontSize:11,color:'#C1C3C9'},adjustScroll:{flex:1},sliderRow:{height:47,flexDirection:'row',alignItems:'center',paddingHorizontal:18},sliderLabel:{width:112,color:'#E5E6E9',fontSize:12},track:{height:24,justifyContent:'center',position:'relative'},trackFill:{height:2,backgroundColor:PURPLE},track:{height:24,justifyContent:'center',position:'relative',backgroundColor:'transparent'},thumb:{position:'absolute,width:12,height:12,borderRadius:6,backgroundColor:PURPLE,borderWidth:2,borderColor:'#C4A7FF'},sliderValue:{width:48,textAlign:'right',color:'#E1E2E5',fontSize:11},bottom:{height:72,flexDirection:'row',borderTopWidth:1,borderColor:'#25272D',backgroundColor:'#0D0E11',justifyContent:'space-around'},bottomItem:{width:90,alignItems:'center',justifyContent:'center'},bottomIcon:{fontSize:22,color:'#D7D9DE'},bottomText:{fontSize:10,color:'#D0D2D7',marginTop:4},cropPanel:{flex:1,backgroundColor:'#101115',padding:18},sectionLabel:{color:'#F0F1F3',fontWeight:'700',fontSize:13,marginBottom:14},ratio:{minWidth:60,height:54,borderRadius:9,borderWidth:1,borderColor:'#34363D',marginRight:9,alignItems:'center',justifyContent:'center'},ratioActive:{borderColor:PURPLE,backgroundColor:'#251940'},ratioText:{color:'#D2D4D8',fontSize:11},rotateRow:{flexDirection:'row',gap:12},rotateButton:{flex:1,height:54,borderRadius:10,backgroundColor:'#191A1F',alignItems:'center',justifyContent:'center'},rotateText:{color:'#E7E8EB',fontSize:15},simplePanel:{flex:1,backgroundColor:'#101115',padding:18},simpleButton:{width:88,height:78,borderRadius:10,backgroundColor:'#191A1F',marginRight:10,alignItems:'center',justifyContent:'center'},simpleGlyph:{fontSize:24,color:PURPLE},simpleLabel:{color:'#E7E8EA',fontSize:10,marginTop:7},note:{color:MUTED,fontSize:11,lineHeight:17,marginTop:18},shade:{flex:1,backgroundColor:'#0009'},sheet:{position:'absolute',left:0,right:0,bottom:0,maxHeight:'70%',backgroundColor:'#101115',borderTopLeftRadius:20,borderTopRightRadius:20,padding:20},exportSheet:{position:'absolute',left:0,right:0,bottom:0,backgroundColor:'#101115',borderTopLeftRadius:20,borderTopRightRadius:20,padding:20,paddingBottom:36},sheetTitle:{fontSize:20,fontWeight:'700',color:'#FFF',marginBottom:18},historyRow:{height:52,flexDirection:'row',alignItems:'center',backgroundColor:'#17181C',borderRadius:7,paddingHorizontal:10,marginBottom:7},historyThumb:{width:30,color:PURPLE,fontWeight:'800'},historyName:{color:'#ECEDEF',fontSize:12},historyActions:{flexDirection:'row',justifyContent:'space-around',paddingTop:10},link:{color:PURPLE,fontWeight:'700'},empty:{color:MUTED,textAlign:'center',padding:30},exportRow:{height:52,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:StyleSheet.hairlineWidth,borderColor:'#2C2D32'},exportLabel:{color:'#E7E8EA',fontSize:13},exportValue:{color:'#B8BAC0',fontSize:12},exportButton:{height:48,borderRadius:24,backgroundColor:PURPLE,alignItems:'center',justifyContent:'center',marginTop:26},
+});
