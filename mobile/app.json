@@ -47,7 +47,8 @@
       ],
       "expo-background-task",
       "expo-image",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-video"
     ],
     "ios": {
       "bundleIdentifier": "com.aiautotool.photosync",
