@@ -8,7 +8,7 @@ import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import IMGLYEditor, { EditorPreset, EditorSettingsModel, SourceType } from '@imgly/editor-react-native';
 import { SymbolView, type AndroidSymbol, type SFSymbol } from 'expo-symbols';
-import { loadAssetMetadata, loadCloudPhotos, loadDevicePhotos, pingLaptop, prepareAssetForEditing, syncAssetsToLaptop, type AssetMetadata, type DisplayAsset, type MediaAsset, type SyncProgress } from '../src/sync/mobileSync';
+import { downloadCloudAsset, loadAssetMetadata, loadCloudPhotos, loadDevicePhotos, pingLaptop, prepareAssetForEditing, syncAssetsToLaptop, type AssetMetadata, type DisplayAsset, type MediaAsset, type SyncProgress } from '../src/sync/mobileSync';
 import { forgetPairedDesktop, loadPairedDesktop, savePairedDesktop, type PairedDesktop } from '../src/sync/pairing';
 import { loadFailedAssets, loadSyncedAssetIds } from '../src/sync/syncLedger';
 
@@ -21,9 +21,9 @@ const COLUMNS = Dimensions.get('window').width > 700 ? 6 : 4;
 const GAP = 2;
 const TILE = (Dimensions.get('window').width - GAP * (COLUMNS - 1)) / COLUMNS;
 
-type IconName = 'photos'|'collections'|'search'|'add'|'bell'|'cloudDone'|'cloudUpload'|'warning'|'favorite'|'favoriteFill'|'archive'|'lock'|'trash'|'share'|'edit'|'settings'|'chevron'|'back'|'more'|'video'|'album'|'person'|'place'|'document'|'close'|'check'|'sync';
+type IconName = 'photos'|'collections'|'search'|'add'|'bell'|'cloudDone'|'cloudUpload'|'warning'|'favorite'|'favoriteFill'|'archive'|'lock'|'trash'|'share'|'edit'|'download'|'settings'|'chevron'|'back'|'more'|'video'|'album'|'person'|'place'|'document'|'close'|'check'|'sync';
 const ICONS: Record<IconName, { ios: SFSymbol; android: AndroidSymbol }> = {
-  photos:{ios:'photo.on.rectangle.angled',android:'photo_library'}, collections:{ios:'rectangle.stack.fill',android:'collections'}, search:{ios:'magnifyingglass',android:'search'}, add:{ios:'plus',android:'add'}, bell:{ios:'bell',android:'notifications'}, cloudDone:{ios:'checkmark.icloud.fill',android:'cloud_done'}, cloudUpload:{ios:'icloud.and.arrow.up',android:'cloud_upload'}, warning:{ios:'exclamationmark.circle.fill',android:'warning'}, favorite:{ios:'star',android:'favorite_border'}, favoriteFill:{ios:'star.fill',android:'favorite'}, archive:{ios:'archivebox',android:'archive'}, lock:{ios:'lock.fill',android:'lock'}, trash:{ios:'trash',android:'delete'}, share:{ios:'square.and.arrow.up',android:'share'}, edit:{ios:'slider.horizontal.3',android:'edit'}, settings:{ios:'gearshape',android:'settings'}, chevron:{ios:'chevron.right',android:'chevron_right'}, back:{ios:'chevron.left',android:'arrow_back_ios'}, more:{ios:'ellipsis',android:'more_horiz'}, video:{ios:'play.fill',android:'video_library'}, album:{ios:'rectangle.stack.badge.plus',android:'photo_album'}, person:{ios:'person.2.fill',android:'person'}, place:{ios:'map.fill',android:'location_on'}, document:{ios:'doc.text.fill',android:'description'}, close:{ios:'xmark',android:'close'}, check:{ios:'checkmark',android:'check'}, sync:{ios:'arrow.clockwise',android:'sync'},
+  photos:{ios:'photo.on.rectangle.angled',android:'photo_library'}, collections:{ios:'rectangle.stack.fill',android:'collections'}, search:{ios:'magnifyingglass',android:'search'}, add:{ios:'plus',android:'add'}, bell:{ios:'bell',android:'notifications'}, cloudDone:{ios:'checkmark.icloud.fill',android:'cloud_done'}, cloudUpload:{ios:'icloud.and.arrow.up',android:'cloud_upload'}, warning:{ios:'exclamationmark.circle.fill',android:'warning'}, favorite:{ios:'star',android:'favorite_border'}, favoriteFill:{ios:'star.fill',android:'favorite'}, archive:{ios:'archivebox',android:'archive'}, lock:{ios:'lock.fill',android:'lock'}, trash:{ios:'trash',android:'delete'}, share:{ios:'square.and.arrow.up',android:'share'}, edit:{ios:'slider.horizontal.3',android:'edit'}, download:{ios:'arrow.down.circle',android:'file_download'}, settings:{ios:'gearshape',android:'settings'}, chevron:{ios:'chevron.right',android:'chevron_right'}, back:{ios:'chevron.left',android:'arrow_back_ios'}, more:{ios:'ellipsis',android:'more_horiz'}, video:{ios:'play.fill',android:'video_library'}, album:{ios:'rectangle.stack.badge.plus',android:'photo_album'}, person:{ios:'person.2.fill',android:'person'}, place:{ios:'map.fill',android:'location_on'}, document:{ios:'doc.text.fill',android:'description'}, close:{ios:'xmark',android:'close'}, check:{ios:'checkmark',android:'check'}, sync:{ios:'arrow.clockwise',android:'sync'},
 };
 function Icon({ name, size = 22, color = '#5f6368', weight = 'regular' }: { name: IconName; size?: number; color?: string; weight?: 'regular'|'medium'|'semibold'|'bold' }) {
   return <SymbolView name={ICONS[name]} size={size} tintColor={color} weight={weight} style={{ width:size, height:size }} />;
@@ -61,6 +61,7 @@ export default function Home() {
   const [mobilePhotos, setMobilePhotos] = useState(true);
   const [mobileVideos, setMobileVideos] = useState(false);
   const [manualSync, setManualSync] = useState<{ assetId: string; phase: 'syncing' | 'error' } | null>(null);
+  const [downloadingAssetId, setDownloadingAssetId] = useState<string | null>(null);
   const syncingRef = useRef(false);
   const syncControllerRef = useRef<AbortController | null>(null);
 
@@ -201,6 +202,23 @@ export default function Home() {
     }
   }
 
+  async function downloadOne(asset: DisplayAsset) {
+    if (!asset.cloudOnly || downloadingAssetId) return;
+    setDownloadingAssetId(asset.id);
+    try {
+      const saved = await downloadCloudAsset(asset);
+      const assets = await loadDevicePhotos(500);
+      setDevicePhotos(assets);
+      setPhotos(previous => [saved, ...previous.filter(item => item.id !== asset.id)]);
+      setViewer(saved);
+      setMessage(`Đã tải ${asset.filename} vào thư viện thiết bị.`);
+    } catch (error) {
+      setMessage(`Không tải được ${asset.filename}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setDownloadingAssetId(null);
+    }
+  }
+
   function toggleSelect(id: string) {
     setSelected(previous => { const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next; });
   }
@@ -298,7 +316,7 @@ export default function Home() {
       <View style={s.viewerHeader}><Pressable style={s.iconButton} onPress={() => { setViewer(null); setViewerInfo(false); }}><Icon name="back" size={23} color="#fff" /></Pressable><View><Text style={s.viewerDate}>{viewer ? new Date(viewer.creationTime).toLocaleDateString('vi-VN') : ''}</Text><Text style={s.viewerName}>{viewer?.filename}</Text></View><Pressable style={s.iconButton} onPress={() => setViewerInfo(value => !value)}><Icon name="more" size={24} color="#fff" /></Pressable></View>
       {viewer && <Image source={imageSource(viewer)} style={s.viewerImage} contentFit="contain" />}
       {viewerInfo && viewer && <ScrollView style={s.details} contentContainerStyle={s.detailsContent}><View style={s.handle}/><Text style={s.sheetTitle}>Chi tiết</Text><Text style={s.detailName}>{viewer.filename}</Text><Text style={s.detailLine}>{new Date(viewerMetadata?.capturedAt || viewer.creationTime).toLocaleString('vi-VN')}</Text><Text style={s.detailLine}>{viewer.width && viewer.height ? `${viewer.width} × ${viewer.height}` : 'Kích thước ảnh gốc'}{formatBytes(viewerMetadata?.fileSize || viewer.fileSize) ? ` • ${formatBytes(viewerMetadata?.fileSize || viewer.fileSize)}` : ''}</Text>{viewer.mediaType === 'video' ? <Text style={s.detailLine}>Video{viewer.duration ? ` • ${formatDuration(viewer.duration)}` : ''}</Text> : <>{(viewerMetadata?.make || viewerMetadata?.model) && <Text style={s.detailLine}>Máy ảnh: {[viewerMetadata.make, viewerMetadata.model].filter(Boolean).join(' ')}</Text>}{viewerMetadata?.lens && <Text style={s.detailLine}>Ống kính: {viewerMetadata.lens}</Text>}{(viewerMetadata?.focalLength || viewerMetadata?.aperture || viewerMetadata?.exposureTime || viewerMetadata?.iso) && <Text style={s.detailLine}>{[viewerMetadata.focalLength && `${viewerMetadata.focalLength} mm`, viewerMetadata.aperture && `f/${viewerMetadata.aperture}`, formatExposure(viewerMetadata.exposureTime), viewerMetadata.iso && `ISO ${viewerMetadata.iso}`].filter(Boolean).join(' • ')}</Text>}{viewerMetadata?.latitude != null && viewerMetadata?.longitude != null && <Text style={s.detailLine}>Vị trí: {viewerMetadata.latitude.toFixed(5)}, {viewerMetadata.longitude.toFixed(5)}</Text>}{viewerMetadata?.software && <Text style={s.detailLine}>Phần mềm: {viewerMetadata.software}</Text>}</>}{metadataLoading && <Text style={s.detailMuted}>Đang đọc thông tin ảnh…</Text>}<Text style={[s.detailBackup, manualSync?.assetId === viewer.id && manualSync.phase === 'error' && s.detailBackupError]}>{syncedIds.has(viewer.id) || viewer.cloudOnly ? '✓ Đã sao lưu • Chất lượng gốc' : manualSync?.assetId === viewer.id && manualSync.phase === 'syncing' ? '☁ Đang sao lưu riêng mục này…' : manualSync?.assetId === viewer.id && manualSync.phase === 'error' ? '! Sao lưu chưa thành công' : '☁ Chưa sao lưu'}</Text>{!syncedIds.has(viewer.id) && !viewer.cloudOnly && <Pressable disabled={manualSync?.assetId === viewer.id && manualSync.phase === 'syncing'} style={[s.smallPrimary, manualSync?.assetId === viewer.id && manualSync.phase === 'syncing' && s.disabledButton]} onPress={() => void syncOneNow(viewer)}><Text style={s.primaryButtonText}>{manualSync?.assetId === viewer.id && manualSync.phase === 'syncing' ? 'Đang sao lưu…' : manualSync?.assetId === viewer.id && manualSync.phase === 'error' ? 'Thử lại' : 'Sao lưu ngay'}</Text></Pressable>}</ScrollView>}
-      {!viewerInfo && <View style={s.viewerToolbar}>{([['share','Chia sẻ'],['edit','Chỉnh sửa'],[favorites.has(viewer?.id || '')?'favoriteFill':'favorite','Yêu thích'],['trash','Xóa']] as const).map(([icon,label]) => <Pressable key={label} style={s.viewerAction} onPress={() => { if (!viewer) return; if (label === 'Chỉnh sửa') void openEditor(viewer); if (label === 'Yêu thích') setFavorites(old => { const next = new Set(old); next.has(viewer.id) ? next.delete(viewer.id) : next.add(viewer.id); return next; }); if (label === 'Xóa') { setTrashed(old => new Set(old).add(viewer.id)); setViewer(null); } }}><Icon name={icon} size={24} color="#fff" /><Text style={s.viewerActionLabel}>{label}</Text></Pressable>)}</View>}
+      {!viewerInfo && <View style={s.viewerToolbar}>{([['share','Chia sẻ'],['edit','Chỉnh sửa'],[favorites.has(viewer?.id || '')?'favoriteFill':'favorite','Yêu thích'],...(viewer?.cloudOnly ? [['download', downloadingAssetId === viewer?.id ? 'Đang tải…' : 'Tải xuống'] as const] : []),['trash','Xóa']] as const).map(([icon,label]) => <Pressable key={label} disabled={label === 'Đang tải…'} style={[s.viewerAction, label === 'Đang tải…' && s.viewerActionDisabled]} onPress={() => { if (!viewer) return; if (label === 'Chỉnh sửa') void openEditor(viewer); if (label === 'Tải xuống') void downloadOne(viewer); if (label === 'Yêu thích') setFavorites(old => { const next = new Set(old); next.has(viewer.id) ? next.delete(viewer.id) : next.add(viewer.id); return next; }); if (label === 'Xóa') { setTrashed(old => new Set(old).add(viewer.id)); setViewer(null); } }}><Icon name={icon} size={24} color="#fff" /><Text style={s.viewerActionLabel}>{label}</Text></Pressable>)}</View>}
     </SafeAreaView></Modal>
 
     {scanner && <View style={s.scanner}><CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={({ data }) => void onQr(data)} /><View style={s.scanFrame}/><View style={s.scanBottom}><Text style={s.scanTitle}>Quét mã QR trên PhotoSync Desktop</Text><Pressable style={s.cancel} onPress={() => setScanner(false)}><Text style={s.cancelText}>Hủy</Text></Pressable></View></View>}
@@ -1149,6 +1167,9 @@ const s = StyleSheet.create({
       fontSize: 11,
       color: '#fff',
       marginTop: 6
+    },
+    viewerActionDisabled: {
+      opacity: 0.55
     },
     details: {
       position: 'absolute',

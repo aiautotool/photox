@@ -7,9 +7,14 @@
     "react-native-reanimated": "4.5.0",
     "react-native-worklets": "0.10.4"
   },
-  "workspaces": ["mobile", "desktop", "relay", "packages/*"],
+  "workspaces": [
+    "mobile",
+    "desktop",
+    "relay",
+    "packages/*"
+  ],
   "scripts": {
-    "postinstall": "npm --workspace @photosync/core run build && npm --workspace @photosync/google-drive run build",
+    "postinstall": "patch-package && npm --workspace @photosync/core run build && npm --workspace @photosync/google-drive run build",
     "mobile": "npm --workspace @photosync/mobile run start",
     "desktop": "npm --workspace @photosync/core run build && npm --workspace @photosync/google-drive run build && npm --workspace @photosync/desktop run dev",
     "relay": "npm --workspace @photosync/relay run dev",
@@ -19,5 +24,8 @@
     "build": "npm run build:sdk && npm --workspace @photosync/core run build && npm --workspace @photosync/google-drive run build && npm --workspace @photosync/relay run build && npm --workspace @photosync/desktop run build",
     "test": "npm --workspace @photosync/core test && npm run test:sdk",
     "typecheck": "npm run typecheck:sdk && npm --workspace @photosync/mobile run typecheck && npm --workspace @photosync/desktop run typecheck && npm --workspace @photosync/relay run typecheck && npm --workspace @photosync/core run typecheck && npm --workspace @photosync/google-drive run typecheck"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

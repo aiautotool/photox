@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, safeAvailable, type StorageAccount } from '@photosync/core';
+import { chooseAccount, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true } }]);
@@ -63,6 +63,17 @@ type SavedDriveAccount = { id:string; email?:string; tokens:any };
 type RuntimeDriveAccount = { id:string; email:string; client:OAuth2Client; storage:StorageAccount; folderId:string; quota:{limit:number;usage:number;free:number} };
 type DriveAccountInfo = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
 type CloudUploadItem = { key:string;filename:string;size:number;receivedAt:string;deviceId:string;state:CloudState;accountId?:string;accountEmail?:string;folderId?:string;remotePath?:string;remoteFileId?:string;webViewLink?:string;uploadedAt?:string;verifiedAt?:string;message?:string };
+type BackupHealthSnapshot = {
+  total:number;
+  safe:number;
+  atRisk:number;
+  critical:number;
+  unknown:number;
+  photos:number;
+  videos:number;
+  totalBytes:number;
+  problems:{key:string;filename:string;health:'at_risk'|'critical'|'unknown';reason:string}[];
+};
 
 function tokenIdentity(tokens:any):{email?:string;sub?:string}{
   try{
@@ -103,6 +114,18 @@ async function readIndex():Promise<MediaIndexRow[]>{ try{return JSON.parse(await
 async function writeIndex(rows:MediaIndexRow[]){ await fs.mkdir(stateDir(),{recursive:true}); await fs.writeFile(indexFile(),JSON.stringify(rows,null,2),'utf8'); }
 function replicasOf(row:MediaIndexRow){if(row.cloudReplicas?.length)return row.cloudReplicas;if(row.cloud)return [row.cloud];return []}
 function isVerified(replica:CloudDestination){return replica.state==='VERIFIED'||replica.state==='UPLOADED'}
+function isVideoFilename(filename:string){return /\.(mp4|mov|m4v|avi|mkv|webm)$/i.test(filename)}
+async function evaluateRow(row:MediaIndexRow){
+  const replicas:MediaReplica[]=[];
+  try{await fs.access(row.path);replicas.push({providerId:'local',providerType:'local',replicaType:'original',status:'available'})}catch{}
+  for(const replica of replicasOf(row))replicas.push({providerId:replica.accountId||'drive',providerType:'google_drive',replicaType:'original',status:isVerified(replica)?'available':replica.state==='ERROR'?'failed':'queued',verifiedAt:replica.verifiedAt?Date.parse(replica.verifiedAt):undefined});
+  return evaluateBackupHealth(replicas,isVideoFilename(row.filename)?DEFAULT_VIDEO_POLICY:DEFAULT_PHOTO_POLICY);
+}
+async function backupHealthSnapshot():Promise<BackupHealthSnapshot>{
+  const rows=await readIndex();const snapshot:BackupHealthSnapshot={total:rows.length,safe:0,atRisk:0,critical:0,unknown:0,photos:0,videos:0,totalBytes:rows.reduce((sum,row)=>sum+row.size,0),problems:[]};
+  for(const row of rows){const video=isVideoFilename(row.filename);if(video)snapshot.videos+=1;else snapshot.photos+=1;const result=await evaluateRow(row);if(result.health==='safe')snapshot.safe+=1;else if(result.health==='at_risk')snapshot.atRisk+=1;else if(result.health==='critical')snapshot.critical+=1;else snapshot.unknown+=1;if(result.health!=='safe')snapshot.problems.push({key:row.key,filename:row.filename,health:result.health,reason:result.reasons.join(',')||'verification_required'})}
+  return snapshot;
+}
 async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex();const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all)}notifyRenderer('photosync:storage-updated',{key:row.key,cloudReplicas:replicas})}
 function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').slice(0,220)||`media-${Date.now()}`; }
 
@@ -362,6 +385,7 @@ async function startReceiver(){
 function createWindow(){const win=new BrowserWindow({width:1500,height:940,minWidth:1040,minHeight:700,backgroundColor:'#ffffff',titleBarStyle:process.platform==='darwin'?'hiddenInset':'default',trafficLightPosition:process.platform==='darwin'?{x:18,y:22}:undefined,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false}});mainWindow=win;win.on('closed',()=>{if(mainWindow===win)mainWindow=null});const devUrl=process.env.VITE_DEV_SERVER_URL||'http://localhost:5173';if(!app.isPackaged)win.loadURL(devUrl);else win.loadFile(path.join(__dirname,'../dist/index.html'),{query:{build:String(Date.now())}});}
 
 ipcMain.handle('photosync:status',()=>desktopStatus());
+ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());
 ipcMain.handle('photosync:list-local',()=>listLocalMedia());
 ipcMain.handle('photosync:list-cloud-uploads',()=>listCloudUploads());
 ipcMain.handle('photosync:open-library',()=>shell.openPath(libraryDir()));

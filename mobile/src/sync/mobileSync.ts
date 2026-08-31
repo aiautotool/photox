@@ -66,6 +66,23 @@ export async function prepareAssetForEditing(asset: DisplayAsset): Promise<strin
   return (await FileSystem.downloadAsync(asset.uri, destination, { headers: asset.requestHeaders })).uri;
 }
 
+/** Downloads a cloud asset and stores a copy in the device photo library. */
+export async function downloadCloudAsset(asset: DisplayAsset): Promise<MediaAsset> {
+  if (!asset.cloudOnly) throw new Error('Mục này đã có trên thiết bị.');
+
+  const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo', 'video']);
+  if (!permission.granted) throw new Error('Bạn chưa cấp quyền lưu ảnh vào thư viện.');
+
+  const extension = asset.filename.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || (asset.mediaType === 'video' ? 'mp4' : 'jpg');
+  const destination = `${FileSystem.cacheDirectory}photosync-download-${Date.now()}.${extension}`;
+  try {
+    const downloaded = await FileSystem.downloadAsync(asset.uri, destination, { headers: asset.requestHeaders });
+    return await MediaLibrary.createAssetAsync(downloaded.uri);
+  } finally {
+    await FileSystem.deleteAsync(destination, { idempotent: true }).catch(() => undefined);
+  }
+}
+
 export type SyncProgress = {
   total: number;
   completed: number;

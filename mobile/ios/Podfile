@@ -68,5 +68,23 @@ target 'PhotoSync' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    # IMG.LY has Objective-C wrapper targets around binary Swift modules. CocoaPods
+    # still adds Expo's compatibility-header copy phase, but Xcode does not always
+    # emit the source header because these wrapper targets contain no Swift sources.
+    # Create the harmless empty source header before that phase copies it so
+    # parallel device builds cannot publish a module map with a missing header.
+    installer.pods_project.targets.each do |target|
+      next unless target.name.start_with?('IMGLY')
+
+      target.shell_script_build_phases.each do |phase|
+        next unless phase.name == 'Copy generated compatibility header'
+
+        phase.shell_script = <<~SH + phase.shell_script
+          mkdir -p "${DERIVED_SOURCES_DIR}"
+          touch "${DERIVED_SOURCES_DIR}/${PRODUCT_MODULE_NAME}-Swift.h"
+        SH
+      end
+    end
   end
 end
