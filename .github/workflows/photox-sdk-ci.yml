@@ -3,13 +3,17 @@ on:
   push:
     branches: [main, photox-sdk-v2]
     paths:
+      - 'package.json'
       - 'packages/contracts/**'
       - 'packages/storage/**'
       - 'packages/sync/**'
       - 'packages/media/**'
       - 'packages/media-cloud/**'
       - 'packages/media-api/**'
+      - 'packages/media-delivery/**'
+      - 'packages/media-delivery-node/**'
       - 'packages/video-media/**'
+      - 'packages/video-ffmpeg/**'
       - 'packages/integrity/**'
       - 'packages/jobs/**'
       - 'packages/reconciliation/**'
@@ -26,6 +30,7 @@ on:
       - '.github/workflows/photox-sdk-ci.yml'
   pull_request:
     paths:
+      - 'package.json'
       - 'packages/**'
       - '.github/workflows/photox-sdk-ci.yml'
 
@@ -38,54 +43,9 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - name: Build contracts
-        run: npm --workspace @photox/contracts run build
-      - name: Build engines
-        run: |
-          npm --workspace @photox/storage run build
-          npm --workspace @photox/sync run build
-          npm --workspace @photox/media run build
-          npm --workspace @photox/media-cloud run build
-          npm --workspace @photox/media-api run build
-          npm --workspace @photox/video-media run build
-          npm --workspace @photox/integrity run build
-          npm --workspace @photox/jobs run build
-          npm --workspace @photox/reconciliation run build
-          npm --workspace @photox/catalog-backup run build
-          npm --workspace @photox/replica-policy run build
-          npm --workspace @photox/image-editor run build
-          npm --workspace @photox/transport run build
-          npm --workspace @photox/update-core run build
-      - name: Build providers
-        run: |
-          npm --workspace @photox/provider-local run build
-          npm --workspace @photox/provider-google-drive run build
-          npm --workspace @photox/provider-telegram run build
-      - name: Build platform SDKs
-        run: |
-          npm --workspace @photox/desktop-sdk run build
-          npm --workspace @photox/mobile-sdk run build
+      - name: Build SDK in dependency order
+        run: npm run build:sdk
+      - name: Typecheck SDK in dependency order
+        run: npm run typecheck:sdk
       - name: Test image editor
         run: npm --workspace @photox/image-editor test
-      - name: Typecheck SDK
-        run: |
-          npm --workspace @photox/contracts run typecheck
-          npm --workspace @photox/storage run typecheck
-          npm --workspace @photox/sync run typecheck
-          npm --workspace @photox/media run typecheck
-          npm --workspace @photox/media-cloud run typecheck
-          npm --workspace @photox/media-api run typecheck
-          npm --workspace @photox/video-media run typecheck
-          npm --workspace @photox/integrity run typecheck
-          npm --workspace @photox/jobs run typecheck
-          npm --workspace @photox/reconciliation run typecheck
-          npm --workspace @photox/catalog-backup run typecheck
-          npm --workspace @photox/replica-policy run typecheck
-          npm --workspace @photox/image-editor run typecheck
-          npm --workspace @photox/transport run typecheck
-          npm --workspace @photox/update-core run typecheck
-          npm --workspace @photox/provider-local run typecheck
-          npm --workspace @photox/provider-google-drive run typecheck
-          npm --workspace @photox/provider-telegram run typecheck
-          npm --workspace @photox/desktop-sdk run typecheck
-          npm --workspace @photox/mobile-sdk run typecheck
