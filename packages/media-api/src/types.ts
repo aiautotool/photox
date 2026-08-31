@@ -72,6 +72,8 @@ export interface CursorPage<T> {
   hasMore: boolean;
 }
 
+export type MediaPage = CursorPage<MediaDTO>;
+
 export interface MediaDetailSource {
   id: string;
   filename: string;
