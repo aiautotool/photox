@@ -14,7 +14,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RECEIVER_PORT = 43117;
@@ -395,6 +395,21 @@ ipcMain.handle('photosync:list-google-accounts',()=>listDriveAccounts());
 ipcMain.handle('photosync:remove-google-account',(_event,accountId:string)=>removeDriveAccount(accountId));
 ipcMain.handle('photosync:retry-cloud',async()=>{await retryQueuedCloud();return desktopStatus()});
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});try{await fs.access(row.path);return net.fetch(pathToFileURL(row.path).href)}catch{return fetchCloudMedia(row,request)}});createWindow();void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+    try{
+      const stat=await fs.stat(row.path);
+      const range=request.headers.get('range');
+      const contentType=isVideoFilename(row.filename)?'video/mp4':'image/jpeg';
+      if(range){
+        const match=/bytes=(\d+)-(\d*)/.exec(range);
+        if(match){
+          const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;
+          if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});
+          return new Response(Readable.toWeb(createReadStream(row.path,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}});
+        }
+      }
+      return new Response(Readable.toWeb(createReadStream(row.path)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
+    }catch{return fetchCloudMedia(row,request)}
+  });createWindow();void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
 app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor()});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());
