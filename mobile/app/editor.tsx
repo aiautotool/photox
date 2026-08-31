@@ -1,9 +1,9 @@
 import { Alert } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import { EditorSettingsModel, SourceType } from '@imgly/editor-react-native';
 import { PhotoEditorScreen, type PhotoEditorAsset } from '../src/editor/PhotoEditorScreen';
 import { openNativePhotoEditor } from '../src/editor/EditorNavigationBridge';
+import { saveEditRecipe } from '../src/editor/EditRecipeStore';
 import type { ImageEditRecipe } from '@photox/image-editor';
 
 function numberParam(value:string|string[]|undefined){const raw=Array.isArray(value)?value[0]:value;const n=raw?Number(raw):undefined;return Number.isFinite(n)?n:undefined;}
@@ -19,13 +19,13 @@ export default function PhotoEditorRoute(){
 
   async function saveRecipe(recipe:ImageEditRecipe){
     if(!asset)return;
-    await SecureStore.setItemAsync(`photox.edit.recipe.${asset.id}`,JSON.stringify(recipe));
+    await saveEditRecipe(asset.id,recipe);
     Alert.alert('Đã lưu chỉnh sửa','Recipe đã được lưu không phá hủy. Ảnh gốc vẫn được giữ nguyên.');
   }
 
   async function openAdvanced(recipe:ImageEditRecipe){
     if(!asset)return;
-    await SecureStore.setItemAsync(`photox.edit.recipe.${asset.id}`,JSON.stringify(recipe));
+    await saveEditRecipe(asset.id,recipe);
     const settings=new EditorSettingsModel({license:process.env.EXPO_PUBLIC_IMGLY_LICENSE||undefined,userId:'photosync-mobile'});
     await openNativePhotoEditor(settings,{source:asset.uri,type:SourceType.IMAGE},{sourceAssetId:asset.id,filename:asset.filename});
   }
