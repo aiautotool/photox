@@ -2,25 +2,30 @@
 
 > Áp dụng cho SDK trên branch `photox-sdk-v2` và app hiện tại của `main`.
 >
-> **Nguyên tắc:** thư viện trước, wiring sau. Không xoá/rewrite code cũ; tích hợp từng lớp bằng adapter/repository rồi mới thay behavior hiện tại.
+> **Nguyên tắc:** thư viện trước, wiring sau. Không xoá/rewrite code cũ; giữ route/logic legacy trong giai đoạn migration và chuyển từng lớp một.
 
 ---
 
-# 1. Kiến trúc thư viện
+# 1. Kiến trúc SDK hiện tại
 
 ```text
 packages/
 ├── contracts
-├── storage
 ├── media
 ├── media-cloud
 ├── media-api
+├── media-delivery
+├── media-delivery-node
 ├── video-media
+├── video-ffmpeg
+├── storage
+├── replica-policy
 ├── integrity
 ├── jobs
 ├── reconciliation
 ├── catalog-backup
-├── replica-policy
+├── persistence-sqlite
+├── auth-jose
 ├── sync
 ├── transport
 ├── update-core
@@ -35,21 +40,28 @@ packages/
 Phân vai:
 
 ```text
-contracts       type/contract chung
-storage         provider registry + replication execution
-media           metadata/index abstraction
-media-cloud     source of truth: media có bao nhiêu replica và nằm ở đâu
-media-api       DTO/query/content/auth contract cho Mobile ↔ Desktop API
-video-media     metadata/duration/thumb/preview/playback contract cho video
-integrity       verify replica còn tồn tại/đọc được/hash đúng
-jobs            durable queue, retry, checkpoint, pause/resume
-reconciliation  đối chiếu catalog với provider thực tế
-catalog-backup  backup/restore catalog PhotoX
-replica-policy  policy nâng cao + provider scoring
-providers       nơi thực thi upload/download
-image-editor    non-destructive editor SDK
-mobile-sdk      facade mobile
-desktop-sdk     facade desktop
+contracts              type/contract chung
+media                  media index + metadata abstraction
+media-cloud            source of truth về replica
+media-api              DTO/query/content/auth public contract
+media-delivery         chọn replica tốt nhất để trả content
+media-delivery-node    Local file + HTTP Range/proxy runtime adapter
+video-media            metadata/thumb/preview/playback contracts
+video-ffmpeg           ffprobe/ffmpeg runtime adapter thật cho Desktop
+storage                provider registry + replication execution
+replica-policy         policy nâng cao + provider scoring
+integrity              verify tồn tại/readable/size/SHA256
+jobs                   durable queue/retry/checkpoint
+reconciliation         phát hiện drift catalog ↔ provider
+catalog-backup         backup/restore catalog
+persistence-sqlite     persistent repositories dùng SQLite
+Auth JOSE              JWT/JWS access-token implementation
+sync                    orchestration/event
+transport               HTTP transport abstraction
+providers               Local / Drive / Telegram
+image-editor             non-destructive editor
+mobile-sdk               facade/client cho mobile
+desktop-sdk              facade/composition cho desktop
 ```
 
 Kiến trúc đích:
@@ -62,30 +74,54 @@ Mobile UI
 HTTP / LAN / Tunnel
    ↓
 @photox/media-api
-   ├── media list/detail
-   ├── thumbnail/preview/content
-   └── auth/session
    ↓
-Desktop services
-   ├── @photox/video-media
-   ├── Media index
-   ├── Media Cloud Catalog
+@photox/media-delivery
+   ↓
+Media Cloud Catalog
+   ↓
+Local / Google Drive / Telegram
+
+Desktop background services
+   ├── Durable Jobs
    ├── Integrity
-   ├── Jobs
    ├── Reconciliation
-   ├── Catalog Backup
    ├── Replica Policy
-   └── Provider Registry
-        ├── Local
-        ├── Google Drive
-        └── Telegram Bot
+   ├── Video Pipeline
+   └── Catalog Backup
 ```
 
-**Provider không phải source of truth. `@photox/media-cloud` là nguồn sự thật về vị trí replica. `@photox/media-api` là public contract cho UI/client. `@photox/video-media` chuẩn hoá mọi thông tin và variant cần thiết để video hiển thị thời lượng, thumbnail và play được.**
+`@photox/media-cloud` là nguồn sự thật về vị trí replica. Provider chỉ thực hiện thao tác lưu trữ.
 
 ---
 
-# 2. Chuẩn bị tích hợp
+# 2. Build / typecheck monorepo
+
+Không chạy typecheck PhotoX package theo thứ tự ngẫu nhiên. Các package phụ thuộc declaration trong `dist` của package trước.
+
+Root đã có:
+
+```bash
+npm run build:sdk
+npm run typecheck:sdk
+```
+
+Hai script này build/typecheck đúng dependency order.
+
+Trước integration phải đạt:
+
+```text
+npm install             PASS
+npm run build:sdk       PASS
+npm run typecheck:sdk   PASS
+npm test                PASS
+npm run build           PASS
+```
+
+PhotoX SDK CI cũng dùng chính hai command trên để tránh false-failure do workspace order.
+
+---
+
+# 3. Tạo branch tích hợp từ main
 
 ```bash
 git checkout main
@@ -93,122 +129,81 @@ git pull
 git checkout -b integrate-photox-sdk
 ```
 
-Merge/cherry-pick từ `photox-sdk-v2`, sau đó:
-
-```bash
-npm install
-npm --workspace @photox/contracts run build
-npm --workspace @photox/storage run build
-npm --workspace @photox/media run build
-npm --workspace @photox/media-cloud run build
-npm --workspace @photox/media-api run build
-npm --workspace @photox/video-media run build
-npm --workspace @photox/integrity run build
-npm --workspace @photox/jobs run build
-npm --workspace @photox/reconciliation run build
-npm --workspace @photox/catalog-backup run build
-npm --workspace @photox/replica-policy run build
-npm --workspace @photox/provider-local run build
-npm --workspace @photox/provider-google-drive run build
-npm --workspace @photox/provider-telegram run build
-npm --workspace @photox/image-editor run build
-npm --workspace @photox/desktop-sdk run build
-npm --workspace @photox/mobile-sdk run build
-```
+Merge/cherry-pick `photox-sdk-v2` vào branch tích hợp. Không merge thẳng vào `main` trước khi Desktop + Mobile build/test xong.
 
 ---
 
-# 3. Desktop wiring — không phá code cũ
-
-Không xoá `desktop/electron/main.ts` ở giai đoạn đầu.
-
-Tạo wiring riêng:
-
-```text
-desktop/electron/services/photoxSdk.ts
-```
-
-Migration:
-
-```text
-legacy main.ts
-   ↓ adapter
-PhotoX SDK
-   ↓
-Media API / Video Media / Catalog / Jobs / Policy / Providers
-```
-
-Chuyển từng route/service một, không đổi toàn hệ thống cùng lúc.
-
----
-
-# 4. Storage Providers
-
-## Local
-
-`@photox/provider-local` dùng path lấy từ Electron config hoặc `app.getPath('userData')`.
-
-## Google Drive
-
-Giữ OAuth/Drive hiện tại, bọc bằng adapter cho `GoogleDriveProvider`.
-
-Replica chuẩn:
-
-```ts
-{
-  providerId: 'google-drive',
-  accountId: 'drive-account-a',
-  remoteFileId: '...'
-}
-```
-
-Legacy replica không có `providerId` được normalize khi đọc thành `google-drive`.
-
-## Telegram Bot
+# 4. SQLite persistence — dùng thật trên Desktop
 
 Package:
 
 ```text
-@photox/provider-telegram
+@photox/persistence-sqlite
 ```
 
-Hỗ trợ nhiều bot/account, mỗi bot có `chatId`, Cloud Bot API hoặc Local Bot API Server, health check và media stats.
+Dùng Node built-in SQLite runtime để persist các thành phần quan trọng.
 
-Config chỉ lưu reference tới secret:
+Khởi tạo:
 
 ```ts
-{
-  accountId: 'telegram-backup-1',
-  displayName: 'Telegram Backup 1',
-  chatId: '-100...',
-  botTokenSecretKey: 'telegram.bot.telegram-backup-1',
-  enabled: true,
-  apiMode: 'cloud'
-}
+import {
+  SqlitePhotoXStore,
+  SqliteJobRepository,
+  SqliteMediaCloudRepository,
+  SqliteVideoMediaRepository,
+  SqliteRefreshSessionStore,
+} from '@photox/persistence-sqlite';
+
+const store = new SqlitePhotoXStore({
+  path: `${app.getPath('userData')}/photox.db`,
+});
 ```
 
-Token thật phải nằm trong Keychain / Credential Manager / DPAPI / keyring, không lưu plaintext trong DB/config/log.
+Repositories:
+
+```ts
+const jobsRepo = new SqliteJobRepository(store);
+const cloudRepo = new SqliteMediaCloudRepository(store);
+const videoRepo = new SqliteVideoMediaRepository(store);
+const refreshSessions = new SqliteRefreshSessionStore(store);
+```
+
+Persist hiện tại:
+
+```text
+photox_jobs
+photox_media_cloud
+photox_video_media
+photox_refresh_sessions
+```
+
+Refresh token raw không lưu DB; chỉ lưu SHA-256 hash.
+
+Không dùng Memory repositories trong production Desktop.
 
 ---
 
 # 5. Media Cloud Catalog
 
-Package:
-
-```text
-@photox/media-cloud
+```ts
+const cloudCatalog = new MediaCloudCatalog(cloudRepo, {
+  targetReplicas: 2,
+  requireDistinctAccounts: true,
+  preferDistinctProviders: true,
+});
 ```
 
-Ví dụ:
+Khi Desktop nhận media:
 
 ```text
-IMG_001.HEIC
-├── Local / Mac SSD               VERIFIED
-├── Google Drive / Account A      VERIFIED
-└── Telegram Bot / Backup Bot 1   VERIFIED
+receive file
+→ hash + metadata
+→ registerAsset
+→ attach local VERIFIED replica
+→ enqueue remote replication jobs
 ```
 
-Mỗi replica cần:
+Replica identity:
 
 ```text
 replicaId
@@ -216,9 +211,7 @@ assetId
 providerId
 accountId
 state
-remoteFileId (nếu remote)
-webViewLink (nếu có)
-verifiedAt
+remoteFileId
 ```
 
 Health:
@@ -231,651 +224,17 @@ lost
 unknown
 ```
 
-Production cần persistent `MediaCloudRepository`, ví dụ SQLite:
-
-```text
-media_cloud_assets
-media_cloud_replicas
-```
-
-Luồng upload:
-
-```text
-receive media
-→ hash + metadata
-→ catalog.registerAsset
-→ local replica VERIFIED
-→ policy chọn destinations
-→ job upload
-→ provider.upload
-→ catalog UPLOADED
-→ integrity.verify
-→ catalog VERIFIED
-```
-
-Upload API trả success **chưa đủ** để tính backup an toàn; phải verify.
+UI không tự đếm replica bằng cách query provider; đọc từ Media Cloud Catalog.
 
 ---
 
-# 6. Media API — contract Mobile/Desktop
-
-Package:
-
-```text
-@photox/media-api
-```
-
-Mục tiêu: UI không đọc raw DB row, local path hoặc provider record. API trả DTO ổn định đã aggregate từ Media Index + Video Media + Cloud Catalog + Edit + Sync.
-
-## 6.1 Endpoint
-
-```text
-POST /api/v1/auth/pair/exchange
-POST /api/v1/auth/refresh
-POST /api/v1/auth/revoke
-
-GET  /api/v1/media
-GET  /api/v1/media/:id
-GET  /api/v1/media/:id/thumbnail
-GET  /api/v1/media/:id/preview
-GET  /api/v1/media/:id/content
-GET  /api/v1/media/:id/replicas
-```
-
-Có thể giữ route legacy `/api/v1/library` trong migration và map dần sang service mới.
-
-## 6.2 MediaDTO
-
-Response public ví dụ:
+# 6. Durable Jobs
 
 ```ts
-{
-  id: 'asset_123',
-  type: 'video',
-  filename: 'IMG_001.MOV',
-  mimeType: 'video/quicktime',
-  width: 3840,
-  height: 2160,
-  durationMs: 183240,
-  sizeBytes: 812345678,
-  createdAt: '...',
-
-  thumbnail: { url: '/api/v1/media/asset_123/thumbnail' },
-  preview: { url: '/api/v1/media/asset_123/preview' },
-  original: { url: '/api/v1/media/asset_123/content' },
-
-  video: {
-    fps: 60,
-    bitrate: 42000000,
-    codec: 'hevc',
-    hasAudio: true,
-    playback: {
-      url: '/api/v1/media/asset_123/content',
-      supportsRange: true
-    }
-  },
-
-  cloud: {
-    health: 'protected',
-    requiredReplicas: 2,
-    verifiedReplicas: 3
-  }
-}
+const jobs = new DurableJobQueue(jobsRepo);
 ```
 
-Không trả:
-
-```text
-Google access/refresh token
-Telegram bot token
-local absolute filesystem path
-DB internal secret fields
-provider credential
-recovery key
-```
-
-## 6.3 Cursor pagination
-
-```text
-GET /api/v1/media?cursor=...&limit=100
-```
-
-Response:
-
-```ts
-{
-  items: [...],
-  nextCursor: '...',
-  hasMore: true
-}
-```
-
-Repository thật nên dùng stable sort key như `createdAt DESC + assetId DESC`.
-
-## 6.4 Query/filter
-
-```text
-type=photo|video
-from=
-to=
-favorite=true
-albumId=
-health=under_replicated|degraded
-providerId=google-drive
-edited=true
-search=
-```
-
-## 6.5 Binary delivery
-
-Không nhét binary/base64 vào JSON list.
-
-```text
-/media/:id/thumbnail
-/media/:id/preview
-/media/:id/content
-```
-
-`MediaContentResolver` chịu trách nhiệm tìm file thật; controller không biết file nằm Local/Drive/Telegram.
-
----
-
-# 7. Video Media Library — xử lý video không play / không thumb / không duration
-
-Package:
-
-```text
-@photox/video-media
-```
-
-Đây là library trung lập platform. Không import trực tiếp Expo, Electron, ffmpeg, AVFoundation hoặc player cụ thể.
-
-Mục tiêu giải quyết 3 lỗi hiện tại:
-
-```text
-1. Video không có duration/time
-2. Video không có thumbnail/poster
-3. Video không play hoặc seek được trên Mobile/Desktop
-```
-
-## 7.1 Thành phần
-
-```text
-@photox/video-media
-├── VideoProbeAdapter
-├── VideoThumbnailAdapter
-├── VideoPreviewAdapter
-├── VideoTranscodeAdapter
-├── VideoMediaRepository
-├── VideoMediaService
-├── VideoPlaybackResolver
-└── PlaybackPolicy
-```
-
-## 7.2 Metadata chuẩn
-
-`VideoProbeAdapter` phải trả:
-
-```ts
-{
-  durationMs: 183240,
-  width: 3840,
-  height: 2160,
-  rotation: 0,
-  fps: 60,
-  bitrate: 42000000,
-  container: 'mov',
-  videoCodec: 'hevc',
-  audioCodec: 'aac',
-  hasAudio: true,
-  sizeBytes: 812345678
-}
-```
-
-**Duration phải persist vào DB/index**. UI không được mở player chỉ để tính duration mỗi lần render list.
-
-Khuyến nghị bảng:
-
-```text
-video_media
-```
-
-Tối thiểu:
-
-```text
-asset_id
-duration_ms
-width
-height
-rotation
-fps
-bitrate
-container
-video_codec
-audio_codec
-has_audio
-thumbnail_uri
-preview_uri
-updated_at
-```
-
-## 7.3 Pipeline khi Desktop nhận/import video
-
-```text
-video received
-    ↓
-VideoProbeAdapter.probe
-    ↓
-metadata + duration
-    ↓
-VideoThumbnailAdapter.createThumbnail
-    ↓
-poster/thumbnail
-    ↓
-optional preview/transcode
-    ↓
-VideoMediaRepository.save
-    ↓
-Media API trả duration + thumbnail + playback info
-```
-
-Code wiring sau này:
-
-```ts
-const record = await videoMedia.process(assetId, {
-  uri: localUri,
-  assetId,
-  mimeType,
-  sizeBytes,
-}, {
-  thumbnailMaxWidth: 640,
-  createPreview: true,
-});
-```
-
-## 7.4 Thumbnail generation
-
-Library tự chọn timestamp an toàn mặc định:
-
-```text
-min(1 giây, khoảng 10% duration)
-```
-
-và clamp trong thời lượng video để tránh seek ra ngoài EOF.
-
-Không nên luôn lấy frame `0ms` vì nhiều video frame đầu đen/fade-in.
-
-Thumbnail đề xuất:
-
-```text
-Grid thumbnail: 320–512 px
-Detail poster: 640–1280 px
-Format: JPEG/WebP theo adapter
-```
-
-Thumbnail là cache/derived media, không phải replica backup bắt buộc.
-
-Có thể regenerate nếu mất.
-
-## 7.5 Desktop adapter
-
-Desktop nên implement:
-
-```text
-VideoProbeAdapter      → ffprobe/native media engine
-VideoThumbnailAdapter  → ffmpeg/native media engine
-VideoPreviewAdapter    → ffmpeg/native engine
-VideoTranscodeAdapter  → ffmpeg/native engine khi cần
-```
-
-Library core không bundle ffmpeg để tránh ép Mobile/Desktop dùng cùng binary/runtime.
-
-Desktop adapter chịu trách nhiệm:
-
-```text
-probe duration/codecs
-extract frame
-fix rotation metadata
-create preview
-optional compatible derivative
-```
-
-## 7.6 Mobile adapter
-
-Mobile inject adapter dùng media APIs/native modules phù hợp platform.
-
-Không đưa Expo/React Native dependency vào `@photox/video-media`.
-
-Mobile chỉ cần nhận DTO:
-
-```text
-durationMs
-thumbnail.url
-playback.url
-playback.supportsRange
-mimeType
-```
-
-Player UI sau này dùng những field này.
-
-## 7.7 Playback Resolver
-
-Không cho player tự biết video nằm ở đâu.
-
-Luồng:
-
-```text
-Player requests assetId
-  ↓
-VideoPlaybackResolver
-  ↓
-Media Cloud replicas
-  ↓
-PlaybackPolicy
-  ↓
-best source
-  ↓
-Media API content endpoint
-```
-
-`PlaybackPolicy` hiện ưu tiên:
-
-```text
-local source                    + cao nhất
-HTTP Range support              + cao
-video/mp4 compatible source     + cao
-latency thấp                    + điểm
-healthy source                  bắt buộc
-```
-
-Ví dụ:
-
-```text
-Local Mac SSD       → chọn trước
-Drive A Range       → fallback
-Telegram            → fallback nếu adapter/source phù hợp
-```
-
-## 7.8 HTTP Range — bắt buộc cho video lớn
-
-Mobile/Desktop player phải gửi:
-
-```http
-Range: bytes=0-
-```
-
-hoặc range seek cụ thể.
-
-Desktop Media API phải forward range xuống source/provider và trả:
-
-```http
-HTTP/1.1 206 Partial Content
-Accept-Ranges: bytes
-Content-Range: bytes 0-1048575/812345678
-Content-Length: 1048576
-Content-Type: video/mp4
-```
-
-Không tải toàn bộ video 2–4 GB rồi mới play.
-
-Nếu source không hỗ trợ range, resolver có thể ưu tiên một replica khác hoặc materialize/cache local trước khi play.
-
-## 7.9 Codec compatibility
-
-Không phải video upload thành công là player nào cũng decode được.
-
-`VideoMediaService.isWidelyPlayable()` hiện đánh giá baseline phổ biến:
-
-```text
-H.264 / HEVC video
-AAC audio hoặc no audio
-```
-
-Nếu source không tương thích và có `VideoTranscodeAdapter`, có thể tạo derivative:
-
-```text
-Original MKV/VP9/etc.
-      ↓
-compatible preview/cache
-MP4 + H.264 + AAC
-```
-
-**Không overwrite original.**
-
-Derivative chỉ là variant/cache để playback.
-
-## 7.10 Variant model
-
-Một video có thể có:
-
-```text
-ORIGINAL
-THUMBNAIL
-POSTER
-PREVIEW
-PLAYBACK_DERIVATIVE
-```
-
-Original vẫn immutable và được backup theo policy.
-
-Thumbnail/preview/playback derivative có thể regenerate nên không nhất thiết phải đạt replica target giống original.
-
-## 7.11 Jobs
-
-Video processing nên chạy qua `@photox/jobs`:
-
-```text
-video.probe
-video.thumbnail.generate
-video.preview.generate
-video.transcode.playback
-```
-
-Khi video mới sync sang Desktop:
-
-```text
-receive video
-→ enqueue video.probe
-→ save duration/codec
-→ enqueue thumbnail
-→ thumbnail ready
-→ Media API DTO update
-```
-
-Không block upload/sync chỉ vì thumbnail chưa tạo xong.
-
-## 7.12 API khi thumbnail chưa có
-
-Media API nên trả trạng thái thay vì URL lỗi:
-
-```ts
-{
-  thumbnail: null,
-  processing: {
-    videoMetadata: 'ready',
-    thumbnail: 'pending'
-  }
-}
-```
-
-UI dùng placeholder và tự refresh/subscription/event khi thumbnail ready.
-
-Không trả broken thumbnail URL.
-
-## 7.13 Video trên cloud nhưng local đã mất
-
-```text
-Mobile requests play
-→ Desktop API
-→ local replica unavailable
-→ PlaybackPolicy chọn verified remote replica
-→ provider/content resolver
-→ Range stream nếu hỗ trợ
-```
-
-Mobile không cần biết đó là Google Drive hay Telegram.
-
-Nếu Telegram cloud không phù hợp random range/large playback, policy có thể materialize cache local trước hoặc ưu tiên Drive/local replica.
-
-## 7.14 Caching
-
-Desktop nên cache:
-
-```text
-thumbnail cache
-preview cache
-optional playback chunks/materialized derivative
-```
-
-Cache key:
-
-```text
-assetId
-sourceSha256
-variant
-variantVersion
-```
-
-Original checksum đổi → derived cache invalid.
-
-## 7.15 Delete
-
-Khi xóa original:
-
-```text
-Trash original
-→ mark derived variants disposable
-→ purge thumbnails/previews theo lifecycle
-```
-
-Không coi thumbnail là một original asset độc lập.
-
-## 7.16 Checklist video trước khi gắn UI
-
-- [ ] probe trả duration chính xác
-- [ ] duration persist sau restart
-- [ ] width/height/rotation đúng
-- [ ] codec/container được đọc
-- [ ] thumbnail tạo được
-- [ ] frame thumbnail không vượt duration
-- [ ] thumbnail missing có placeholder
-- [ ] Range request trả 206
-- [ ] seek video hoạt động
-- [ ] player không tải toàn file trước khi phát
-- [ ] local source được ưu tiên
-- [ ] remote fallback hoạt động
-- [ ] incompatible source có strategy preview/transcode
-- [ ] original không bị overwrite bởi transcode
-- [ ] processing chạy background job
-- [ ] cache có invalidation theo source hash
-
----
-
-# 8. JWT/JWS / Auth
-
-**Có cho tunnel/internet/multi-device; nhưng core không bắt buộc phụ thuộc JWT.**
-
-`@photox/media-api` có abstraction:
-
-```text
-AccessTokenIssuer
-AccessTokenVerifier
-RefreshSessionStore
-AuthorizationService
-AuthSessionService
-```
-
-Production Desktop nên implement issuer/verifier bằng JOSE/JWT library uy tín.
-
-## 8.1 Pairing → session
-
-```text
-Mobile scan QR
-→ pairCode + deviceId
-→ POST /auth/pair/exchange
-→ Desktop verify pairing
-→ accessToken ngắn hạn
-→ refreshToken/session credential dài hơn
-```
-
-Sau đó:
-
-```http
-Authorization: Bearer <access-token>
-```
-
-Access token khoảng 15 phút là reasonable default; refresh session revoke/rotate được.
-
-## 8.2 Claims
-
-```text
-iss   = photox-desktop
-aud   = photox-mobile
-sub   = principal
-sid   = session id
-did   = paired device id
-scope = media:read media:download cloud:read
-iat
-exp
-jti
-```
-
-Không đặt provider credential vào token payload.
-
-## 8.3 Scope
-
-```text
-media:read
-media:download
-media:write
-media:delete
-cloud:read
-cloud:manage
-```
-
-Refresh token có thể là opaque random secret + hash trong DB để revoke dễ hơn.
-
----
-
-# 9. Integrity Verification
-
-Package `@photox/integrity` hỗ trợ:
-
-```text
-UNKNOWN
-HEALTHY
-MISSING
-CORRUPTED
-UNREADABLE
-STALE
-```
-
-Verify:
-
-```text
-exists
-readable
-size
-SHA256
-checkedAt
-```
-
-Restore Verification:
-
-```text
-download replica temp
-→ SHA256
-→ compare original
-→ delete temp
-```
-
-Replica không healthy không được tính đủ protection target.
-
----
-
-# 10. Durable Jobs
-
-Package `@photox/jobs` dùng cho:
+Các tác vụ dài phải đưa vào jobs:
 
 ```text
 media.upload
@@ -884,14 +243,12 @@ replica.repair
 catalog.reconcile
 catalog.backup
 catalog.restore
-storage.rebalance
-media.delete
-thumbnail.generate
 video.probe
 video.thumbnail.generate
 video.preview.generate
 video.transcode.playback
-edit.export
+media.delete
+storage.rebalance
 ```
 
 State:
@@ -906,13 +263,389 @@ FAILED
 CANCELLED
 ```
 
-Production thay memory repository bằng SQLite repository. Restart Desktop phải tiếp tục được jobs chưa hoàn tất.
+Desktop restart phải đọc lại `QUEUED` / `RETRY_WAIT` và tiếp tục.
 
 ---
 
-# 11. Reconciliation
+# 7. Video metadata / thumbnail / playback
 
-Package `@photox/reconciliation` đối chiếu:
+Core:
+
+```text
+@photox/video-media
+```
+
+Runtime Desktop:
+
+```text
+@photox/video-ffmpeg
+```
+
+Khởi tạo:
+
+```ts
+import { FfmpegVideoAdapter } from '@photox/video-ffmpeg';
+import { VideoMediaService } from '@photox/video-media';
+
+const ffmpeg = new FfmpegVideoAdapter({
+  ffmpegPath: '/path/to/ffmpeg',
+  ffprobePath: '/path/to/ffprobe',
+  outputDir: `${app.getPath('userData')}/video-cache`,
+});
+
+const video = new VideoMediaService(
+  ffmpeg,
+  ffmpeg,
+  videoRepo,
+  ffmpeg,
+  ffmpeg,
+);
+```
+
+Pipeline:
+
+```text
+video received
+→ ffprobe metadata
+→ duration / width / height / fps / bitrate / codecs
+→ create thumbnail/poster
+→ optional preview
+→ optional H.264/AAC MP4 playback derivative
+→ save metadata to SQLite
+```
+
+Original không bị overwrite.
+
+Thumbnail mặc định lấy frame an toàn khoảng `min(1s, 10% duration)` để tránh frame đầu đen.
+
+Video record chứa:
+
+```text
+durationMs
+width
+height
+rotation
+fps
+bitrate
+container
+videoCodec
+audioCodec
+hasAudio
+thumbnail
+preview
+```
+
+---
+
+# 8. Media Delivery — chọn nguồn và HTTP Range
+
+Core:
+
+```text
+@photox/media-delivery
+```
+
+Node adapters:
+
+```text
+@photox/media-delivery-node
+```
+
+Resolver:
+
+```ts
+const delivery = new MediaDeliveryResolver(deliveryCatalog)
+  .register(new LocalFileDeliveryAdapter('local'));
+```
+
+Remote provider có thể dùng `HttpDeliveryAdapter` hoặc adapter riêng để lấy authenticated URL/stream.
+
+Ranking ưu tiên:
+
+```text
+VERIFIED/healthy
+→ Local
+→ supports HTTP Range
+→ MP4-compatible
+→ latency thấp
+```
+
+Nếu Local hỏng/mất:
+
+```text
+Media API request
+→ Local fails
+→ Drive candidate
+→ Telegram candidate
+→ trả candidate đầu tiên hoạt động
+```
+
+Không viết fallback logic trong UI/player.
+
+## HTTP Range
+
+Local adapter hỗ trợ:
+
+```http
+Range: bytes=1048576-2097151
+```
+
+và trả:
+
+```http
+206 Partial Content
+Accept-Ranges: bytes
+Content-Range: bytes .../...
+Content-Length: ...
+```
+
+Đây là điều kiện để video lớn play/seek mà không tải toàn bộ file.
+
+---
+
+# 9. Media API
+
+Package:
+
+```text
+@photox/media-api
+```
+
+Endpoint đích:
+
+```text
+POST /api/v1/auth/pair/exchange
+POST /api/v1/auth/refresh
+POST /api/v1/auth/revoke
+
+GET  /api/v1/media
+GET  /api/v1/media/:id
+GET  /api/v1/media/:id/thumbnail
+GET  /api/v1/media/:id/preview
+GET  /api/v1/media/:id/content
+GET  /api/v1/media/:id/replicas
+```
+
+List dùng cursor pagination:
+
+```text
+GET /api/v1/media?cursor=...&limit=100
+```
+
+Có filter:
+
+```text
+type
+from/to
+favorite
+albumId
+health
+providerId
+edited
+search
+```
+
+Không trả binary/base64 trong list JSON.
+
+Không expose:
+
+```text
+local absolute path
+Google token
+Telegram bot token
+recovery key
+provider credential
+```
+
+---
+
+# 10. JWT/JWS thật bằng JOSE
+
+Package:
+
+```text
+@photox/auth-jose
+```
+
+Khởi tạo với secret tối thiểu 32 bytes từ secure storage:
+
+```ts
+const tokenService = new JoseAccessTokenService({
+  secret: jwtSecret,
+  issuer: 'photox-desktop',
+  audience: 'photox-mobile',
+});
+```
+
+`tokenService` implement cả:
+
+```text
+AccessTokenIssuer
+AccessTokenVerifier
+```
+
+Claims:
+
+```text
+iss
+aud
+sub
+sid
+did
+scopes
+iat
+exp
+jti
+```
+
+Không nhét provider credentials vào JWT.
+
+Luồng pairing:
+
+```text
+QR / pair code
+→ verify pairing
+→ create refresh session SQLite
+→ issue access JWT ~15m
+→ mobile dùng Authorization: Bearer <token>
+```
+
+Refresh session có thể revoke theo `sessionId`.
+
+Tunnel/internet phải dùng HTTPS/WSS.
+
+---
+
+# 11. Mobile SDK mới + compatibility cũ
+
+Legacy `DesktopClient` vẫn giữ:
+
+```text
+/api/v1/status
+/api/v1/library
+x-photosync-pair-code
+```
+
+Không xoá cho tới khi migration hoàn tất.
+
+Client mới:
+
+```text
+MediaApiClient
+```
+
+Hỗ trợ:
+
+```text
+Bearer access token
+access expiry check
+refresh access token
+retry request 1 lần sau 401
+list MediaDTO
+media detail
+replicas
+content/thumbnail/preview paths
+```
+
+Production Mobile phải implement `MobileAuthSessionStore` bằng Keychain/Keystore/SecureStore tương ứng; `MemoryMobileAuthSessionStore` chỉ dành dev/test.
+
+---
+
+# 12. Storage Providers
+
+## Local
+
+Dùng `@photox/provider-local`.
+
+## Google Drive
+
+Giữ OAuth/Drive legacy, bọc bằng adapter cho `@photox/provider-google-drive`.
+
+Legacy replica thiếu `providerId` normalize thành:
+
+```text
+google-drive
+```
+
+## Telegram
+
+Dùng `@photox/provider-telegram`.
+
+Bot token phải nằm trong secure secret store, không plaintext DB/config.
+
+Telegram `file_id` phải luôn đi cùng `accountId` vì file ID gắn với bot context.
+
+---
+
+# 13. Integrity
+
+```text
+@photox/integrity
+```
+
+Sau upload:
+
+```text
+exists?
+readable?
+size match?
+SHA256 match?
+```
+
+State:
+
+```text
+HEALTHY
+MISSING
+CORRUPTED
+UNREADABLE
+STALE
+UNKNOWN
+```
+
+Upload API success chưa được tính `VERIFIED` cho tới khi verify phù hợp provider.
+
+---
+
+# 14. Replica Policy + scoring
+
+```text
+@photox/replica-policy
+```
+
+Policy dựa trên:
+
+```text
+media type
+file size
+album
+favorite
+important
+edited
+```
+
+Scoring dựa trên:
+
+```text
+account health
+free space
+max object size
+latency
+recent failure rate
+provider/account diversity
+```
+
+Important media có thể yêu cầu:
+
+```text
+3 replicas
+>= 3 accounts
+>= 2 providers
+```
+
+---
+
+# 15. Reconciliation
 
 ```text
 Media Cloud Catalog
@@ -933,404 +666,239 @@ Ví dụ user xoá file trực tiếp trên Drive:
 ```text
 reconcile
 → MISSING_REMOTE
+→ mark replica lỗi
 → enqueue replica.repair
-→ policy/scoring chọn destination mới
-→ upload
-→ verify
+→ policy chọn destination mới
+→ upload + verify
 → protected lại
 ```
 
 ---
 
-# 12. Catalog Backup / Disaster Recovery
+# 16. Catalog Backup / Recovery
 
-Package `@photox/catalog-backup` backup chính catalog PhotoX.
+Catalog phải được backup tối thiểu 2 destination độc lập.
 
 ```text
-Catalog local DB
-├── Google Drive backup
-└── provider độc lập thứ hai
+local DB
+├── Drive A
+└── provider/account khác
 ```
 
-Snapshot có checksum và có thể encrypt.
+Snapshot:
 
-Recovery:
+```text
+schemaVersion
+catalogVersion
+createdAt
+payload
+checksum
+encrypted
+```
+
+Disaster recovery:
 
 ```text
 máy mới
-→ lấy snapshot mới nhất
+→ lấy latest catalog snapshot
 → verify checksum
 → decrypt
 → import catalog
-→ restore provider configs/credentials riêng
+→ restore provider credentials riêng
 → reconciliation
-→ rebuild local index/cache
-→ regenerate video thumbnails/previews nếu cần
+→ rebuild cache/index
 ```
 
 Recovery key không lưu cùng snapshot.
 
 ---
 
-# 13. Advanced Replica Policy
+# 17. Desktop SDK composition
 
-Package `@photox/replica-policy` resolve rule theo:
+`PhotoXDesktopSDK` vẫn giữ storage/sync facade cũ nhưng đã expose `services` để inject dần:
 
-```text
-media type
-size
-album
-favorite
-important
-edited
+```ts
+const sdk = new PhotoXDesktopSDK({
+  services: {
+    mediaCloud: cloudCatalog,
+    mediaApi,
+    delivery,
+    integrity,
+    jobs,
+    reconciliation,
+    catalogBackup,
+    catalogRecovery,
+    replicaPolicy,
+    providerScoring,
+    video,
+  },
+});
 ```
 
-Provider scoring dùng:
+Có thể thêm từng service bằng:
 
-```text
-health
-free bytes
-max object size
-latency
-failure rate
-provider/account diversity
-allow/deny rules
+```ts
+sdk.use('video', video);
+sdk.use('jobs', jobs);
 ```
 
-Ví dụ important media:
-
-```text
-3 replicas
->= 3 accounts
->= 2 providers
-backup original
-backup editRecipe
-optional rendered copy
-```
+Mục tiêu là không rewrite `desktop/electron/main.ts` trong một lần.
 
 ---
 
-# 14. Luồng hoàn chỉnh
+# 18. Thứ tự wiring vào Desktop
 
-Ảnh:
+## Phase 1 — build/runtime foundation
 
 ```text
-Mobile
-→ Media API
-→ Desktop receive
-→ hash/metadata
-→ Catalog
-→ Policy/Scoring
-→ Job
-→ Provider upload
-→ Integrity verify
-→ VERIFIED
+SQLite store
+JWT secret store
+ffmpeg/ffprobe binary path
+provider credentials
 ```
 
-Video:
+## Phase 2 — read path
 
 ```text
-Mobile/Desktop imports video
-→ Desktop receive/index
-→ video.probe
-→ duration + codec + dimensions persist
-→ thumbnail job
-→ Media API exposes metadata + thumb
-→ PlaybackResolver chooses source
-→ Range stream
+MediaRepository adapter legacy
+MediaCloudCatalog
+Video metadata DB
+MediaDeliveryResolver
+GET /api/v1/media
+GET thumbnail/preview/content
 ```
 
-Backup và playback là hai concern khác nhau:
+Giữ `/api/v1/library` song song.
+
+## Phase 3 — auth
 
 ```text
-Original replica health → Media Cloud / Integrity
-Playable variant/source → Video Media / PlaybackPolicy
+pair exchange
+JOSE access token
+SQLite refresh sessions
+Bearer middleware
+revoke session
 ```
 
----
-
-# 15. Database/repository production đề xuất
+## Phase 4 — video
 
 ```text
-media_assets
-video_media
-media_cloud_assets
-media_cloud_replicas
-integrity_reports
+video.probe
+video.thumbnail.generate
+video preview/transcode
+Range content route
+player test + seek test
+```
+
+## Phase 5 — backup pipeline
+
+```text
 jobs
-job_events
-catalog_backup_history
-provider_accounts
-telegram_accounts
-telegram_media
-edit_records
-auth_sessions
+replication
+integrity verify
+MediaCloudCatalog update
+policy/scoring
 ```
 
-`auth_sessions` lưu refresh-session metadata/hash, không lưu raw refresh token nếu tránh được.
-
-Mọi schema cần migration/version.
-
----
-
-# 16. Desktop UI sau này
-
-Cloud Overview:
+## Phase 6 — resilience
 
 ```text
-Protection Score 98%
-50,243 media
-49,981 Protected
-201 Need Backup
-41 Degraded
-4 Lost/Corrupted
+reconciliation
+repair jobs
+catalog backup
+restore dry-run
 ```
 
-Video grid item:
+---
+
+# 19. Thứ tự wiring Mobile
 
 ```text
-┌──────────────────────┐
-│     thumbnail        │
-│                 3:03 │
-└──────────────────────┘
+1. persist pair/session credentials securely
+2. MediaApiClient
+3. Bearer auth
+4. MediaDTO list/grid
+5. thumbnail endpoint
+6. video duration overlay
+7. video content stream
+8. player seek/range
+9. download/edit/delete actions
+10. remove legacy /library only sau khi stable
 ```
 
-Duration đọc từ persisted `durationMs`, không probe lại lúc render UI.
+Mobile không cần biết file nằm Local/Drive/Telegram.
 
-Video detail:
+---
+
+# 20. Integration tests bắt buộc
+
+Trước khi chuyển production behavior:
 
 ```text
-poster
-play/pause
-seek bar
-time / duration
-volume
-fullscreen
-metadata
-backup health
+upload → local catalog → remote replication → verify
+restart Desktop → jobs còn và resume
+restart Desktop → catalog/video metadata còn
+list media → cursor pagination đúng
+video → duration đúng
+video → thumbnail tạo được
+video → play local
+video → seek Range 206
+local replica missing → Drive fallback
+Drive fail → provider khác fallback
+pair → JWT → access media
+expired JWT → refresh → retry
+revoke session → refresh fail
+manual remote delete → reconciliation detect
+repair → protected trở lại
+catalog snapshot → restore DB mới
 ```
-
-UI gọi API/service; không gọi ffmpeg/provider trực tiếp.
 
 ---
 
-# 17. Mobile integration
-
-Mobile không cần biết original nằm Drive hay Telegram.
-
-Mobile chỉ dùng Media API:
+# 21. Checklist trước khi merge main
 
 ```text
-list media
-media detail
-thumbnail
-preview
-content stream
-cloud health summary
+[ ] npm install PASS
+[ ] npm run build:sdk PASS
+[ ] npm run typecheck:sdk PASS
+[ ] npm test PASS
+[ ] desktop build PASS
+[ ] mobile typecheck/build PASS
+[ ] SQLite repositories dùng thật
+[ ] no Memory repository production
+[ ] ffmpeg/ffprobe adapter hoạt động trên macOS + Windows
+[ ] video duration/thumb/play/seek PASS
+[ ] Range 206 PASS
+[ ] MediaDelivery fallback PASS
+[ ] JOSE JWT verify PASS
+[ ] refresh revoke PASS
+[ ] provider credentials không leak
+[ ] catalog replica migration PASS
+[ ] job resume after restart PASS
+[ ] reconciliation/repair PASS
+[ ] catalog backup/restore PASS
 ```
 
-Video card lấy:
+---
+
+# 22. Nguyên tắc lâu dài
 
 ```text
-thumbnail.url
-durationMs
-```
-
-Video player lấy:
-
-```text
-playback/content URL
-Bearer token
-Range support
-mimeType
-```
-
-Nếu access token hết hạn → refresh → retry một lần.
-
-Không yêu cầu scan QR lại trừ khi session bị revoke/mất credential.
-
----
-
-# 18. Photo Editor
-
-`@photox/image-editor` vẫn dùng non-destructive `EditRecipe`.
-
-Original immutable.
-
-Video editing/transcoding không được nhét vào image-editor; nếu sau này làm Video Editor thì tạo package riêng dùng chung video metadata/variant contracts từ `@photox/video-media`.
-
----
-
-# 19. Background schedule khuyến nghị
-
-```text
-Realtime
-- upload
-- video metadata probe
-- upload verification
-- critical repair
-
-Ngay sau video ingest
-- thumbnail generation
-- optional preview generation
-
-Mỗi vài giờ
-- provider/account health
-- lightweight integrity sample
-
-Nightly
-- reconciliation incremental
-- catalog backup
-- protection recalculation
-
-Weekly
-- deeper reconciliation
-- random restore verification
-- rebalance recommendation
-```
-
-Tất cả task dài enqueue vào durable jobs, không chạy trên UI thread.
-
----
-
-# 20. Thứ tự tích hợp vào main
-
-## Phase 1 — Library only
-
-- build/typecheck all packages
-- chưa đổi UI
-- implement persistent repositories/adapters
-
-## Phase 2 — Media API read path
-
-1. implement `MediaRepository`
-2. implement Media URL factory
-3. wire `MediaCloudCatalog`
-4. expose list/detail
-5. giữ `/api/v1/library` compatibility
-
-## Phase 3 — Video metadata + thumbnail
-
-1. implement Desktop `VideoProbeAdapter`
-2. implement Desktop `VideoThumbnailAdapter`
-3. persistent `VideoMediaRepository`
-4. enqueue probe khi video ingest
-5. enqueue thumbnail
-6. map `durationMs` + thumbnail vào MediaDTO
-7. mobile/desktop grid dùng DTO mới
-
-## Phase 4 — Video playback
-
-1. implement `VideoPlaybackResolver`
-2. local source support
-3. Media API Range forwarding
-4. Drive fallback
-5. Telegram/cache strategy
-6. compatible playback derivative khi codec không phù hợp
-7. player Mobile/Desktop chỉ dùng API URL
-
-## Phase 5 — Auth
-
-1. secure pairing verifier
-2. JWT/JWS issuer/verifier hoặc opaque token adapter
-3. persistent RefreshSessionStore
-4. exchange pair code → session
-5. Bearer middleware
-6. revoke
-
-## Phase 6 — Catalog + Jobs + Integrity
-
-1. persistent catalog
-2. durable queue
-3. provider upload jobs
-4. integrity probes
-5. repair jobs
-
-## Phase 7 — Reconciliation + Recovery
-
-1. inventories
-2. incremental reconcile
-3. catalog backup
-4. restore dry-run
-5. disaster recovery test
-
----
-
-# 21. CI
-
-CI phải build/typecheck:
-
-```bash
-npm --workspace @photox/media-cloud run build
-npm --workspace @photox/media-api run build
-npm --workspace @photox/video-media run build
-npm --workspace @photox/integrity run build
-npm --workspace @photox/jobs run build
-npm --workspace @photox/reconciliation run build
-npm --workspace @photox/catalog-backup run build
-npm --workspace @photox/replica-policy run build
-```
-
-và tương ứng `run typecheck` trước platform build.
-
----
-
-# 22. Checklist API/Auth
-
-- [ ] MediaDTO không leak local path/token/secret
-- [ ] cursor ổn định khi library lớn
-- [ ] list endpoint không trả binary/base64
-- [ ] thumbnail/preview cache được
-- [ ] video Range trả 206 đúng
-- [ ] resolver fallback replica khỏe khác
-- [ ] access token có expiry
-- [ ] scope enforcement hoạt động
-- [ ] refresh session revoke được
-- [ ] pair code không trở thành credential vĩnh viễn
-- [ ] token không xuất hiện trong URL/query/log
-- [ ] tunnel/internet chỉ dùng HTTPS/WSS
-- [ ] brute-force pairing có rate limit ở HTTP layer
-- [ ] provider credentials không bao giờ nằm trong JWT
-
----
-
-# 23. Checklist hệ cloud
-
-- [ ] catalog biết toàn bộ replicas
-- [ ] verified replica đủ policy mới `protected`
-- [ ] checksum mismatch thành corrupted
-- [ ] missing remote được reconcile
-- [ ] repair dùng durable job
-- [ ] account full/auth error bị loại khỏi scoring
-- [ ] restart app không mất pending jobs
-- [ ] catalog có >= 2 backup targets
-- [ ] encrypted snapshot restore được
-- [ ] disaster recovery đã được test trên DB/máy mới
-
----
-
-# 24. Nguyên tắc kiến trúc lâu dài
-
-```text
-UI chỉ hiển thị/phát command.
-Media API là public contract; không expose raw persistence/provider model.
-Video metadata phải persist; UI không probe video để render list.
-Thumbnail/preview/playback derivative là regenerated variants, không thay original.
-Original video/image immutable.
-Player không biết provider; resolver chọn source.
-Video lớn phải hỗ trợ Range hoặc materialize/cache trước playback.
-Pairing chỉ bootstrap session, không làm credential vĩnh viễn.
-Access token ngắn hạn; refresh session phải revoke được.
-Durable jobs thực thi tác vụ dài.
-Media Cloud Catalog là source of truth về vị trí media.
-Provider chỉ thực hiện storage operation.
+UI chỉ hiển thị và phát command.
+Media API là public contract, không expose raw DB/provider model.
+Mobile không biết provider storage thật.
+Media Delivery quyết định replica nào phục vụ content.
+Media Cloud Catalog là source of truth về replica.
 Upload success chưa phải backup success; phải verify.
-Replica không healthy không được tính protection target.
-Reconciliation phát hiện drift giữa catalog và provider.
-Catalog cũng phải backup và restore thử.
-Credential tách khỏi config/catalog/API.
-Provider mới không được yêu cầu rewrite media API/cloud core.
-Một provider lỗi không được kéo sập toàn hệ thống.
+Durable jobs xử lý tác vụ dài và phải sống qua restart.
+Video metadata/thumbnail được xử lý background, không tính lại khi render grid.
+Original media immutable.
+Playback derivative chỉ là cache/variant.
+Pairing chỉ bootstrap session, không phải credential vĩnh viễn.
+Access JWT ngắn hạn; refresh session revoke được.
+Credential không nằm trong API response/JWT/log.
+Provider mới không được yêu cầu rewrite cloud/media-api core.
+Một provider lỗi không được kéo sập toàn bộ pipeline.
 ```
 
-Giữ các nguyên tắc này để PhotoX phát triển thành personal media cloud có API ổn định, video metadata/thumbnail/playback đúng, session bảo mật, streaming tốt, tự kiểm tra replica và khôi phục được sau sự cố.
+Giữ kiến trúc này để PhotoX có thể tiến từ app sync ảnh/video thành personal media cloud có backup redundancy, streaming video đúng chuẩn, tự kiểm tra lỗi và phục hồi được sau sự cố.
