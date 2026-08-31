@@ -1,0 +1,1 @@
+{"name":"@photox/media-delivery-node","version":"0.1.0","private":true,"main":"dist/index.js","types":"dist/index.d.ts","scripts":{"build":"tsc -p tsconfig.json","typecheck":"tsc --noEmit -p tsconfig.json"},"dependencies":{"@photox/media-api":"*","@photox/media-delivery":"*"},"devDependencies":{"@types/node":"^24.3.0","typescript":"^5.9.3"}}
