@@ -16,6 +16,7 @@ on:
       - 'packages/video-media/**'
       - 'packages/video-ffmpeg/**'
       - 'packages/persistence-sqlite/**'
+      - 'packages/sdk-integration-tests/**'
       - 'packages/integrity/**'
       - 'packages/jobs/**'
       - 'packages/reconciliation/**'
@@ -49,5 +50,7 @@ jobs:
         run: npm run build:sdk
       - name: Typecheck SDK in dependency order
         run: npm run typecheck:sdk
+      - name: Runtime smoke tests
+        run: npm --workspace @photox/sdk-integration-tests test
       - name: Test image editor
         run: npm --workspace @photox/image-editor test
