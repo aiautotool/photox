@@ -1,5 +1,6 @@
 import { Alert } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as MediaLibrary from 'expo-media-library';
 import { EditorSettingsModel, SourceType } from '@imgly/editor-react-native';
 import { PhotoEditorScreen, type PhotoEditorAsset } from '../src/editor/PhotoEditorScreen';
 import { openNativePhotoEditor } from '../src/editor/EditorNavigationBridge';
@@ -17,9 +18,19 @@ export default function PhotoEditorRoute(){
   const mimeType=Array.isArray(params.mimeType)?params.mimeType[0]:params.mimeType;
   const asset:PhotoEditorAsset|null=uri&&id?{id,uri,filename:filename||'photo.jpg',width:numberParam(params.width),height:numberParam(params.height),mimeType}:null;
 
-  async function saveRecipe(recipe:ImageEditRecipe){
+  async function saveRecipe(recipe:ImageEditRecipe, renderedUri?:string){
     if(!asset)return;
     await saveEditRecipe(asset.id,recipe);
+    if(renderedUri){
+      const permission=await MediaLibrary.requestPermissionsAsync();
+      if(!permission.granted){
+        Alert.alert('Cần quyền thư viện ảnh','Cho phép truy cập Photos để lưu bản ảnh đã chỉnh sửa.');
+        return;
+      }
+      await MediaLibrary.createAssetAsync(renderedUri);
+      Alert.alert('Đã lưu ảnh','Đã tạo một ảnh chỉnh sửa mới. Ảnh gốc vẫn được giữ nguyên.',[{text:'OK',onPress:()=>router.back()}]);
+      return;
+    }
     Alert.alert('Đã lưu chỉnh sửa','Recipe đã được lưu không phá hủy. Ảnh gốc vẫn được giữ nguyên.');
   }
 
@@ -27,7 +38,12 @@ export default function PhotoEditorRoute(){
     if(!asset)return;
     await saveEditRecipe(asset.id,recipe);
     const settings=new EditorSettingsModel({license:process.env.EXPO_PUBLIC_IMGLY_LICENSE||undefined,userId:'photosync-mobile'});
-    await openNativePhotoEditor(settings,{source:asset.uri,type:SourceType.IMAGE},{sourceAssetId:asset.id,filename:asset.filename});
+    const result=await openNativePhotoEditor(settings,{source:asset.uri,type:SourceType.IMAGE},{sourceAssetId:asset.id,filename:asset.filename});
+    if(result?.artifact){
+      const artifact=result.artifact.startsWith('/')?`file://${result.artifact}`:result.artifact;
+      await MediaLibrary.createAssetAsync(artifact);
+      Alert.alert('Đã lưu ảnh','Đã lưu kết quả từ Advanced Editor.');
+    }
   }
 
   return <PhotoEditorScreen visible asset={asset} onClose={()=>router.back()} onSave={saveRecipe} onOpenAdvanced={openAdvanced}/>;
