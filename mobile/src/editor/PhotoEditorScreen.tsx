@@ -1,87 +1,320 @@
 import { useMemo, useRef, useState } from 'react';
 import { Alert, Dimensions, Modal, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
-import { EditSession, type AdjustmentName, type CropAspect, type EditOperation, type ImageEditRecipe } from '@photox/image-editor';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
+import {
+  Canvas,
+  ColorMatrix,
+  Image as SkiaImage,
+  RadialGradient,
+  Rect,
+  useCanvasRef,
+  useImage,
+  vec,
+} from '@shopify/react-native-skia';
+import { EditSession, type AdjustmentName, type CropAspect, type ImageEditRecipe } from '@photox/image-editor';
 
 const PURPLE = '#8B5CF6';
 const BG = '#090A0C';
 const PANEL = '#111216';
 const MUTED = '#8A8D95';
+const SCREEN = Dimensions.get('window').width;
+const PREVIEW_W = Math.min(SCREEN - 24, 520);
 
-type Tool = 'presets'|'adjust'|'crop'|'retouch'|'filters'|'effects'|'draw'|'text';
-type AdjustTab = 'light'|'color'|'detail'|'effects'|'geometry';
-type PresetCategory = 'recommended'|'portrait'|'landscape'|'food'|'night'|'film'|'bw';
-
-export interface PhotoEditorAsset { id:string; uri:string; filename:string; width?:number; height?:number; mimeType?:string; }
-export interface PhotoEditorScreenProps { visible:boolean; asset:PhotoEditorAsset|null; onClose():void; onSave(recipe:ImageEditRecipe):Promise<void>|void; onOpenAdvanced?(recipe:ImageEditRecipe):Promise<void>|void; }
-
-type Preset = { id:string; label:string; ops:Partial<Record<AdjustmentName,number>> };
-const PRESETS:Record<PresetCategory,Preset[]>={
-  recommended:[
-    {id:'auto',label:'Auto Enhance',ops:{exposure:.18,contrast:10,highlights:-12,shadows:18,vibrance:18,saturation:5}},
-    {id:'clean',label:'Clean',ops:{exposure:.08,contrast:6,whites:8,blacks:-5,vibrance:8}},
-    {id:'vivid',label:'Vivid',ops:{contrast:16,vibrance:28,saturation:10,clarity:8}},
-    {id:'cinematic',label:'Cinematic',ops:{contrast:18,highlights:-25,shadows:28,blacks:-12,saturation:-6,dehaze:8}},
-    {id:'golden',label:'Golden Hour',ops:{temperature:20,tint:3,vibrance:16,highlights:-10}},
-    {id:'film01',label:'Film 01',ops:{contrast:8,highlights:-18,shadows:12,fade:12,grain:14,saturation:-8}},
-  ],
-  portrait:[{id:'soft',label:'Soft Portrait',ops:{exposure:.12,highlights:-12,shadows:12,texture:-8,clarity:-6,vibrance:8}}],
-  landscape:[{id:'land',label:'Landscape+',ops:{contrast:14,clarity:12,dehaze:14,vibrance:20,highlights:-18}}],
-  food:[{id:'food',label:'Fresh',ops:{temperature:8,vibrance:22,saturation:10,contrast:8}}],
-  night:[{id:'night',label:'Night',ops:{exposure:.22,shadows:30,highlights:-28,noiseReduction:24,dehaze:10}}],
-  film:[{id:'film2',label:'Matte Film',ops:{contrast:-4,fade:18,grain:20,saturation:-12,temperature:5}}],
-  bw:[{id:'mono',label:'B&W',ops:{saturation:-100,contrast:20,clarity:12,grain:10}}],
+type Tool = 'presets' | 'adjust' | 'crop' | 'filters' | 'advanced';
+type AdjustmentState = {
+  exposure: number;
+  contrast: number;
+  saturation: number;
+  temperature: number;
+  tint: number;
+  fade: number;
+  vignette: number;
 };
 
-const ADJUSTMENTS:Record<AdjustTab,{name:AdjustmentName;label:string;min:number;max:number;step:number}[]>={
-  light:[{name:'exposure',label:'Exposure',min:-2,max:2,step:.05},{name:'contrast',label:'Contrast',min:-100,max:100,step:1},{name:'highlights',label:'Highlights',min:-100,max:100,step:1},{name:'shadows',label:'Shadows',min:-100,max:100,step:1},{name:'whites',label:'Whites',min:-100,max:100,step:1},{name:'blacks',label:'Blacks',min:-100,max:100,step:1}],
-  color:[{name:'temperature',label:'Temp',min:-100,max:100,step:1},{name:'tint',label:'Tint',min:-100,max:100,step:1},{name:'vibrance',label:'Vibrance',min:-100,max:100,step:1},{name:'saturation',label:'Saturation',min:-100,max:100,step:1}],
-  detail:[{name:'sharpness',label:'Sharpness',min:0,max:100,step:1},{name:'clarity',label:'Clarity',min:-100,max:100,step:1},{name:'texture',label:'Texture',min:-100,max:100,step:1},{name:'dehaze',label:'Dehaze',min:-100,max:100,step:1},{name:'noiseReduction',label:'Noise Reduction',min:0,max:100,step:1},{name:'colorNoiseReduction',label:'Color Noise Reduction',min:0,max:100,step:1}],
-  effects:[{name:'vignette',label:'Vignette',min:-100,max:100,step:1},{name:'grain',label:'Grain',min:0,max:100,step:1},{name:'fade',label:'Fade',min:0,max:100,step:1},{name:'glow',label:'Glow',min:0,max:100,step:1}],
-  geometry:[],
+type Preset = { id: string; label: string; values: Partial<AdjustmentState> };
+
+const DEFAULTS: AdjustmentState = {
+  exposure: 0,
+  contrast: 0,
+  saturation: 0,
+  temperature: 0,
+  tint: 0,
+  fade: 0,
+  vignette: 0,
 };
-const TOOL_ICONS:Record<Tool,string>={presets:'wand.and.stars',adjust:'slider.horizontal.3',crop:'crop',retouch:'bandage',filters:'camera.filters',effects:'sparkles',draw:'pencil.tip',text:'textformat'};
 
-function AdjustmentSlider({label,value,min,max,step,onChange}:{label:string;value:number;min:number;max:number;step:number;onChange(v:number):void}){
-  const width=Math.min(Dimensions.get('window').width-190,260); const ratio=(value-min)/(max-min);
-  const setFromX=(x:number)=>{const raw=min+Math.max(0,Math.min(1,x/width))*(max-min);onChange(Math.round(raw/step)*step);};
-  return <View style={s.sliderRow}><Text style={s.sliderLabel}>{label}</Text><View style={[s.track,{width}]} onTouchStart={e=>setFromX(e.nativeEvent.locationX)} onTouchMove={e=>setFromX(e.nativeEvent.locationX)}><View style={[s.trackBase,{width}]}/><View style={[s.trackFill,{width:Math.max(0,Math.min(1,ratio))*width}]}/><View style={[s.thumb,{left:Math.max(0,Math.min(width-12,ratio*width-6))}]}/></View><Text style={s.sliderValue}>{value>0?'+':''}{Number.isInteger(value)?value:value.toFixed(2)}</Text></View>;
+const PRESETS: Preset[] = [
+  { id: 'clean', label: 'Clean', values: { exposure: 0.12, contrast: 8, saturation: 5 } },
+  { id: 'vivid', label: 'Vivid', values: { contrast: 18, saturation: 24 } },
+  { id: 'warm', label: 'Warm', values: { temperature: 24, saturation: 8 } },
+  { id: 'cinema', label: 'Cinema', values: { contrast: 22, saturation: -10, fade: 8, vignette: 24 } },
+  { id: 'bw', label: 'B&W', values: { saturation: -100, contrast: 18 } },
+];
+
+const FILTERS: Preset[] = [
+  { id: 'natural', label: 'Natural', values: {} },
+  { id: 'gold', label: 'Faded Gold', values: { temperature: 30, saturation: -8, fade: 15 } },
+  { id: 'fuji', label: 'Fuji Pro', values: { contrast: 10, saturation: 15, tint: 6 } },
+  { id: 'moody', label: 'Moody', values: { exposure: -0.1, contrast: 24, saturation: -18, vignette: 28 } },
+  { id: 'retro', label: 'Retro', values: { temperature: 18, saturation: -20, fade: 24 } },
+];
+
+export interface PhotoEditorAsset {
+  id: string;
+  uri: string;
+  filename: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
 }
 
-export function PhotoEditorScreen({visible,asset,onClose,onSave,onOpenAdvanced}:PhotoEditorScreenProps){
-  const sessionRef=useRef<EditSession|null>(null); const [revision,setRevision]=useState(0); const [tool,setTool]=useState<Tool>('presets'); const [tab,setTab]=useState<AdjustTab>('light'); const [category,setCategory]=useState<PresetCategory>('recommended'); const [presetId,setPresetId]=useState('auto'); const [presetIntensity,setPresetIntensity]=useState(72); const [compare,setCompare]=useState(false); const [cropAspect,setCropAspect]=useState<CropAspect>('free'); const [historyVisible,setHistoryVisible]=useState(false); const [exportVisible,setExportVisible]=useState(false);
-  if(asset&&(!sessionRef.current||sessionRef.current.recipe().source.uri!==asset.uri))sessionRef.current=new EditSession({uri:asset.uri,width:asset.width,height:asset.height,mimeType:asset.mimeType});
-  const session=sessionRef.current; const operations=useMemo(()=>session?.list()??[],[session,revision]); const bump=()=>setRevision(v=>v+1);
-  const adjustmentValue=(name:AdjustmentName)=>(operations.find(op=>op.type==='adjust'&&op.name===name) as Extract<EditOperation,{type:'adjust'}>|undefined)?.value??0;
-  function setAdjustment(name:AdjustmentName,value:number){session?.apply({id:`adjust:${name}`,type:'adjust',name,value});bump();}
-  function applyPreset(id:string,intensity=presetIntensity){setPresetId(id);const p=PRESETS[category].find(x=>x.id===id);if(!p||!session)return;const factor=intensity/100;Object.entries(p.ops).forEach(([name,value])=>session.apply({id:`preset:${id}:${name}`,type:'adjust',name:name as AdjustmentName,value:(value??0)*factor}));bump();}
-  function reset(){session?.reset();setPresetId('');bump();} function undo(){session?.undo();bump();} function redo(){session?.redo();bump();}
-  function close(){if(!session?.length){onClose();return;}Alert.alert('Thoát chỉnh sửa?','Bạn có thay đổi chưa lưu.',[{text:'Hủy',style:'cancel'},{text:'Bỏ thay đổi',style:'destructive',onPress:onClose},{text:'Lưu',onPress:()=>void saveNow()}]);}
-  async function saveNow(){if(!session||!asset)return;await onSave(session.recipe({assetId:asset.id,filename:asset.filename}));setExportVisible(false);}
-  function selectCrop(aspect:CropAspect){setCropAspect(aspect);session?.apply({id:'crop',type:'crop',rect:{x:0,y:0,width:1,height:1,aspect}});bump();}
-  if(!asset||!session)return null;
-  return <Modal visible={visible} animationType="slide" onRequestClose={close}><SafeAreaView style={s.root}>
-    <View style={s.header}><Pressable onPress={close}><Text style={s.x}>×</Text></Pressable><Pressable onPress={undo}><Text style={[s.undo,!session.canUndo&&s.disabled]}>↶</Text></Pressable><View style={s.headerTitle}><Text style={s.title}>Edit⌄</Text></View><Pressable style={s.compareButton} onPress={()=>setCompare(v=>!v)}><Text style={s.compareText}>{compare?'Edited':'Compare'}</Text></Pressable><Pressable style={s.saveButton} onPress={()=>setExportVisible(true)}><Text style={s.saveText}>Save</Text></Pressable></View>
-    <View style={s.previewWrap}><Image source={{uri:asset.uri}} style={s.preview} contentFit="contain"/><View style={s.previewBadge}><Text style={s.badgeText}>{compare?'Original':'Edited'} • <Text style={s.purple}>{operations.length} adjustments</Text></Text></View><Pressable style={s.beforeButton} onPressIn={()=>setCompare(true)} onPressOut={()=>setCompare(false)}><Text style={s.beforeText}>◐</Text></Pressable></View>
-    {tool==='presets'&&<View style={s.panel}><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.categoryRow}>{(['recommended','portrait','landscape','food','night','film','bw'] as PresetCategory[]).map(c=><Pressable key={c} onPress={()=>{setCategory(c);setPresetId('');}} style={[s.category,c===category&&s.categoryActive]}><Text style={[s.categoryText,c===category&&s.activeText]}>{c==='recommended'?'Recommended':c==='bw'?'B&W':c[0].toUpperCase()+c.slice(1)}</Text></Pressable>)}</ScrollView><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.presetRow}>{PRESETS[category].map(p=><Pressable key={p.id} onPress={()=>applyPreset(p.id)} style={[s.presetCard,presetId===p.id&&s.presetActive]}><Image source={{uri:asset.uri}} style={s.presetImage} contentFit="cover"/><Text numberOfLines={1} style={s.presetLabel}>{p.label}</Text></Pressable>)}</ScrollView><AdjustmentSlider label="Intensity" value={presetIntensity} min={0} max={100} step={1} onChange={v=>{setPresetIntensity(v);if(presetId)applyPreset(presetId,v);}}/></View>}
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tools}>{(Object.keys(TOOL_ICONS) as Tool[]).map(t=><Pressable key={t} style={[s.tool,t===tool&&s.toolActive]} onPress={()=>setTool(t)}><SymbolView name={TOOL_ICONS[t] as any} size={22} tintColor={t===tool?PURPLE:'#C9CBD0'}/><Text style={[s.toolText,t===tool&&s.activeText]}>{t[0].toUpperCase()+t.slice(1)}</Text></Pressable>)}</ScrollView>
-    {(tool==='adjust'||tool==='presets')&&<View style={s.adjustPanel}><View style={s.tabs}>{(['light','color','detail','effects','geometry'] as AdjustTab[]).map(t=><Pressable key={t} onPress={()=>setTab(t)} style={[s.tab,t===tab&&s.tabActive]}><Text style={[s.tabText,t===tab&&s.activeText]}>{t[0].toUpperCase()+t.slice(1)}</Text></Pressable>)}</View><ScrollView style={s.adjustScroll} contentContainerStyle={{paddingBottom:28}}>{tab==='geometry'?<GeometryPanel aspect={cropAspect} onCrop={selectCrop} onRotate={d=>{session.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees:d});bump();}} onFlip={axis=>{session.apply({id:`flip:${axis}`,type:'flip',axis});bump();}}/>:ADJUSTMENTS[tab].map(a=><AdjustmentSlider key={a.name} label={a.label} value={adjustmentValue(a.name)} min={a.min} max={a.max} step={a.step} onChange={v=>setAdjustment(a.name,v)}/>)}</ScrollView></View>}
-    {tool==='crop'&&<CropPanel aspect={cropAspect} onCrop={selectCrop} onRotate={d=>{session.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees:d});bump();}} onFlip={axis=>{session.apply({id:`flip:${axis}`,type:'flip',axis});bump();}}/>}
-    {tool==='retouch'&&<SimpleToolPanel title="Retouch" items={['Heal','Remove Object','Face','Skin','Details']} note="Retouch is non-destructive. Brush/mask data is stored in the edit recipe."/>}
-    {tool==='filters'&&<SimpleToolPanel title="Filters" items={['Natural','Faded Gold','Fuji Pro','Cinematic C','Moody','Retro']} note="Choose a filter, then adjust its intensity." onItem={id=>{session.apply({id:'filter:active',type:'filter',filterId:id.toLowerCase().replaceAll(' ','-'),intensity:.7});bump();}}/>}
-    {tool==='effects'&&<SimpleToolPanel title="Effects" items={['Vignette','Grain','Glow','Bokeh','Light Leak']} note="Effects stay editable in History."/>}{tool==='draw'&&<SimpleToolPanel title="Draw" items={['Pen','Marker','Highlighter','Eraser']} note="Draw strokes are persisted as vector points."/>}{tool==='text'&&<SimpleToolPanel title="Text" items={['Add Text','Caption','Title','Watermark']} note="Text remains editable until export."/>}
-    <View style={s.bottom}><Pressable onPress={()=>setHistoryVisible(true)} style={s.bottomItem}><Text style={s.bottomIcon}>↶</Text><Text style={s.bottomText}>History</Text></Pressable><Pressable onPress={reset} style={s.bottomItem}><Text style={s.bottomIcon}>↻</Text><Text style={s.bottomText}>Reset</Text></Pressable><Pressable onPress={()=>void onOpenAdvanced?.(session.recipe())} style={s.bottomItem}><Text style={s.bottomIcon}>•••</Text><Text style={s.bottomText}>More</Text></Pressable></View>
-    <Modal visible={historyVisible} transparent animationType="slide"><Pressable style={s.shade} onPress={()=>setHistoryVisible(false)}/><View style={s.sheet}><Text style={s.sheetTitle}>History</Text><ScrollView>{operations.length?operations.map((op,i)=><View key={`${op.id}:${i}`} style={s.historyRow}><Text style={s.historyThumb}>{i+1}</Text><Text style={s.historyName}>{historyName(op)}</Text></View>):<Text style={s.empty}>No adjustments yet.</Text>}</ScrollView><View style={s.historyActions}><Pressable onPress={undo}><Text style={s.link}>Undo</Text></Pressable><Pressable onPress={redo}><Text style={s.link}>Redo</Text></Pressable></View></View></Modal>
-    <Modal visible={exportVisible} transparent animationType="slide"><Pressable style={s.shade} onPress={()=>setExportVisible(false)}/><View style={s.exportSheet}><Text style={s.sheetTitle}>Export</Text>{[['Resolution','Original⌄'],['Format','JPEG⌄'],['Quality','90%'],['Keep EXIF','ON'],['Color Profile','sRGB⌄']].map(([k,v])=><View key={k} style={s.exportRow}><Text style={s.exportLabel}>{k}</Text><Text style={k==='Keep EXIF'?s.purple:s.exportValue}>{v}</Text></View>)}<Pressable style={s.exportButton} onPress={()=>void saveNow()}><Text style={s.saveText}>Export</Text></Pressable></View></Modal>
-  </SafeAreaView></Modal>;
+export interface PhotoEditorScreenProps {
+  visible: boolean;
+  asset: PhotoEditorAsset | null;
+  onClose(): void;
+  onSave(recipe: ImageEditRecipe, renderedUri?: string): Promise<void> | void;
+  onOpenAdvanced?(recipe: ImageEditRecipe): Promise<void> | void;
 }
 
-function GeometryPanel(p:{aspect:CropAspect;onCrop(a:CropAspect):void;onRotate(d:90|180|270):void;onFlip(a:'horizontal'|'vertical'):void}){return <CropPanel {...p}/>;}
-function CropPanel({aspect,onCrop,onRotate,onFlip}:{aspect:CropAspect;onCrop(a:CropAspect):void;onRotate(d:90|180|270):void;onFlip(a:'horizontal'|'vertical'):void}){const ratios:CropAspect[]=['free','original','1:1','4:3','3:4','16:9','9:16'];return <View style={s.cropPanel}><Text style={s.sectionLabel}>Aspect ratio</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{ratios.map(r=><Pressable key={r} onPress={()=>onCrop(r)} style={[s.ratio,r===aspect&&s.ratioActive]}><Text style={[s.ratioText,r===aspect&&s.activeText]}>{r}</Text></Pressable>)}</ScrollView><Text style={s.sectionLabel}>Rotate & Flip</Text><View style={s.rotateRow}><Pressable style={s.rotateButton} onPress={()=>onFlip('horizontal')}><Text style={s.rotateText}>⇆</Text></Pressable><Pressable style={s.rotateButton} onPress={()=>onFlip('vertical')}><Text style={s.rotateText}>⇅</Text></Pressable><Pressable style={s.rotateButton} onPress={()=>onRotate(90)}><Text style={s.rotateText}>↻ 90°</Text></Pressable></View></View>;}
-function SimpleToolPanel({title,items,note,onItem}:{title:string;items:string[];note:string;onItem?(id:string):void}){return <View style={s.simplePanel}><Text style={s.sectionLabel}>{title}</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{items.map(x=><Pressable key={x} style={s.simpleButton} onPress={()=>onItem?.(x)}><Text style={s.simpleGlyph}>◇</Text><Text style={s.simpleLabel}>{x}</Text></Pressable>)}</ScrollView><Text style={s.note}>{note}</Text></View>;}
-function historyName(op:EditOperation){if(op.type==='adjust')return `${op.name} ${op.value>0?'+':''}${op.value}`;if(op.type==='filter')return `Filter: ${op.filterId}`;if(op.type==='crop')return `Crop ${op.rect.aspect??'free'}`;if(op.type==='rotate')return `Rotate ${op.degrees}°`;if(op.type==='flip')return `Flip ${op.axis}`;return op.type;}
+function clamp(v: number, min: number, max: number) { return Math.min(max, Math.max(min, v)); }
 
-const s=StyleSheet.create({
-  root:{flex:1,backgroundColor:BG},header:{height:62,flexDirection:'row',alignItems:'center',paddingHorizontal:16,gap:18,borderBottomWidth:StyleSheet.hairlineWidth,borderColor:'#22242A'},x:{fontSize:34,color:'#F1F2F4',fontWeight:'200'},undo:{fontSize:28,color:'#D9DBDF'},disabled:{opacity:.3},headerTitle:{flex:1,alignItems:'center'},title:{fontSize:18,fontWeight:'700',color:'#F5F5F7'},compareButton:{borderWidth:1,borderColor:'#4A4C52',borderRadius:8,paddingHorizontal:14,paddingVertical:9},compareText:{color:'#F3F3F5',fontSize:12},saveButton:{backgroundColor:PURPLE,borderRadius:8,paddingHorizontal:16,paddingVertical:10},saveText:{color:'#FFF',fontWeight:'700'},previewWrap:{height:Dimensions.get('window').height*.33,backgroundColor:'#050506',justifyContent:'center',overflow:'hidden'},preview:{width:'100%',height:'100%'},previewBadge:{position:'absolute',bottom:14,alignSelf:'center',backgroundColor:'#0A0B0DDD',paddingHorizontal:15,paddingVertical:8,borderRadius:18},badgeText:{color:'#DADCE1',fontSize:12},purple:{color:PURPLE},beforeButton:{position:'absolute',right:13,bottom:12,width:40,height:40,borderRadius:10,backgroundColor:'#101115CC',alignItems:'center',justifyContent:'center'},beforeText:{color:'#FFF',fontSize:22},panel:{backgroundColor:PANEL,borderBottomWidth:1,borderColor:'#24252B'},categoryRow:{paddingHorizontal:14,gap:24},category:{paddingVertical:12},categoryActive:{borderBottomWidth:2,borderColor:PURPLE},categoryText:{color:'#B5B7BD',fontSize:11},activeText:{color:PURPLE},presetRow:{paddingHorizontal:14,paddingTop:10,paddingBottom:4,gap:9},presetCard:{width:76,height:82,borderRadius:8,overflow:'hidden',backgroundColor:'#191A1F',borderWidth:1,borderColor:'transparent'},presetActive:{borderColor:PURPLE,borderWidth:2},presetImage:{width:'100%',height:58},presetLabel:{color:'#E5E6E8',fontSize:9,paddingHorizontal:5,paddingVertical:5},tools:{minHeight:82,paddingHorizontal:12,backgroundColor:'#111216',borderBottomWidth:1,borderColor:'#282A30'},tool:{width:72,alignItems:'center',justifyContent:'center',gap:5},toolActive:{borderBottomWidth:2,borderColor:PURPLE},toolText:{fontSize:10,color:'#C2C4CA'},adjustPanel:{flex:1,backgroundColor:'#101115'},tabs:{height:54,flexDirection:'row',alignItems:'stretch',borderBottomWidth:1,borderColor:'#2A2B30'},tab:{flex:1,alignItems:'center',justifyContent:'center'},tabActive:{borderBottomWidth:2,borderColor:PURPLE},tabText:{fontSize:11,color:'#C1C3C9'},adjustScroll:{flex:1},sliderRow:{height:47,flexDirection:'row',alignItems:'center',paddingHorizontal:18},sliderLabel:{width:112,color:'#E5E6E9',fontSize:12},track:{height:24,justifyContent:'center',position:'relative'},trackBase:{position:'absolute',height:2,backgroundColor:'#34363C'},trackFill:{position:'absolute',height:2,backgroundColor:PURPLE},thumb:{position:'absolute',width:12,height:12,borderRadius:6,backgroundColor:PURPLE,borderWidth:2,borderColor:'#C4A7FF'},sliderValue:{width:48,textAlign:'right',color:'#E1E2E5',fontSize:11},bottom:{height:72,flexDirection:'row',borderTopWidth:1,borderColor:'#25272D',backgroundColor:'#0D0E11',justifyContent:'space-around'},bottomItem:{width:90,alignItems:'center',justifyContent:'center'},bottomIcon:{fontSize:22,color:'#D7D9DE'},bottomText:{fontSize:10,color:'#D0D2D7',marginTop:4},cropPanel:{flex:1,backgroundColor:'#101115',padding:18},sectionLabel:{color:'#F0F1F3',fontWeight:'700',fontSize:13,marginBottom:14},ratio:{minWidth:60,height:54,borderRadius:9,borderWidth:1,borderColor:'#34363D',marginRight:9,alignItems:'center',justifyContent:'center'},ratioActive:{borderColor:PURPLE,backgroundColor:'#251940'},ratioText:{color:'#D2D4D8',fontSize:11},rotateRow:{flexDirection:'row',gap:12},rotateButton:{flex:1,height:54,borderRadius:10,backgroundColor:'#191A1F',alignItems:'center',justifyContent:'center'},rotateText:{color:'#E7E8EB',fontSize:15},simplePanel:{flex:1,backgroundColor:'#101115',padding:18},simpleButton:{width:88,height:78,borderRadius:10,backgroundColor:'#191A1F',marginRight:10,alignItems:'center',justifyContent:'center'},simpleGlyph:{fontSize:24,color:PURPLE},simpleLabel:{color:'#E7E8EA',fontSize:10,marginTop:7},note:{color:MUTED,fontSize:11,lineHeight:17,marginTop:18},shade:{flex:1,backgroundColor:'#0009'},sheet:{position:'absolute',left:0,right:0,bottom:0,maxHeight:'70%',backgroundColor:'#101115',borderTopLeftRadius:20,borderTopRightRadius:20,padding:20},exportSheet:{position:'absolute',left:0,right:0,bottom:0,backgroundColor:'#101115',borderTopLeftRadius:20,borderTopRightRadius:20,padding:20,paddingBottom:36},sheetTitle:{fontSize:20,fontWeight:'700',color:'#FFF',marginBottom:18},historyRow:{height:52,flexDirection:'row',alignItems:'center',backgroundColor:'#17181C',borderRadius:7,paddingHorizontal:10,marginBottom:7},historyThumb:{width:30,color:PURPLE,fontWeight:'800'},historyName:{color:'#ECEDEF',fontSize:12},historyActions:{flexDirection:'row',justifyContent:'space-around',paddingTop:10},link:{color:PURPLE,fontWeight:'700'},empty:{color:MUTED,textAlign:'center',padding:30},exportRow:{height:52,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:StyleSheet.hairlineWidth,borderColor:'#2C2D32'},exportLabel:{color:'#E7E8EA',fontSize:13},exportValue:{color:'#B8BAC0',fontSize:12},exportButton:{height:48,borderRadius:24,backgroundColor:PURPLE,alignItems:'center',justifyContent:'center',marginTop:26},
+function multiply(a: number[], b: number[]) {
+  const out = new Array(20).fill(0);
+  for (let row = 0; row < 4; row += 1) {
+    for (let col = 0; col < 5; col += 1) {
+      if (col === 4) {
+        out[row * 5 + col] = a[row * 5 + 4];
+        for (let k = 0; k < 4; k += 1) out[row * 5 + col] += a[row * 5 + k] * b[k * 5 + 4];
+      } else {
+        for (let k = 0; k < 4; k += 1) out[row * 5 + col] += a[row * 5 + k] * b[k * 5 + col];
+      }
+    }
+  }
+  return out;
+}
+
+function matrixFor(v: AdjustmentState) {
+  let m = [1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,1,0];
+  const exposure = Math.pow(2, v.exposure);
+  m = multiply([exposure,0,0,0,0, 0,exposure,0,0,0, 0,0,exposure,0,0, 0,0,0,1,0], m);
+
+  const c = 1 + v.contrast / 100;
+  const co = 128 * (1 - c);
+  m = multiply([c,0,0,0,co, 0,c,0,0,co, 0,0,c,0,co, 0,0,0,1,0], m);
+
+  const s = 1 + v.saturation / 100;
+  const ir = 0.2126 * (1 - s), ig = 0.7152 * (1 - s), ib = 0.0722 * (1 - s);
+  m = multiply([
+    ir+s, ig, ib, 0, 0,
+    ir, ig+s, ib, 0, 0,
+    ir, ig, ib+s, 0, 0,
+    0,0,0,1,0,
+  ], m);
+
+  const temp = v.temperature * 0.55;
+  const tint = v.tint * 0.35;
+  m = multiply([1,0,0,0,temp+tint, 0,1,0,0,-tint, 0,0,1,0,-temp, 0,0,0,1,0], m);
+
+  if (v.fade > 0) {
+    const f = clamp(v.fade / 100, 0, 0.65);
+    const k = 1 - f;
+    const o = 128 * f;
+    m = multiply([k,0,0,0,o, 0,k,0,0,o, 0,0,k,0,o, 0,0,0,1,0], m);
+  }
+  return m;
+}
+
+function Slider({ label, value, min, max, step = 1, onChange }:{ label:string; value:number; min:number; max:number; step?:number; onChange(v:number):void }) {
+  const width = Math.min(SCREEN - 150, 300);
+  const ratio = (value - min) / (max - min);
+  const setX = (x:number) => {
+    const raw = min + clamp(x / width, 0, 1) * (max - min);
+    const next = Math.round(raw / step) * step;
+    onChange(Number(next.toFixed(2)));
+  };
+  return <View style={s.sliderRow}>
+    <Text style={s.sliderLabel}>{label}</Text>
+    <View style={[s.track,{width}]} onTouchStart={e=>setX(e.nativeEvent.locationX)} onTouchMove={e=>setX(e.nativeEvent.locationX)}>
+      <View style={s.trackBase}/><View style={[s.trackFill,{width:ratio*width}]}/><View style={[s.thumb,{left:clamp(ratio*width-7,0,width-14)}]}/>
+    </View>
+    <Text style={s.sliderValue}>{value > 0 ? '+' : ''}{value}</Text>
+  </View>;
+}
+
+function centerCrop(width:number, height:number, aspect:CropAspect) {
+  if (aspect === 'free' || aspect === 'original') return null;
+  const [a,b] = String(aspect).split(':').map(Number);
+  if (!a || !b) return null;
+  const target = a / b;
+  const current = width / height;
+  if (current > target) {
+    const cropWidth = Math.round(height * target);
+    return { originX: Math.round((width - cropWidth) / 2), originY: 0, width: cropWidth, height };
+  }
+  const cropHeight = Math.round(width / target);
+  return { originX: 0, originY: Math.round((height - cropHeight) / 2), width, height: cropHeight };
+}
+
+export function PhotoEditorScreen({ visible, asset, onClose, onSave, onOpenAdvanced }: PhotoEditorScreenProps) {
+  const sessionRef = useRef<EditSession | null>(null);
+  const canvasRef = useCanvasRef();
+  const [workingUri,setWorkingUri] = useState<string | null>(null);
+  const [size,setSize] = useState({ width: 1, height: 1 });
+  const [adjust,setAdjust] = useState<AdjustmentState>(DEFAULTS);
+  const [tool,setTool] = useState<Tool>('presets');
+  const [compare,setCompare] = useState(false);
+  const [busy,setBusy] = useState(false);
+  const [selectedPreset,setSelectedPreset] = useState('');
+  const [cropAspect,setCropAspect] = useState<CropAspect>('original');
+
+  if (asset && (!sessionRef.current || sessionRef.current.recipe().source.uri !== asset.uri)) {
+    sessionRef.current = new EditSession({ uri: asset.uri, width: asset.width, height: asset.height, mimeType: asset.mimeType });
+    if (workingUri !== asset.uri) {
+      setWorkingUri(asset.uri);
+      setSize({ width: asset.width || 1, height: asset.height || 1 });
+      setAdjust(DEFAULTS);
+      setSelectedPreset('');
+      setCropAspect('original');
+    }
+  }
+
+  const image = useImage(workingUri || undefined);
+  const matrix = useMemo(() => matrixFor(compare ? DEFAULTS : adjust), [adjust,compare]);
+  const previewHeight = Math.min(430, Math.max(250, PREVIEW_W * (size.height / Math.max(1,size.width))));
+  const session = sessionRef.current;
+
+  function pushAdjust(name: keyof AdjustmentState, value:number) {
+    setAdjust(prev => ({ ...prev, [name]: value }));
+    session?.apply({ id:`adjust:${name}`, type:'adjust', name:name as AdjustmentName, value });
+  }
+
+  function applyPreset(p:Preset) {
+    setSelectedPreset(p.id);
+    const next = { ...DEFAULTS, ...p.values };
+    setAdjust(next);
+    Object.entries(next).forEach(([name,value]) => session?.apply({ id:`adjust:${name}`, type:'adjust', name:name as AdjustmentName, value }));
+  }
+
+  async function manipulate(actions: ImageManipulator.Action[]) {
+    if (!workingUri) return;
+    setBusy(true);
+    try {
+      const result = await ImageManipulator.manipulateAsync(workingUri, actions, { compress: 1, format: ImageManipulator.SaveFormat.JPEG });
+      setWorkingUri(result.uri);
+      setSize({ width: result.width, height: result.height });
+    } catch (e) {
+      Alert.alert('Không chỉnh được ảnh', e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  }
+
+  async function rotate(degrees: 90 | 180 | 270) {
+    session?.apply({ id:`rotate:${Date.now()}`, type:'rotate', degrees });
+    await manipulate([{ rotate: degrees }]);
+  }
+
+  async function flip(axis:'horizontal'|'vertical') {
+    session?.apply({ id:`flip:${axis}:${Date.now()}`, type:'flip', axis });
+    await manipulate([{ flip: axis === 'horizontal' ? ImageManipulator.FlipType.Horizontal : ImageManipulator.FlipType.Vertical }]);
+  }
+
+  async function crop(aspect:CropAspect) {
+    setCropAspect(aspect);
+    const rect = centerCrop(size.width,size.height,aspect);
+    if (!rect) return;
+    session?.apply({ id:`crop:${Date.now()}`, type:'crop', rect:{ x:rect.originX/size.width, y:rect.originY/size.height, width:rect.width/size.width, height:rect.height/size.height, aspect } });
+    await manipulate([{ crop: rect }]);
+  }
+
+  function reset() {
+    if (!asset) return;
+    session?.reset();
+    setWorkingUri(asset.uri);
+    setSize({ width: asset.width || 1, height: asset.height || 1 });
+    setAdjust(DEFAULTS);
+    setSelectedPreset('');
+    setCropAspect('original');
+  }
+
+  async function saveNow() {
+    if (!asset || !session || !canvasRef.current) return;
+    setBusy(true);
+    try {
+      const snapshot = await canvasRef.current.makeImageSnapshotAsync();
+      if (!snapshot) throw new Error('Không tạo được ảnh xuất.');
+      const base64 = snapshot.encodeToBase64();
+      const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      if (!dir) throw new Error('Không có thư mục tạm để lưu ảnh.');
+      const out = `${dir}photox-edit-${Date.now()}.png`;
+      await FileSystem.writeAsStringAsync(out, base64, { encoding: FileSystem.EncodingType.Base64 });
+      await onSave(session.recipe({ assetId:asset.id, filename:asset.filename }), out);
+    } catch (e) {
+      Alert.alert('Lưu ảnh thất bại', e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  }
+
+  if (!asset || !session || !workingUri) return null;
+
+  return <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+    <SafeAreaView style={s.root}>
+      <View style={s.header}>
+        <Pressable onPress={onClose}><Text style={s.headerButton}>×</Text></Pressable>
+        <Text style={s.title}>Edit Photo</Text>
+        <Pressable disabled={busy} onPress={()=>void saveNow()} style={[s.save,busy&&s.disabled]}><Text style={s.saveText}>{busy?'Working…':'Save'}</Text></Pressable>
+      </View>
+
+      <View style={[s.previewWrap,{height:previewHeight}]}>
+        <Canvas ref={canvasRef} style={StyleSheet.absoluteFill}>
+          {image && <SkiaImage image={image} x={0} y={0} width={PREVIEW_W} height={previewHeight} fit="contain">
+            <ColorMatrix matrix={matrix}/>
+          </SkiaImage>}
+          {!compare && adjust.vignette > 0 && <Rect x={0} y={0} width={PREVIEW_W} height={previewHeight}>
+            <RadialGradient c={vec(PREVIEW_W/2,previewHeight/2)} r={Math.max(PREVIEW_W,previewHeight)*0.7} colors={['rgba(0,0,0,0)','rgba(0,0,0,0)',`rgba(0,0,0,${clamp(adjust.vignette/125,0,0.75)})`]}/>
+          </Rect>}
+        </Canvas>
+        <Pressable style={s.compare} onPressIn={()=>setCompare(true)} onPressOut={()=>setCompare(false)}><Text style={s.compareText}>Hold Original</Text></Pressable>
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tools}>
+        {(['presets','adjust','crop','filters','advanced'] as Tool[]).map(t=><Pressable key={t} onPress={()=>setTool(t)} style={[s.tool,t===tool&&s.toolActive]}><Text style={[s.toolText,t===tool&&s.activeText]}>{t[0].toUpperCase()+t.slice(1)}</Text></Pressable>)}
+      </ScrollView>
+
+      <View style={s.panel}>
+        {tool==='presets' && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.cards}>{PRESETS.map(p=><Pressable key={p.id} onPress={()=>applyPreset(p)} style={[s.card,selectedPreset===p.id&&s.cardActive]}><Text style={s.cardTitle}>{p.label}</Text></Pressable>)}</ScrollView>}
+        {tool==='filters' && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.cards}>{FILTERS.map(p=><Pressable key={p.id} onPress={()=>applyPreset(p)} style={[s.card,selectedPreset===p.id&&s.cardActive]}><Text style={s.cardTitle}>{p.label}</Text></Pressable>)}</ScrollView>}
+        {tool==='adjust' && <ScrollView style={s.adjustScroll} contentContainerStyle={{paddingBottom:30}}>
+          <Slider label="Exposure" value={adjust.exposure} min={-2} max={2} step={0.05} onChange={v=>pushAdjust('exposure',v)}/>
+          <Slider label="Contrast" value={adjust.contrast} min={-100} max={100} onChange={v=>pushAdjust('contrast',v)}/>
+          <Slider label="Saturation" value={adjust.saturation} min={-100} max={100} onChange={v=>pushAdjust('saturation',v)}/>
+          <Slider label="Temperature" value={adjust.temperature} min={-100} max={100} onChange={v=>pushAdjust('temperature',v)}/>
+          <Slider label="Tint" value={adjust.tint} min={-100} max={100} onChange={v=>pushAdjust('tint',v)}/>
+          <Slider label="Fade" value={adjust.fade} min={0} max={100} onChange={v=>pushAdjust('fade',v)}/>
+          <Slider label="Vignette" value={adjust.vignette} min={0} max={100} onChange={v=>pushAdjust('vignette',v)}/>
+        </ScrollView>}
+        {tool==='crop' && <View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.cards}>{(['original','1:1','4:3','3:4','16:9','9:16'] as CropAspect[]).map(a=><Pressable key={a} onPress={()=>void crop(a)} style={[s.card,cropAspect===a&&s.cardActive]}><Text style={s.cardTitle}>{a}</Text></Pressable>)}</ScrollView>
+          <View style={s.geometryRow}><Pressable style={s.action} onPress={()=>void rotate(270)}><Text style={s.actionText}>↶ 90°</Text></Pressable><Pressable style={s.action} onPress={()=>void rotate(90)}><Text style={s.actionText}>↷ 90°</Text></Pressable><Pressable style={s.action} onPress={()=>void flip('horizontal')}><Text style={s.actionText}>↔ Flip</Text></Pressable><Pressable style={s.action} onPress={()=>void flip('vertical')}><Text style={s.actionText}>↕ Flip</Text></Pressable></View>
+        </View>}
+        {tool==='advanced' && <View style={s.advanced}><Text style={s.advancedTitle}>Advanced tools</Text><Text style={s.note}>Heal, remove object, face retouch, text and drawing use the native advanced engine. These controls are no longer shown as fake buttons.</Text><Pressable style={s.advancedButton} onPress={()=>void onOpenAdvanced?.(session.recipe())}><Text style={s.saveText}>Open Advanced Editor</Text></Pressable></View>}
+      </View>
+
+      <View style={s.bottom}><Pressable onPress={reset} style={s.bottomButton}><Text style={s.bottomText}>Reset</Text></Pressable><Text style={s.status}>{busy?'Processing image…':'Preview is live • export creates a new image'}</Text></View>
+    </SafeAreaView>
+  </Modal>;
+}
+
+const s = StyleSheet.create({
+  root:{flex:1,backgroundColor:BG},
+  header:{height:58,flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,borderBottomWidth:1,borderBottomColor:'#1c1d22'},
+  headerButton:{fontSize:34,color:'#fff',lineHeight:36}, title:{fontSize:17,fontWeight:'700',color:'#fff'},
+  save:{backgroundColor:PURPLE,borderRadius:12,paddingHorizontal:16,paddingVertical:9},saveText:{color:'#fff',fontWeight:'700'},disabled:{opacity:.5},
+  previewWrap:{width:PREVIEW_W,alignSelf:'center',marginTop:12,backgroundColor:'#050506',borderRadius:16,overflow:'hidden',justifyContent:'center'},
+  compare:{position:'absolute',right:10,bottom:10,backgroundColor:'rgba(0,0,0,.65)',paddingHorizontal:10,paddingVertical:7,borderRadius:10},compareText:{color:'#fff',fontSize:12,fontWeight:'600'},
+  tools:{paddingHorizontal:12,paddingVertical:12,gap:8},tool:{paddingHorizontal:15,paddingVertical:9,borderRadius:12,backgroundColor:'#17181d'},toolActive:{backgroundColor:'#2c2340'},toolText:{color:'#a8aab0',fontWeight:'600'},activeText:{color:'#c8adff'},
+  panel:{flex:1,minHeight:210,backgroundColor:PANEL,borderTopLeftRadius:18,borderTopRightRadius:18,paddingTop:10},
+  cards:{paddingHorizontal:12,paddingVertical:8,gap:8},card:{minWidth:88,paddingHorizontal:14,paddingVertical:16,borderRadius:14,backgroundColor:'#1a1b20',alignItems:'center'},cardActive:{borderWidth:1,borderColor:PURPLE,backgroundColor:'#2b2340'},cardTitle:{color:'#fff',fontSize:12,fontWeight:'600'},
+  adjustScroll:{paddingHorizontal:12},sliderRow:{minHeight:48,flexDirection:'row',alignItems:'center',gap:10},sliderLabel:{width:88,color:'#d8d9dd',fontSize:12},track:{height:26,justifyContent:'center'},trackBase:{position:'absolute',left:0,right:0,height:3,borderRadius:3,backgroundColor:'#34363d'},trackFill:{height:3,borderRadius:3,backgroundColor:PURPLE},thumb:{position:'absolute,width:14,height:14,borderRadius:7,backgroundColor:'#fff'},sliderValue:{width:42,textAlign:'right',color:'#fff',fontVariant:['tabular-nums']},
+  geometryRow:{flexDirection:'row',flexWrap:'wrap',padding:12,gap:10},action:{backgroundColor:'#1a1b20',borderRadius:12,paddingHorizontal:14,paddingVertical:12},actionText:{color:'#fff',fontWeight:'600'},
+  advanced:{padding:18},advancedTitle:{color:'#fff',fontSize:18,fontWeight:'700',marginBottom:8},note:{color:MUTED,lineHeight:20,marginBottom:16},advancedButton:{alignSelf:'flex-start',backgroundColor:PURPLE,borderRadius:12,paddingHorizontal:16,paddingVertical:12},
+  bottom:{height:56,flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,borderTopWidth:1,borderTopColor:'#202127'},bottomButton:{padding:8},bottomText:{color:'#fff',fontWeight:'700'},status:{color:MUTED,fontSize:11},
 });
