@@ -10,6 +10,7 @@ on:
       - 'packages/media/**'
       - 'packages/media-cloud/**'
       - 'packages/media-api/**'
+      - 'packages/auth-jose/**'
       - 'packages/media-delivery/**'
       - 'packages/media-delivery-node/**'
       - 'packages/video-media/**'
