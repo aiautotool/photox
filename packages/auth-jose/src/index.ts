@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
-import type { AccessPrincipal, AccessTokenIssuer, AccessTokenVerifier, MediaApiScope } from '@photox/media-api';
+import type { AccessPrincipal, AccessTokenIssuer, AccessTokenVerifier, MediaApiScope, WorkspaceSessionRole } from '@photox/media-api';
 
 export interface JoseAccessTokenOptions {
   secret: Uint8Array;
@@ -27,6 +27,8 @@ export class JoseAccessTokenService implements AccessTokenIssuer, AccessTokenVer
       scopes: principal.scopes,
       did: principal.deviceId,
       sid: principal.sessionId,
+      wid: principal.workspaceId,
+      wrole: principal.workspaceRole,
       metadata: principal.metadata,
     })
       .setProtectedHeader({ alg: this.algorithm, typ: 'JWT' })
@@ -52,10 +54,15 @@ export class JoseAccessTokenService implements AccessTokenIssuer, AccessTokenVer
   private toPrincipal(payload: JWTPayload): AccessPrincipal {
     if (!payload.sub) throw new Error('JWT_SUBJECT_REQUIRED');
     const scopes = Array.isArray(payload.scopes) ? payload.scopes.filter((value): value is MediaApiScope => typeof value === 'string') : [];
+    const role = typeof payload.wrole === 'string' && ['owner', 'admin', 'member', 'viewer'].includes(payload.wrole)
+      ? payload.wrole as WorkspaceSessionRole
+      : undefined;
     return {
       subject: payload.sub,
       deviceId: typeof payload.did === 'string' ? payload.did : undefined,
       sessionId: typeof payload.sid === 'string' ? payload.sid : undefined,
+      workspaceId: typeof payload.wid === 'string' ? payload.wid : undefined,
+      workspaceRole: role,
       scopes,
       issuedAt: payload.iat,
       expiresAt: payload.exp,
