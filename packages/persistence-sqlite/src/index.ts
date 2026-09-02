@@ -125,7 +125,7 @@ export class SqliteVideoMediaRepository implements VideoMediaRepository {
   constructor(private readonly store: SqlitePhotoXStore) {}
   async get(assetId: string): Promise<VideoMediaRecord | null> {
     const row = this.store.db.prepare('SELECT record_json FROM photox_video_media WHERE asset_id=?').get(assetId) as { record_json?: string } | undefined;
-    return row?.record_json ? JSON.parse(row.item_json) as VideoMediaRecord : null;
+    return row?.record_json ? JSON.parse(row.record_json) as VideoMediaRecord : null;
   }
   async save(record: VideoMediaRecord): Promise<void> {
     this.store.db.prepare(`INSERT INTO photox_video_media(asset_id,record_json,updated_at) VALUES(?,?,?)
