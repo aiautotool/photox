@@ -4,6 +4,10 @@ export type CloudUpload = { key:string;filename:string;size:number;receivedAt:st
 export type DesktopStatus = { state:'idle'|'receiving'|'uploading'|'error'; received:number; duplicates:number; cloudUploaded:number; cloudBlocked:number; message?:string; receiverUrl?:string; publicUrl?:string; tunnelHealthy?:boolean; pairCode?:string; libraryPath?:string; driveAccounts?:number; lastRunAt?:string };
 export type TunnelState = { connected:boolean; relayUrl:string; desktopId:string; pairingPayload:string; lastError?:string };
 export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
+export type GooglePhotosAccount={id:string;email:string;capabilities:('picker'|'append')[];status:'ready'|'unavailable'};
+export type MigrationJob={id:string;workspaceId:string;sourceAccountId:string;sourcePickerSessionId?:string;target:'google_photos'|'google_drive';targetAccountId:string;state:string;totalItems:number;completedItems:number;failedItems:number;totalBytes?:number;transferredBytes:number;createdAt:string;updatedAt:string;startedAt?:string;completedAt?:string;lastError?:string};
+export type MigrationItem={id:string;jobId:string;sourceMediaId:string;filename:string;mimeType?:string;sizeBytes?:number;state:string;attempts:number;transferredBytes:number;targetId?:string;targetUrl?:string;error?:string;createdAt:string;updatedAt:string};
+export type MigrationSnapshot={job:MigrationJob;items:MigrationItem[]};
 export type BackupHealthSnapshot = {total:number;safe:number;atRisk:number;critical:number;unknown:number;photos:number;videos:number;totalBytes:number;problems:{key:string;filename:string;health:'at_risk'|'critical'|'unknown';reason:string}[]};
 
 export interface DesktopBridge {
@@ -19,6 +23,19 @@ export interface DesktopBridge {
   listGoogleAccounts():Promise<DriveAccount[]>;
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
+  listGooglePhotosAccounts():Promise<GooglePhotosAccount[]>;
+  connectGooglePhotosAccount(capability:'picker'|'append'):Promise<GooglePhotosAccount>;
+  removeGooglePhotosAccount(accountId:string):Promise<void>;
+  listMigrations():Promise<MigrationJob[]>;
+  getMigration(jobId:string):Promise<MigrationSnapshot>;
+  createMigration(input:{sourceAccountId:string;target:'google_photos'|'google_drive';targetAccountId:string;maxItemCount?:number}):Promise<{job:MigrationJob;pickerUri:string;expireTime?:string}>;
+  materializeMigration(jobId:string):Promise<MigrationSnapshot>;
+  runMigration(jobId:string):Promise<MigrationJob>;
+  pauseMigration(jobId:string):Promise<MigrationSnapshot>;
+  resumeMigration(jobId:string):Promise<MigrationJob>;
+  cancelMigration(jobId:string):Promise<MigrationSnapshot>;
+  retryMigration(jobId:string):Promise<MigrationJob>;
+  onMigrationUpdated(cb:(event:MigrationSnapshot)=>void):()=>void;
   onFileReceived(cb:(event:{name:string;path:string})=>void):()=>void;
   onStorageUpdated(cb:(event:unknown)=>void):()=>void;
   onTunnelState(cb:(event:TunnelState)=>void):()=>void;
@@ -70,6 +87,19 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     listGoogleAccounts:()=>json('/api/web/v1/google-drive/accounts'),
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
+    listGooglePhotosAccounts:()=>json('/api/web/v1/google-photos/accounts'),
+    connectGooglePhotosAccount:(capability)=>json('/api/web/v1/google-photos/accounts/connect',{method:'POST',body:JSON.stringify({capability})}),
+    removeGooglePhotosAccount:async(accountId)=>{await json(`/api/web/v1/google-photos/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'});},
+    listMigrations:()=>json('/api/web/v1/migrations'),
+    getMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}`),
+    createMigration:(input)=>json('/api/web/v1/migrations',{method:'POST',body:JSON.stringify(input)}),
+    materializeMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/selection`,{method:'POST'}),
+    runMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/run`,{method:'POST'}),
+    pauseMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/pause`,{method:'POST'}),
+    resumeMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/resume`,{method:'POST'}),
+    cancelMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/cancel`,{method:'POST'}),
+    retryMigration:(jobId)=>json(`/api/web/v1/migrations/${encodeURIComponent(jobId)}/retry`,{method:'POST'}),
+    onMigrationUpdated:(cb)=>subscribe('migration-updated',cb),
     onFileReceived:(cb)=>subscribe('file-received',cb),
     onStorageUpdated:(cb)=>subscribe('storage-updated',cb),
     onTunnelState:(cb)=>subscribe('tunnel-state',cb),
