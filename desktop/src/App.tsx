@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import exifr from 'exifr';
 import { resolveDesktopBridge, type BackupHealthSnapshot, type CloudState, type CloudUpload, type DesktopStatus, type DriveAccount, type LocalMedia, type TunnelState } from './bridge';
+import { MigrationPage } from './MigrationPage';
+import './MigrationPage.css';
 import logoUrl from '../build/icon.iconset/icon_128x128@2x.png?inline';
 import './pages.css';
 
 type MediaMetadata = {make?:string;model?:string;lens?:string;software?:string;focalLength?:number;focalLength35mm?:number;aperture?:number;exposureTime?:number;iso?:number;flash?:string;latitude?:number;longitude?:number;capturedAt?:Date};
 
-const nav=[['⌂','Tổng quan'],['▣','Ảnh'],['▤','Album'],['◫','Thiết bị'],['⇧','Bản sao an toàn'],['!','Vấn đề'],['↺','Khôi phục'],['◈','Tài khoản lưu trữ'],['⚙','Cài đặt']];
+const nav=[['⌂','Tổng quan'],['▣','Ảnh'],['▤','Album'],['◫','Thiết bị'],['⇄','Chuyển dữ liệu'],['⇧','Bản sao an toàn'],['!','Vấn đề'],['↺','Khôi phục'],['◈','Tài khoản lưu trữ'],['⚙','Cài đặt']];
 
 function Empty({title,description}:{title:string;description:string}){
   return <div className="empty-state"><div className="empty-cloud">▣</div><h2>{title}</h2><p>{description}</p></div>
@@ -95,6 +97,7 @@ export function App(){
   </div>;
 
   function renderContent(){
+    if(active==='Chuyển dữ liệu')return <MigrationPage bridge={bridge}/>;
     if(active==='Tổng quan')return <section className="dashboard">
       <div className="health-hero"><div><span className="eyebrow">BACKUP HEALTH</span><h2>{health.safe===health.total&&health.total>0?'Thư viện được bảo vệ':'Cần hoàn tất bảo vệ thư viện'}</h2><p>{health.safe} / {health.total} mục đã đạt chính sách backup.</p></div><div className={`health-ring health-${health.critical?'critical':health.atRisk?'risk':'safe'}`}><b>{health.total?Math.round(health.safe/health.total*100):0}%</b><small>an toàn</small></div></div>
       <div className="metric-grid"><button onClick={()=>setActive('Ảnh')}><span>Ảnh trong thư viện</span><b>{health.photos}</b><small>Xem thư viện →</small></button><button onClick={()=>setActive('Thiết bị')}><span>Kết nối điện thoại</span><b>{tunnel.connected?'Sẵn sàng':'Đang chờ'}</b><small>Xem thiết bị →</small></button><button onClick={()=>setActive('Tài khoản lưu trữ')}><span>Nơi lưu trữ</span><b>{status.driveAccounts||0} tài khoản</b><small>Quản lý tài khoản →</small></button><button onClick={()=>setActive('Vấn đề')}><span>Cần xử lý</span><b>{health.problems.length}</b><small>Xem vấn đề →</small></button></div>
