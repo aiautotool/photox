@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
-import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
+import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
@@ -340,8 +340,9 @@ async function uploadMigrationItemToDrive(input:{accountId:string;source:any;res
   const session=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:bytes.byteLength,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});
   const uploaded=await net.fetch(session,{method:'PUT',headers:{'content-type':mimeType,'content-length':String(bytes.byteLength)},body:bytes});
   if(!uploaded.ok)throw new Error(`Drive migration upload ${uploaded.status}: ${await uploaded.text()}`);input.onBytes?.(bytes.byteLength);
-  const result=await uploaded.json() as {id?:string;webViewLink?:string};if(!result.id)throw new Error('GOOGLE_DRIVE_DESTINATION_ID_MISSING');
-  return {targetId:result.id,targetUrl:result.webViewLink};
+  const result=await uploaded.json() as {id?:string};if(!result.id)throw new Error('GOOGLE_DRIVE_DESTINATION_ID_MISSING');
+  const verified=await getDriveFile(token.token,result.id);if(Number(verified.size||0)!==bytes.byteLength)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${bytes.byteLength}`);
+  return {targetId:verified.id,targetUrl:verified.webViewLink};
 }
 function requireMigrationService(){if(!migrationService)throw new Error('MIGRATION_SERVICE_NOT_READY');return migrationService;}
 
