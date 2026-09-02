@@ -46,6 +46,12 @@ const LEGACY_DESKTOP_DEVICE_ID=`desktop_${crypto.createHash('sha256').update(os.
 
 function requireWorkspaceRepository(){if(!workspaceRepository)throw new Error('WORKSPACE_REPOSITORY_NOT_READY');return workspaceRepository;}
 
+async function syncWorkspaceProviderUsage(){
+  const repo=requireWorkspaceRepository();
+  const current=repo.getUsage(LEGACY_WORKSPACE_ID);
+  repo.setUsage(LEGACY_WORKSPACE_ID,{...current,storageProviders:(await savedDriveAccounts()).length});
+}
+
 async function bootstrapLegacyWorkspace(){
   const repo=requireWorkspaceRepository();
   const result=repo.ensureLegacyPersonalWorkspace({workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID,name:process.env.PHOTOX_WORKSPACE_NAME||'My PhotoX',plan:'personal'});
@@ -245,7 +251,10 @@ async function deleteManagedMedia(key:string){
   }
   if(failures.length)throw new Error(`Không xóa hết replica cloud: ${failures.join(' | ')}`);
   for(const filePath of [row.thumbnailPath,row.playbackPath,row.path])if(filePath)await fs.unlink(filePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
-  rows.splice(index,1);await writeIndex(rows);notifyRenderer('photosync:media-deleted',{key,filename:row.filename});return {deleted:true,key,filename:row.filename};
+  rows.splice(index,1);await writeIndex(rows);
+  const repo=requireWorkspaceRepository();repo.releaseMediaReservation(LEGACY_WORKSPACE_ID,row.size,{releaseManaged:true,releaseIngress:false});
+  repo.appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'media.delete',targetType:'media',targetId:key,metadata:{filename:row.filename,size:row.size}});
+  notifyRenderer('photosync:media-deleted',{key,filename:row.filename});return {deleted:true,key,filename:row.filename};
 }
 
 async function fetchCloudMedia(row:MediaIndexRow,request:Request):Promise<Response>{
@@ -309,6 +318,8 @@ async function connectGoogle(){
       const existingFiles=(await fs.readdir(driveAccountsDir())).filter(x=>x.endsWith('.json'));
       for(const file of existingFiles)try{const saved:SavedDriveAccount=JSON.parse(await fs.readFile(path.join(driveAccountsDir(),file),'utf8'));const identity=tokenIdentity(saved.tokens);if((tokenData.sub&&identity.sub===tokenData.sub)||(email&&(saved.email||identity.email)?.toLowerCase()===email))await fs.unlink(path.join(driveAccountsDir(),file))}catch{}
       await fs.writeFile(path.join(driveAccountsDir(),`${id}.json`),JSON.stringify({id,email:email||id,tokens},null,2),'utf8');
+      await syncWorkspaceProviderUsage();
+      requireWorkspaceRepository().appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'provider.connect',targetType:'google_drive',targetId:id,metadata:{email:email||id}});
       res.writeHead(200,{'content-type':'text/html;charset=utf-8'});res.end('<h2>Đã thêm Google Drive vào PhotoSync Laptop.</h2><p>Bạn có thể đóng tab này.</p>');server.close();
       lastStatus={...lastStatus,message:'Đã thêm tài khoản Google Drive',driveAccounts:(await savedDriveAccounts()).length}; resolve(await desktopStatus());void retryQueuedCloud();
     }catch(e){server.close();reject(e)}}); server.listen(OAUTH_PORT,'127.0.0.1'); server.on('error',reject);
@@ -348,6 +359,8 @@ async function removeDriveAccount(accountId:string){
   if(!account)throw new Error('Không tìm thấy tài khoản');
   const files=(await fs.readdir(driveAccountsDir())).filter(name=>name.endsWith('.json'));
   for(const file of files)try{const saved:SavedDriveAccount=JSON.parse(await fs.readFile(path.join(driveAccountsDir(),file),'utf8'));if(saved.id===account.id)await fs.unlink(path.join(driveAccountsDir(),file))}catch{}
+  await syncWorkspaceProviderUsage();
+  requireWorkspaceRepository().appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'provider.disconnect',targetType:'google_drive',targetId:accountId,metadata:{email:account.email||account.id}});
   notifyRenderer('photosync:storage-updated',{accountId,removed:true});
   return desktopStatus();
 }
