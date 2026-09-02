@@ -1,0 +1,24 @@
+name: Wire V4 migration service
+on:
+  push:
+    paths:
+      - '.github/trigger-wire-v4-migration-service'
+permissions:
+  contents: write
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python .github/scripts/wire-v4-migration-service.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add desktop/electron/main.ts desktop/electron/preload.cts desktop/src/bridge.ts
+          git commit -m "wire Google Photos migration service into desktop" || exit 0
+          git push origin v4
