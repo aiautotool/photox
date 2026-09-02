@@ -51,6 +51,13 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Telegram/provider packages and SDK layers.
 - Backup health calculation and repair sweep structure.
 
+## Backup UI and cloud management restoration
+- Detailed mobile upload progress restored using real native upload byte callbacks: current filename, uploaded bytes, total bytes, remaining bytes and queue count.
+- Backup configuration is persisted on-device and controls automatic backup plus photo/video inclusion.
+- Cloud-only assets can already be downloaded to the device; viewer keeps the original-download path even when compatibility playback uses a derivative.
+- Added authenticated `DELETE /api/v1/media/:key`: managed Google Drive replicas are deleted first; local original/thumbnail/playback and catalog row are removed only after replica deletion succeeds.
+- Mobile viewer exposes `Xóa khỏi cloud` with destructive confirmation and removes the deleted asset from local PhotoX metadata.
+
 ## Remaining work
 ### P0 — Release/build correctness
 - [ ] Regenerate and commit root `package-lock.json` after native dependency changes.

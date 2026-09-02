@@ -45,6 +45,11 @@ class MobileLibraryController {
     return this.snapshot();
   }
 
+  async forget(mediaId: string) {
+    await this.initialize();
+    return this.commit(forgetMedia(this.snapshot(), mediaId));
+  }
+
   async favorite(mediaId: string) {
     await this.initialize();
     return this.commit(toggleFavorite(this.snapshot(), mediaId));

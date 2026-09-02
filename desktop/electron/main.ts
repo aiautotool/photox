@@ -204,6 +204,23 @@ async function listLocalMedia():Promise<LocalMedia[]>{
   return media.sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
 }
 
+async function deleteManagedMedia(key:string){
+  const rows=await readIndex();const index=rows.findIndex(row=>row.key===key);if(index<0)throw new Error('MEDIA_NOT_FOUND');const row=rows[index];
+  const accounts=new Map((await savedDriveAccounts()).map(account=>[account.id,account]));const failures:string[]=[];
+  for(const replica of replicasOf(row).filter(replica=>replica.remoteFileId)){
+    if(!replica.accountId){failures.push('Replica thiếu accountId');continue;}
+    const account=accounts.get(replica.accountId);if(!account){failures.push(`Không còn thông tin tài khoản ${replica.accountId}`);continue;}
+    try{
+      const client=oauthClient();client.setCredentials(account.tokens);const token=await client.getAccessToken();if(!token.token)throw new Error('Không lấy được access token');
+      const response=await net.fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(replica.remoteFileId!)}`,{method:'DELETE',headers:{authorization:`Bearer ${token.token}`}});
+      if(!response.ok&&response.status!==404)throw new Error(`Drive ${response.status}: ${await response.text()}`);
+    }catch(error){failures.push(`${replica.accountEmail||replica.accountId}: ${error instanceof Error?error.message:String(error)}`)}
+  }
+  if(failures.length)throw new Error(`Không xóa hết replica cloud: ${failures.join(' | ')}`);
+  for(const filePath of [row.thumbnailPath,row.playbackPath,row.path])if(filePath)await fs.unlink(filePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
+  rows.splice(index,1);await writeIndex(rows);notifyRenderer('photosync:media-deleted',{key,filename:row.filename});return {deleted:true,key,filename:row.filename};
+}
+
 async function fetchCloudMedia(row:MediaIndexRow,request:Request):Promise<Response>{
   const replicas=replicasOf(row).filter(replica=>isVerified(replica)&&replica.remoteFileId&&replica.accountId);
   const accounts=new Map((await savedDriveAccounts()).map(account=>[account.id,account]));
@@ -438,6 +455,9 @@ async function startReceiver(){
       const key=decodeURIComponent(url.pathname.slice('/api/v1/playback/'.length));const row=(await readIndex()).find(item=>item.key===key);if(!row){res.writeHead(404);res.end('Not found');return;}if(row.playbackPath){try{await streamNodeFile(req,res,row.playbackPath,'video/mp4');return}catch{}}
       try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
       const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}/api/v1/media/${encodeURIComponent(key)}`,{headers:req.headers.range?{range:req.headers.range}:{}}));res.writeHead(response.status,Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase()))));if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
+    }
+    if(req.method==='DELETE'&&url.pathname.startsWith('/api/v1/media/')){
+      const key=decodeURIComponent(url.pathname.slice('/api/v1/media/'.length));try{const result=await deleteManagedMedia(key);res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(result));}catch(error){const message=error instanceof Error?error.message:String(error);res.writeHead(message==='MEDIA_NOT_FOUND'?404:409,{'content-type':'application/json'});res.end(JSON.stringify({error:message}));}return;
     }
     if(req.method==='GET'&&url.pathname.startsWith('/api/v1/media/')){
       const key=decodeURIComponent(url.pathname.slice('/api/v1/media/'.length));const row=(await readIndex()).find(item=>item.key===key);

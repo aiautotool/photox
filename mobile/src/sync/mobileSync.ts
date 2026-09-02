@@ -9,6 +9,7 @@ declare const require: (id: string) => any;
 export type MediaAsset = MediaLibrary.Asset;
 export type DisplayAsset = MediaAsset & {
   cloudOnly?: boolean;
+  cloudKey?: string;
   requestHeaders?: Record<string, string>;
   fileSize?: number;
   mimeType?: string;
@@ -98,6 +99,17 @@ export async function downloadCloudAsset(asset: DisplayAsset): Promise<MediaAsse
     return await MediaLibrary.createAssetAsync(downloaded.uri);
   } finally {
     await FileSystem.deleteAsync(destination, { idempotent: true }).catch(() => undefined);
+  }
+}
+
+export async function deleteCloudAsset(asset: DisplayAsset): Promise<void> {
+  if (!asset.cloudOnly || !asset.cloudKey) throw new Error('Mục này không phải media cloud hợp lệ.');
+  const base = asset.uri.replace(/\/api\/v1\/(?:media|playback)\/[^/]+(?:\?.*)?$/, '');
+  const endpoint = `${base}/api/v1/media/${encodeURIComponent(asset.cloudKey)}`;
+  const response = await fetch(endpoint, { method: 'DELETE', headers: asset.requestHeaders });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Xóa cloud thất bại (${response.status})${detail ? `: ${detail}` : ''}`);
   }
 }
 
@@ -218,6 +230,7 @@ export async function loadCloudPhotos(target: PairedDesktop): Promise<DisplayAss
       fileSize: item.size,
       albumId: 'photosync-cloud',
       cloudOnly: true,
+      cloudKey: item.key,
       mimeType: item.mimeType || mimeForFilename(item.filename, item.mediaType),
       thumbnailUri,
       playbackUri,
