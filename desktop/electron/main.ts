@@ -17,7 +17,7 @@ import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaP
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
-import { WorkspacePairingChallengeManager } from './pairingChallenge.js';
+import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -44,7 +44,7 @@ let webEdgeServer:PhotoXWebEdgeServer|null=null;
 const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
 const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
 const LEGACY_DESKTOP_DEVICE_ID=`desktop_${crypto.createHash('sha256').update(os.hostname()).digest('hex').slice(0,20)}`;
-const workspacePairingChallenges=new WorkspacePairingChallengeManager(LEGACY_WORKSPACE_ID,LEGACY_DESKTOP_DEVICE_ID,'owner');
+const workspacePairingChallenges=getWorkspacePairingChallengeManager(LEGACY_WORKSPACE_ID,LEGACY_DESKTOP_DEVICE_ID,'owner');
 
 function requireWorkspaceRepository(){if(!workspaceRepository)throw new Error('WORKSPACE_REPOSITORY_NOT_READY');return workspaceRepository;}
 

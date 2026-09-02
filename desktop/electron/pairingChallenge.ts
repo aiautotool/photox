@@ -48,3 +48,19 @@ export class WorkspacePairingChallengeManager {
 
   revoke() { this.current = null; }
 }
+
+const sharedManagers = new Map<string, WorkspacePairingChallengeManager>();
+
+export function getWorkspacePairingChallengeManager(
+  workspaceId: string,
+  desktopDeviceId: string,
+  workspaceRole: WorkspacePairingContext['workspaceRole'] = 'owner',
+): WorkspacePairingChallengeManager {
+  const key = `${workspaceId}:${desktopDeviceId}:${workspaceRole}`;
+  let manager = sharedManagers.get(key);
+  if (!manager) {
+    manager = new WorkspacePairingChallengeManager(workspaceId, desktopDeviceId, workspaceRole);
+    sharedManagers.set(key, manager);
+  }
+  return manager;
+}
