@@ -1,0 +1,45 @@
+name: V4 plan update
+on:
+  push:
+    branches: [v4]
+    paths: ['.github/workflows/plan-update-v4.yml']
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: v4 }
+      - name: Update V4 plan
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('docs/V4_SAAS_PLAN.md')
+          s=p.read_text()
+          s=s.replace("- [ ] Scope media/provider index operations by workspace.", "- [x] Scope Desktop media index and Google Drive provider credentials/replica operations by workspace, with backward-safe legacy migration and cross-tenant row tests.")
+          s=s.replace("- next: scope media metadata and provider connections by workspace.", "- media index rows now carry `workspaceId`; legacy unscoped rows are migrated to the default workspace. Reads, writes, deletes, video processing, cloud fallback and replica persistence operate on the authenticated workspace without replacing another workspace's rows.\n- Google Drive credentials now carry `workspaceId`; legacy credential files are migrated to the default workspace and Drive lookup/upload/delete paths filter by workspace.")
+          old="""1. Add `workspace_id` to media index/provider connection rows with backward-safe migration; enforce workspace scope in list/read/delete/upload/replica operations and add cross-tenant tests.
+2. Replace static Web edge bootstrap role/workspace configuration with the same verified SaaS access/refresh session flow now used by Mobile.
+3. Add device/session management APIs and shared Mobile/Desktop/Web UX for listing devices, revoking a device and invalidating all associated refresh sessions.
+4. Add workspace/plan/usage APIs and surface authoritative quota state in shared Desktop/Web UI and Mobile.
+5. Extend durable audit emission to all administrative mutations and expose an operations/activity view.
+6. Continue Google Photos migration hardening: streaming large files, resumable per-file checkpoints across restart, speed/ETA and live OAuth verification with real accounts."""
+          new="""1. Replace static Web edge bootstrap token/role/workspace configuration with the verified JOSE access/refresh session flow already used by Mobile; bind every Web handler and signed media URL to the authenticated principal workspace.
+2. Finish provider isolation beyond Google Drive: namespace Google Photos OAuth connections and migration jobs by workspace, and ensure future Telegram/provider connections use the same tenant-owned credential contract.
+3. Add device/session management APIs and shared Mobile/Desktop/Web UX for listing devices, revoking a device and invalidating all associated refresh sessions.
+4. Add workspace/plan/usage APIs and surface authoritative quota state in shared Desktop/Web UI and Mobile.
+5. Extend durable audit emission to all administrative mutations and expose an operations/activity view.
+6. Continue Google Photos migration hardening: streaming large files, resumable per-file checkpoints across restart, speed/ETA and live OAuth verification with real accounts."""
+          if old not in s: raise SystemExit('next batch anchor missing')
+          s=s.replace(old,new)
+          p.write_text(s)
+          PY
+      - name: Commit plan and clean workflow
+        run: |
+          rm .github/workflows/plan-update-v4.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/V4_SAAS_PLAN.md .github/workflows/plan-update-v4.yml
+          git commit -m "update v4 tenant isolation plan"
+          git push origin HEAD:v4
