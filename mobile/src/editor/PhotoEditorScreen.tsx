@@ -136,7 +136,7 @@ export function PhotoEditorScreen({visible,asset,onClose,onSave}:PhotoEditorScre
     try{
       const result=await rotateImage({sourceUri:workingUri,degrees:straighten,expand:true,returnFormat:'uri',quality:95});
       if(!result.uri)throw new Error('Straighten không trả về file ảnh.');
-      session?.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees:straighten});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setStraighten(0);
+      session?.apply({id:`straighten:${Date.now()}`,type:'straighten',degrees:straighten});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setStraighten(0);
     }catch(e){Alert.alert('Căn thẳng thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}
   }
 
