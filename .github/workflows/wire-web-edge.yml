@@ -20,3 +20,4 @@ jobs:
           git add desktop/electron/main.ts
           git diff --cached --quiet || git commit -m "wire authenticated web edge server"
           git push origin HEAD:v4
+# trigger
