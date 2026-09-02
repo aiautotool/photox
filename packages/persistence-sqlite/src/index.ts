@@ -155,3 +155,5 @@ export class SqliteRefreshSessionStore implements RefreshSessionStore {
   async revoke(sessionId: string): Promise<void> { this.store.db.prepare('UPDATE photox_refresh_sessions SET revoked_at=? WHERE session_id=?').run(Math.floor(Date.now() / 1000), sessionId); }
   private hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 }
+
+export * from './migration';

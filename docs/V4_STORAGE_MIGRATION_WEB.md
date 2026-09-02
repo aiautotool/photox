@@ -90,7 +90,7 @@ Rules:
 ### Batch B — next
 
 - [ ] Persist Google Photos OAuth accounts separately from Google Drive accounts.
-- [ ] Add migration ledger + resumable state in SQLite.
+- [x] Add migration ledger + resumable state in SQLite.
 - [ ] Add Desktop IPC migration service and progress events.
 - [ ] Add Migration page to the shared Desktop/Web UI.
 - [ ] Wire Google Photos -> Google Photos destination.
@@ -99,9 +99,9 @@ Rules:
 
 ### Batch C — Web parity
 
-- [ ] Extract the renderer bridge contract from `App.tsx`.
-- [ ] Keep Electron IPC adapter.
-- [ ] Add authenticated HTTP/WebSocket adapter.
+- [x] Extract the renderer bridge contract from `App.tsx`.
+- [x] Keep Electron IPC adapter.
+- [x] Add authenticated HTTP/WebSocket adapter contract/client; server endpoints and auth enforcement remain pending.
 - [ ] Expose desktop status/library/accounts/health/migration/jobs APIs through the edge service.
 - [ ] Serve the same Vite production bundle from the edge service.
 - [ ] Add configurable bind host/port/base URL/domain/CORS origins.
