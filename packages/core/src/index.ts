@@ -126,3 +126,4 @@ export function formatGiB(bytes: number): string {
 }
 
 export * from './saas.js';
+export * from './tenant.js';
