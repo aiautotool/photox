@@ -8,11 +8,12 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
+import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -58,7 +59,36 @@ const TARGET_CLOUD_REPLICAS=2;
 type LocalMedia = { key:string;name:string;path:string;url:string;modifiedAt:string;sourceDevice?:string;size:number;receivedAt:string;sha256:string;localAvailable:boolean;cloudAvailable:boolean };
 type CloudState = 'QUEUED'|'UPLOADING'|'VERIFYING'|'VERIFIED'|'UPLOADED'|'BLOCKED'|'ERROR';
 type CloudDestination = { state:CloudState;accountId?:string;accountEmail?:string;folderId?:string;remotePath?:string;remoteFileId?:string;webViewLink?:string;uploadedAt?:string;verifiedAt?:string;message?:string };
-type MediaIndexRow = { key:string; assetId:string; deviceId:string; filename:string; path:string; size:number; createdAt:number; receivedAt:string; sha256:string; cloud?:CloudDestination;cloudReplicas?:CloudDestination[] };
+type VideoProcessingState = 'queued'|'processing'|'ready'|'error';
+type MediaIndexRow = {
+  key:string;
+  assetId:string;
+  deviceId:string;
+  filename:string;
+  path:string;
+  size:number;
+  createdAt:number;
+  receivedAt:string;
+  sha256:string;
+  mimeType?:string;
+  mediaType?:'photo'|'video';
+  width?:number;
+  height?:number;
+  duration?:number;
+  rotation?:number;
+  fps?:number;
+  bitrate?:number;
+  container?:string;
+  videoCodec?:string;
+  audioCodec?:string;
+  hasAudio?:boolean;
+  thumbnailPath?:string;
+  playbackPath?:string;
+  videoProcessing?:VideoProcessingState;
+  videoError?:string;
+  cloud?:CloudDestination;
+  cloudReplicas?:CloudDestination[];
+};
 type SavedDriveAccount = { id:string; email?:string; tokens:any };
 type RuntimeDriveAccount = { id:string; email:string; client:OAuth2Client; storage:StorageAccount; folderId:string; quota:{limit:number;usage:number;free:number} };
 type DriveAccountInfo = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
@@ -90,6 +120,7 @@ function stableDriveAccountId(email?:string,sub?:string){
 function libraryDir(){ return path.join(app.getPath('pictures'),'PhotoSync'); }
 function stateDir(){ return path.join(app.getPath('userData'),'photosync-state'); }
 function incomingDir(){ return path.join(stateDir(),'incoming'); }
+function videoCacheDir(){ return path.join(stateDir(),'video-cache'); }
 function indexFile(){ return path.join(stateDir(),'media-index.json'); }
 function pairFile(){ return path.join(stateDir(),'pair-code.txt'); }
 function driveAccountsDir(){ return path.join(stateDir(),'google-accounts'); }
@@ -112,9 +143,9 @@ function lanAddress(){
 
 async function readIndex():Promise<MediaIndexRow[]>{ try{return JSON.parse(await fs.readFile(indexFile(),'utf8'))}catch{return []} }
 async function writeIndex(rows:MediaIndexRow[]){ await fs.mkdir(stateDir(),{recursive:true}); await fs.writeFile(indexFile(),JSON.stringify(rows,null,2),'utf8'); }
+async function updateIndexRow(key:string,patch:Partial<MediaIndexRow>){const rows=await readIndex();const index=rows.findIndex(row=>row.key===key);if(index<0)return null;rows[index]={...rows[index],...patch};await writeIndex(rows);return rows[index]}
 function replicasOf(row:MediaIndexRow){if(row.cloudReplicas?.length)return row.cloudReplicas;if(row.cloud)return [row.cloud];return []}
 function isVerified(replica:CloudDestination){return replica.state==='VERIFIED'||replica.state==='UPLOADED'}
-function isVideoFilename(filename:string){return /\.(mp4|mov|m4v|avi|mkv|webm)$/i.test(filename)}
 async function evaluateRow(row:MediaIndexRow){
   const replicas:MediaReplica[]=[];
   try{await fs.access(row.path);replicas.push({providerId:'local',providerType:'local',replicaType:'original',status:'available'})}catch{}
@@ -131,6 +162,33 @@ function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').r
 
 async function hashFile(filePath:string){
   return await new Promise<string>((resolve,reject)=>{ const hash=crypto.createHash('sha256'); const stream=createReadStream(filePath); stream.on('data',chunk=>hash.update(chunk)); stream.on('end',()=>resolve(hash.digest('hex'))); stream.on('error',reject); });
+}
+
+async function streamNodeFile(req:IncomingMessage,res:ServerResponse,filePath:string,contentType:string){
+  const stat=await fs.stat(filePath);const range=req.headers.range;
+  if(range){
+    const match=/bytes=(\d+)-(\d*)/.exec(range);
+    if(match){
+      const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;
+      if(start>=stat.size||end<start){res.writeHead(416,{'content-range':`bytes */${stat.size}`});res.end();return;}
+      res.writeHead(206,{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'});createReadStream(filePath,{start,end}).pipe(res);return;
+    }
+  }
+  res.writeHead(200,{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'});createReadStream(filePath).pipe(res);
+}
+
+async function processVideoRow(key:string){
+  const row=(await readIndex()).find(item=>item.key===key);if(!row||!isVideoFilename(row.filename))return;
+  await updateIndexRow(key,{videoProcessing:'processing',videoError:undefined});
+  try{
+    const processed=await processVideoFile(row.path,row.key,videoCacheDir());
+    await updateIndexRow(key,{...processed,mediaType:'video',mimeType:row.mimeType||mimeTypeForFilename(row.filename),videoProcessing:'ready',videoError:undefined});
+    notifyRenderer('photosync:media-processed',{key,...processed});
+  }catch(error){
+    const message=error instanceof Error?error.message:String(error);
+    await updateIndexRow(key,{videoProcessing:'error',videoError:message});
+    console.error('Video processing failed',row.filename,error);
+  }
 }
 
 async function listLocalMedia():Promise<LocalMedia[]>{
@@ -276,7 +334,7 @@ async function uploadLocalToDrive(row:MediaIndexRow){
     let replica:CloudDestination={state:'UPLOADING',accountId:account.id,accountEmail:account.email,folderId:account.folderId,remotePath:'/PhotoSync/'};replicas.push(replica);await persistReplicas(row,replicas);
     try{
       const token=await account.client.getAccessToken();if(!token.token)throw new Error('Drive access token unavailable');
-      const mime=/\.(mp4|mov|m4v)$/i.test(row.filename)?'video/mp4':/\.png$/i.test(row.filename)?'image/png':/\.heic$/i.test(row.filename)?'image/heic':'image/jpeg';
+      const mime=row.mimeType||mimeTypeForFilename(row.filename);
       const session=await createResumableUploadSession(token.token,{name:row.filename,mimeType:mime,sizeBytes:row.size,folderId:account.folderId,appProperties:{photosyncKey:row.key,photosyncSha256:row.sha256}});
       const response=await fetch(session,{method:'PUT',headers:{'content-type':mime,'content-length':String(row.size)},body:createReadStream(row.path) as any,duplex:'half'} as any);if(!response.ok)throw new Error(`Drive upload ${response.status}: ${await response.text()}`);const remote=await response.json().catch(()=>({}));if(!remote.id)throw new Error('Drive không trả remoteFileId để xác minh file');
       replica={...replica,state:'VERIFIED',remoteFileId:remote.id,webViewLink:`https://drive.google.com/file/d/${remote.id}/view`,uploadedAt:new Date().toISOString(),verifiedAt:new Date().toISOString()};replicas[replicas.length-1]=replica;lastStatus.cloudUploaded+=1;await persistReplicas(row,replicas);
@@ -289,12 +347,15 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
   const deviceId=String(req.headers['x-photosync-device-id']||'unknown'); const assetId=String(req.headers['x-photosync-asset-id']||''); const key=`${deviceId}:${assetId}`;
   const rows=await readIndex(); if(rows.some(x=>x.key===key)){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
   const filename=safeFilename(decodeURIComponent(String(req.headers['x-photosync-filename']||`media-${Date.now()}`))); const createdAt=Number(req.headers['x-photosync-created-at']||Date.now());
+  const declaredMediaType=String(req.headers['x-photosync-media-type']||'photo')==='video'?'video':'photo';
+  const declaredMime=String(req.headers['content-type']||'').split(';')[0].trim();const mimeType=declaredMime&&declaredMime!=='application/octet-stream'?declaredMime:mimeTypeForFilename(filename);
   const date=new Date(Number.isFinite(createdAt)?createdAt:Date.now()); const folder=path.join(libraryDir(),String(date.getFullYear()),String(date.getMonth()+1).padStart(2,'0'));
   await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(folder,{recursive:true}); const tmp=path.join(incomingDir(),`${crypto.randomUUID()}.part`); await pipeline(req,createWriteStream(tmp));
   const stat=await fs.stat(tmp); const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
-  await fs.rename(tmp,target); const row:MediaIndexRow={key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,cloudReplicas:[]}; rows.push(row); await writeIndex(rows);
+  await fs.rename(tmp,target); const row:MediaIndexRow={key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; rows.push(row); await writeIndex(rows);
   lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
-  res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target})); void enqueueCloudUpload(row);
+  res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
+  if(declaredMediaType==='video')void processVideoRow(key);void enqueueCloudUpload(row);
 }
 
 async function desktopStatus():Promise<DesktopStatus>{
@@ -366,17 +427,25 @@ async function startReceiver(){
     if(req.headers['x-photosync-pair-code']!==pair){res.writeHead(401);res.end('Invalid pair code');return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/status'){const index=await readIndex();res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({name:os.hostname(),version:'1',libraryPath:libraryDir(),received:index.length}));return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/library'){
-      const items=await listLocalMedia();
+      const items=await listLocalMedia();const rows=new Map((await readIndex()).map(row=>[row.key,row]));
       res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-      res.end(JSON.stringify(items.map(item=>({key:item.key,assetId:item.key.split(':').slice(1).join(':')||item.key,filename:item.name,size:item.size,createdAt:Date.parse(item.modifiedAt),mediaType:/\.(mp4|mov|m4v)$/i.test(item.name)?'video':'photo',cloudAvailable:item.cloudAvailable}))));return;
+      res.end(JSON.stringify(items.map(item=>{const row=rows.get(item.key);return {key:item.key,assetId:item.key.split(':').slice(1).join(':')||item.key,filename:item.name,size:item.size,createdAt:row?.createdAt||Date.parse(item.modifiedAt),mediaType:row?.mediaType||(isVideoFilename(item.name)?'video':'photo'),mimeType:row?.mimeType||mimeTypeForFilename(item.name),width:row?.width||0,height:row?.height||0,duration:row?.duration||0,rotation:row?.rotation,fps:row?.fps,bitrate:row?.bitrate,container:row?.container,videoCodec:row?.videoCodec,audioCodec:row?.audioCodec,videoProcessing:row?.videoProcessing,videoError:row?.videoError,thumbnailAvailable:Boolean(row?.thumbnailPath),playbackAvailable:Boolean(row?.playbackPath),cloudAvailable:item.cloudAvailable}})));return;
+    }
+    if(req.method==='GET'&&url.pathname.startsWith('/api/v1/thumbnail/')){
+      const key=decodeURIComponent(url.pathname.slice('/api/v1/thumbnail/'.length));const row=(await readIndex()).find(item=>item.key===key);if(!row?.thumbnailPath){res.writeHead(404);res.end('Thumbnail unavailable');return;}try{await streamNodeFile(req,res,row.thumbnailPath,'image/jpeg');return}catch{res.writeHead(404);res.end('Thumbnail unavailable');return;}
+    }
+    if(req.method==='GET'&&url.pathname.startsWith('/api/v1/playback/')){
+      const key=decodeURIComponent(url.pathname.slice('/api/v1/playback/'.length));const row=(await readIndex()).find(item=>item.key===key);if(!row){res.writeHead(404);res.end('Not found');return;}if(row.playbackPath){try{await streamNodeFile(req,res,row.playbackPath,'video/mp4');return}catch{}}
+      try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
+      const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}/api/v1/media/${encodeURIComponent(key)}`,{headers:req.headers.range?{range:req.headers.range}:{}}));res.writeHead(response.status,Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase()))));if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
     }
     if(req.method==='GET'&&url.pathname.startsWith('/api/v1/media/')){
       const key=decodeURIComponent(url.pathname.slice('/api/v1/media/'.length));const row=(await readIndex()).find(item=>item.key===key);
       if(!row){res.writeHead(404);res.end('Not found');return}
-      try{const stat=await fs.stat(row.path);const range=req.headers.range;if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;res.writeHead(206,{'content-type':/\.(mp4|mov|m4v)$/i.test(row.filename)?'video/mp4':'image/jpeg','content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes'});createReadStream(row.path,{start,end}).pipe(res);return}}res.writeHead(200,{'content-type':/\.(mp4|mov|m4v)$/i.test(row.filename)?'video/mp4':'image/jpeg','content-length':String(stat.size),'accept-ranges':'bytes'});createReadStream(row.path).pipe(res);return}catch{}
+      try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
       const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}${url.pathname}`,{headers:req.headers.range?{range:req.headers.range}:{}}));
-      res.writeHead(response.status,Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase()))));
-      if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
+      const headers=Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase())));if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
+      res.writeHead(response.status,headers);if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
     }
     if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res);return;} res.writeHead(404);res.end('Not found');
   }catch(e){console.error(e);res.writeHead(500);res.end(e instanceof Error?e.message:String(e))}}); receiver.listen(RECEIVER_PORT,'0.0.0.0');
@@ -395,21 +464,12 @@ ipcMain.handle('photosync:list-google-accounts',()=>listDriveAccounts());
 ipcMain.handle('photosync:remove-google-account',(_event,accountId:string)=>removeDriveAccount(accountId));
 ipcMain.handle('photosync:retry-cloud',async()=>{await retryQueuedCloud();return desktopStatus()});
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
-      const stat=await fs.stat(row.path);
-      const range=request.headers.get('range');
-      const contentType=isVideoFilename(row.filename)?'video/mp4':'image/jpeg';
-      if(range){
-        const match=/bytes=(\d+)-(\d*)/.exec(range);
-        if(match){
-          const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;
-          if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});
-          return new Response(Readable.toWeb(createReadStream(row.path,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}});
-        }
-      }
-      return new Response(Readable.toWeb(createReadStream(row.path)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
+      const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
+      if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}
+      return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
-  });createWindow();void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
+  });createWindow();const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
 app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor()});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());
