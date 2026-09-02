@@ -46,15 +46,21 @@ async function handleRelayUpload(uploadId: string, identity: TunnelIdentity, rel
   if (pairToken !== identity.pairToken) throw new Error('Rejected upload with invalid pairing token');
   const pairingChallenge=decodeURIComponent(response.headers.get('x-photosync-pairing-challenge')||'');
   const workspaceId=decodeURIComponent(response.headers.get('x-photosync-workspace-id')||'');
+  const authorization=response.headers.get('authorization')||'';
+  const bearerSession=/^Bearer\s+\S+/i.test(authorization);
   const modernPairing=Boolean(pairingChallenge&&workspaceId);
   if (modernPairing && !pairingChallenges.verify({challenge:pairingChallenge,workspaceId})) throw new Error('Rejected upload with expired or invalid workspace pairing challenge');
+  if (!bearerSession && !modernPairing && !pairToken) throw new Error('Rejected upload without an authorization path');
 
   const local = await fetch(`http://127.0.0.1:${RECEIVER_PORT}/api/v1/media`, {
     method: 'POST',
     headers: {
       'content-type': response.headers.get('content-type') || 'application/octet-stream',
       'content-length': response.headers.get('content-length') || '',
-      ...(modernPairing ? {
+      ...(bearerSession ? {
+        authorization,
+        ...(workspaceId ? { 'x-photosync-workspace-id': workspaceId } : {}),
+      } : modernPairing ? {
         'x-photosync-pairing-challenge': pairingChallenge,
         'x-photosync-workspace-id': workspaceId,
       } : { 'x-photosync-pair-code': await localPairCode() }),
@@ -62,6 +68,8 @@ async function handleRelayUpload(uploadId: string, identity: TunnelIdentity, rel
       'x-photosync-asset-id': decodeURIComponent(response.headers.get('x-photosync-asset-id') || uploadId),
       'x-photosync-filename': response.headers.get('x-photosync-filename') || encodeURIComponent(`media-${Date.now()}`),
       'x-photosync-created-at': response.headers.get('x-photosync-created-at') || String(Date.now()),
+      'x-photosync-media-type': response.headers.get('x-photosync-media-type') || 'photo',
+      'x-photosync-size': response.headers.get('content-length') || '',
     },
     body: response.body as any,
     duplex: 'half',
