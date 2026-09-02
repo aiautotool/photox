@@ -1,7 +1,7 @@
 import * as SecureStore from 'expo-secure-store';
 
 export type PairedDesktop = {
-  v: 1;
+  v: 1|2;
   relayUrl: string;
   publicUrl?: string;
   desktopId: string;
@@ -9,6 +9,12 @@ export type PairedDesktop = {
   deviceId: string;
   receiverUrl?: string;
   pairCode?: string;
+  workspaceId?: string;
+  workspaceRole?: 'owner'|'admin'|'member'|'viewer';
+  desktopDeviceId?: string;
+  pairingChallenge?: string;
+  challengeExpiresAt?: number;
+  capabilities?: string[];
 };
 
 const KEY = 'photosync.paired-desktop.v1';
@@ -26,7 +32,8 @@ function newDeviceId() {
 export function parsePairingQr(raw: string): Omit<PairedDesktop, 'deviceId'> {
   let parsed: any;
   try { parsed = JSON.parse(raw); } catch { throw new Error('QR không phải PhotoSync pairing QR'); }
-  if (parsed?.v !== 1 || !parsed?.relayUrl || !parsed?.desktopId || !parsed?.pairToken) throw new Error('QR PhotoSync không hợp lệ');
+  if (![1,2].includes(parsed?.v) || !parsed?.relayUrl || !parsed?.desktopId || !parsed?.pairToken) throw new Error('QR PhotoSync không hợp lệ');
+  if (parsed.v===2 && (!parsed.workspaceId || !parsed.pairingChallenge || !Number.isFinite(Number(parsed.challengeExpiresAt)))) throw new Error('QR PhotoSync v2 thiếu workspace challenge');
   const receiverUrl = parsed.receiverUrl ? normalizeRelayUrl(String(parsed.receiverUrl)) : undefined;
   const publicUrl = parsed.publicUrl ? normalizeRelayUrl(String(parsed.publicUrl)) : undefined;
   const pairCode = parsed.pairCode ? String(parsed.pairCode) : undefined;
@@ -39,6 +46,12 @@ export function parsePairingQr(raw: string): Omit<PairedDesktop, 'deviceId'> {
     pairToken: String(parsed.pairToken),
     receiverUrl,
     pairCode,
+    workspaceId: parsed.workspaceId ? String(parsed.workspaceId) : undefined,
+    workspaceRole: parsed.workspaceRole,
+    desktopDeviceId: parsed.desktopDeviceId ? String(parsed.desktopDeviceId) : undefined,
+    pairingChallenge: parsed.pairingChallenge ? String(parsed.pairingChallenge) : undefined,
+    challengeExpiresAt: parsed.challengeExpiresAt ? Number(parsed.challengeExpiresAt) : undefined,
+    capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities.map(String) : undefined,
   };
 }
 

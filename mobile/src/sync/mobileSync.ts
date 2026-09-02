@@ -192,6 +192,11 @@ function localEndpoint(target: PairedDesktop, path: string) {
   return `${target.receiverUrl!.replace(/\/$/, '')}${path}`;
 }
 
+function workspaceAuthHeaders(target: PairedDesktop): Record<string,string> {
+  if (target.pairingChallenge && target.workspaceId && (!target.challengeExpiresAt || target.challengeExpiresAt > Date.now())) return { 'x-photosync-pairing-challenge': target.pairingChallenge, 'x-photosync-workspace-id': target.workspaceId };
+  return target.pairCode ? { 'x-photosync-pair-code': target.pairCode } : {};
+}
+
 function publicEndpoint(target: PairedDesktop, path: string) {
   const base = target.publicUrl || (/photox\.aiautotool\.com/i.test(target.relayUrl) ? target.relayUrl : undefined);
   return base ? `${base.replace(/\/$/, '')}${path}` : undefined;
@@ -199,8 +204,9 @@ function publicEndpoint(target: PairedDesktop, path: string) {
 
 export async function loadCloudPhotos(target: PairedDesktop): Promise<DisplayAsset[]> {
   const endpoint = publicEndpoint(target, '/api/v1/library');
-  if (!endpoint || !target.pairCode) return [];
-  const response = await fetchWithTimeout(endpoint, { headers: { 'x-photosync-pair-code': target.pairCode } }, 15_000);
+  if (!endpoint) return [];
+  const auth=workspaceAuthHeaders(target); if (!Object.keys(auth).length) return [];
+  const response = await fetchWithTimeout(endpoint, { headers: auth }, 15_000);
   if (!response.ok) throw new Error(`Cloud library ${response.status}`);
   const items = await response.json() as Array<{
     key:string;assetId:string;filename:string;size:number;createdAt:number;mediaType:'photo'|'video';
@@ -242,7 +248,7 @@ export async function loadCloudPhotos(target: PairedDesktop): Promise<DisplayAss
       audioCodec: item.audioCodec,
       videoProcessing: item.videoProcessing,
       videoError: item.videoError,
-      requestHeaders: { 'x-photosync-pair-code': target.pairCode! },
+      requestHeaders: workspaceAuthHeaders(target),
     } as DisplayAsset;
   });
 }
@@ -258,16 +264,16 @@ async function fetchWithTimeout(url:string, init:RequestInit = {}, timeoutMs = 8
 
 export async function pingLaptop(target: PairedDesktop, signal?:AbortSignal) {
   const publicUrl = publicEndpoint(target, '/api/v1/status');
-  if (publicUrl && target.pairCode) {
+  if (publicUrl && Object.keys(workspaceAuthHeaders(target)).length) {
     try {
-      const response = await fetchWithTimeout(publicUrl, { headers: { 'x-photosync-pair-code': target.pairCode } }, 8_000, signal);
+      const response = await fetchWithTimeout(publicUrl, { headers: workspaceAuthHeaders(target) }, 8_000, signal);
       if (response.ok) return { online: true, transport: 'public' as const };
     } catch {}
   }
-  if (target.receiverUrl && target.pairCode) {
+  if (target.receiverUrl && Object.keys(workspaceAuthHeaders(target)).length) {
     try {
       const response = await fetchWithTimeout(localEndpoint(target, '/api/v1/status'), {
-        headers: { 'x-photosync-pair-code': target.pairCode },
+        headers: workspaceAuthHeaders(target),
       }, 1_500, signal);
       if (response.ok) return { online: true, transport: 'local' as const };
     } catch {}
@@ -325,8 +331,8 @@ export async function syncAssetsToLaptop(
           headers: {
             'content-type': mimeFor(asset),
             ...(transport !== 'relay'
-              ? { 'x-photosync-pair-code': target.pairCode! }
-              : { 'x-photosync-pair-token': target.pairToken }),
+              ? workspaceAuthHeaders(target)
+              : { 'x-photosync-pair-token': target.pairToken, ...(target.pairingChallenge ? { 'x-photosync-pairing-challenge': target.pairingChallenge } : {}), ...(target.workspaceId ? { 'x-photosync-workspace-id': target.workspaceId } : {}) }),
             'x-photosync-device-id': target.deviceId,
             'x-photosync-asset-id': asset.id,
             'x-photosync-filename': encodeURIComponent(asset.filename),

@@ -75,6 +75,7 @@ export class SqliteWorkspaceRepository {
         workspace_id TEXT PRIMARY KEY,
         managed_storage_bytes INTEGER NOT NULL DEFAULT 0,
         monthly_ingress_bytes INTEGER NOT NULL DEFAULT 0,
+        monthly_ingress_period TEXT,
         members INTEGER NOT NULL DEFAULT 0,
         devices INTEGER NOT NULL DEFAULT 0,
         storage_providers INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +97,19 @@ export class SqliteWorkspaceRepository {
       );
       CREATE INDEX IF NOT EXISTS idx_photox_audit_workspace_created ON photox_workspace_audit(workspace_id,created_at DESC);
     `);
+    const cols=this.store.db.prepare('PRAGMA table_info(photox_workspace_usage)').all() as Array<{name:string}>;
+    if(!cols.some(col=>col.name==='monthly_ingress_period')) this.store.db.exec('ALTER TABLE photox_workspace_usage ADD COLUMN monthly_ingress_period TEXT');
+  }
+
+  private usagePeriod(now=Date.now()){const d=new Date(now);return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;}
+
+  ensureMonthlyIngressPeriod(workspaceId:string, now=Date.now()): WorkspaceUsage {
+    const period=this.usagePeriod(now); const row=this.store.db.prepare('SELECT monthly_ingress_period FROM photox_workspace_usage WHERE workspace_id=?').get(workspaceId) as {monthly_ingress_period?:string}|undefined;
+    if(row?.monthly_ingress_period===period) return this.getUsage(workspaceId);
+    const usage=this.getUsage(workspaceId);
+    if(!row?.monthly_ingress_period){ this.store.db.prepare('UPDATE photox_workspace_usage SET monthly_ingress_period=? WHERE workspace_id=?').run(period,workspaceId); return usage; }
+    const next={...usage,monthlyIngressBytes:0}; this.setUsage(workspaceId,next,now);
+    this.store.db.prepare('UPDATE photox_workspace_usage SET monthly_ingress_period=? WHERE workspace_id=?').run(period,workspaceId); return next;
   }
 
   ensureLegacyPersonalWorkspace(input: {
@@ -206,11 +220,11 @@ export class SqliteWorkspaceRepository {
   }
 
 
-  reserveMediaWrite(workspaceId: string, bytes: number, limits: { maxManagedStorageBytes: number | null; maxMonthlyIngressBytes: number | null }): WorkspaceUsage {
+  reserveMediaWrite(workspaceId: string, bytes: number, limits: { maxManagedStorageBytes: number | null; maxMonthlyIngressBytes: number | null }, now = Date.now()): WorkspaceUsage {
     if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('INVALID_MEDIA_RESERVATION_BYTES');
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
-      const usage = this.getUsage(workspaceId);
+      const usage = this.ensureMonthlyIngressPeriod(workspaceId, now);
       const nextManaged = usage.managedStorageBytes + bytes;
       const nextIngress = usage.monthlyIngressBytes + bytes;
       if (limits.maxManagedStorageBytes !== null && nextManaged > limits.maxManagedStorageBytes) throw new Error('WORKSPACE_MANAGED_STORAGE_QUOTA_EXCEEDED');

@@ -81,4 +81,16 @@ describe('SqliteWorkspaceRepository', () => {
     expect(repo.listAudit('ws-b')).toHaveLength(1);
     store.close();
   });
+  it('resets monthly ingress at UTC month boundary without reducing managed storage', () => {
+    const {store,repo}=setup();
+    const august=Date.UTC(2026,7,20);
+    repo.ensureLegacyPersonalWorkspace({ workspaceId:'month-ws', ownerUserId:'owner', now:august });
+    repo.ensureMonthlyIngressPeriod('month-ws', august);
+    repo.reserveMediaWrite('month-ws', 100, { maxManagedStorageBytes:null, maxMonthlyIngressBytes:1000 }, august);
+    const before=repo.getUsage('month-ws'); expect(before.managedStorageBytes).toBe(100); expect(before.monthlyIngressBytes).toBe(100);
+    const after=repo.ensureMonthlyIngressPeriod('month-ws', Date.UTC(2026,8,1));
+    expect(after.managedStorageBytes).toBe(100); expect(after.monthlyIngressBytes).toBe(0);
+    store.close();
+  });
+
 });

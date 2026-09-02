@@ -17,6 +17,7 @@ import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaP
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
+import { WorkspacePairingChallengeManager } from './pairingChallenge.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -43,6 +44,7 @@ let webEdgeServer:PhotoXWebEdgeServer|null=null;
 const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
 const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
 const LEGACY_DESKTOP_DEVICE_ID=`desktop_${crypto.createHash('sha256').update(os.hostname()).digest('hex').slice(0,20)}`;
+const workspacePairingChallenges=new WorkspacePairingChallengeManager(LEGACY_WORKSPACE_ID,LEGACY_DESKTOP_DEVICE_ID,'owner');
 
 function requireWorkspaceRepository(){if(!workspaceRepository)throw new Error('WORKSPACE_REPOSITORY_NOT_READY');return workspaceRepository;}
 
@@ -514,7 +516,9 @@ function stopCloudflareTunnelSupervisor(){
 async function startReceiver(){
   if(receiver)return; receiver=http.createServer(async(req,res)=>{try{
     const url=new URL(req.url||'/','http://localhost'); const pair=await ensurePairCode();
-    if(req.headers['x-photosync-pair-code']!==pair){res.writeHead(401);res.end('Invalid pair code');return;}
+    const challenge=String(req.headers['x-photosync-pairing-challenge']||''); const requestWorkspace=String(req.headers['x-photosync-workspace-id']||'');
+    const legacyPairValid=req.headers['x-photosync-pair-code']===pair; const workspaceChallengeValid=workspacePairingChallenges.verify({challenge,workspaceId:requestWorkspace});
+    if(!legacyPairValid&&!workspaceChallengeValid){res.writeHead(401);res.end('Invalid or expired pairing credential');return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/status'){const index=await readIndex();res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({name:os.hostname(),version:'1',libraryPath:libraryDir(),received:index.length}));return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/library'){
       const items=await listLocalMedia();const rows=new Map((await readIndex()).map(row=>[row.key,row]));

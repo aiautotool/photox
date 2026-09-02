@@ -17,9 +17,12 @@ export type TunnelState = {
   lastError?: string;
 };
 
+export type TunnelPairingContext = { workspaceId:string; workspaceRole:'owner'|'admin'|'member'|'viewer'; desktopDeviceId:string; challenge:string; challengeExpiresAt:number; capabilities:string[] };
+
 type Options = {
   stateDir: string;
   relayUrl: string;
+  getPairingContext?: () => Promise<TunnelPairingContext>;
   onUploadReady: (uploadId: string, identity: TunnelIdentity, relayUrl: string) => Promise<void>;
   onState?: (state: TunnelState) => void;
 };
@@ -65,14 +68,18 @@ export class PhotoSyncTunnelClient {
     return this.identity;
   }
 
+  private async pairingPayload(identity: TunnelIdentity) {
+    const context = await this.options.getPairingContext?.();
+    return JSON.stringify(context ? {
+      v: 2, relayUrl: this.options.relayUrl, desktopId: identity.desktopId, pairToken: identity.pairToken,
+      workspaceId: context.workspaceId, workspaceRole: context.workspaceRole, desktopDeviceId: context.desktopDeviceId,
+      pairingChallenge: context.challenge, challengeExpiresAt: context.challengeExpiresAt, capabilities: context.capabilities,
+    } : { v: 1, relayUrl: this.options.relayUrl, desktopId: identity.desktopId, pairToken: identity.pairToken });
+  }
+
   async getState(): Promise<TunnelState> {
     const identity = await this.getIdentity();
-    const payload = JSON.stringify({
-      v: 1,
-      relayUrl: this.options.relayUrl,
-      desktopId: identity.desktopId,
-      pairToken: identity.pairToken,
-    });
+    const payload = await this.pairingPayload(identity);
     return this.state ?? {
       connected: false,
       relayUrl: this.options.relayUrl,
@@ -100,7 +107,7 @@ export class PhotoSyncTunnelClient {
       connected,
       relayUrl: this.options.relayUrl,
       desktopId: identity.desktopId,
-      pairingPayload: JSON.stringify({ v: 1, relayUrl: this.options.relayUrl, desktopId: identity.desktopId, pairToken: identity.pairToken }),
+      pairingPayload: await this.pairingPayload(identity),
       lastError,
     };
     this.options.onState?.(this.state);
