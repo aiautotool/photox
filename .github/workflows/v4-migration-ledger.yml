@@ -1,0 +1,45 @@
+name: Integrate V4 migration ledger
+on:
+  push:
+    branches: [v4]
+    paths:
+      - '.github/workflows/v4-migration-ledger.yml'
+permissions:
+  contents: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Export ledger and refresh lockfile
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('packages/persistence-sqlite/src/index.ts')
+          text=p.read_text()
+          marker="export * from './migration';"
+          if marker not in text:
+              p.write_text(text.rstrip()+"\n\n"+marker+"\n")
+          PY
+          npm install --package-lock-only --ignore-scripts
+      - name: Validate repository
+        run: |
+          npm install --ignore-scripts
+          npm test
+          npm run typecheck
+          npm run build
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/persistence-sqlite/src/index.ts package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "integrate SQLite Google Photos migration ledger"
+            git push origin HEAD:v4
+          fi
