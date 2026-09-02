@@ -11,10 +11,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
+import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
-import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger } from '@photox/persistence-sqlite';
+import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
 
@@ -36,8 +36,26 @@ let cloudUploadQueue: Promise<void> = Promise.resolve();
 let repairSweepActive=false;
 let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
+let workspaceRepository:SqliteWorkspaceRepository|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
 let webEdgeServer:PhotoXWebEdgeServer|null=null;
+
+const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
+const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
+const LEGACY_DESKTOP_DEVICE_ID=`desktop_${crypto.createHash('sha256').update(os.hostname()).digest('hex').slice(0,20)}`;
+
+function requireWorkspaceRepository(){if(!workspaceRepository)throw new Error('WORKSPACE_REPOSITORY_NOT_READY');return workspaceRepository;}
+
+async function bootstrapLegacyWorkspace(){
+  const repo=requireWorkspaceRepository();
+  const result=repo.ensureLegacyPersonalWorkspace({workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID,name:process.env.PHOTOX_WORKSPACE_NAME||'My PhotoX',plan:'personal'});
+  repo.putDevice({id:LEGACY_DESKTOP_DEVICE_ID,workspaceId:LEGACY_WORKSPACE_ID,userId:LEGACY_OWNER_USER_ID,name:os.hostname(),platform:process.platform==='darwin'?'macos':process.platform==='win32'?'windows':process.platform==='linux'?'linux':'unknown',kind:'desktop',createdAt:Date.now(),lastSeenAt:Date.now()});
+  const current=repo.getUsage(LEGACY_WORKSPACE_ID);
+  const rows=await readIndex();
+  const managedStorageBytes=rows.reduce((sum,row)=>sum+Math.max(0,row.size||0),0);
+  repo.setUsage(LEGACY_WORKSPACE_ID,{...current,managedStorageBytes,members:repo.listMemberships(LEGACY_WORKSPACE_ID).filter(item=>item.status==='active').length,devices:repo.listDevices(LEGACY_WORKSPACE_ID).filter(item=>!item.revokedAt).length,storageProviders:(await savedDriveAccounts()).length});
+  if(result.created)repo.appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'workspace.legacy_bootstrap',targetType:'workspace',targetId:LEGACY_WORKSPACE_ID});
+}
 
 function notifyRenderer(channel:string,payload:unknown){
   const event=channel==='photosync:migration-updated'?'migration-updated':channel==='photosync:file-received'?'file-received':channel==='photosync:storage-updated'?'storage-updated':channel==='photosync:tunnel-state'?'tunnel-state':null;
@@ -388,15 +406,33 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
   const deviceId=String(req.headers['x-photosync-device-id']||'unknown'); const assetId=String(req.headers['x-photosync-asset-id']||''); const key=`${deviceId}:${assetId}`;
   const rows=await readIndex(); if(rows.some(x=>x.key===key)){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
   const filename=safeFilename(decodeURIComponent(String(req.headers['x-photosync-filename']||`media-${Date.now()}`))); const createdAt=Number(req.headers['x-photosync-created-at']||Date.now());
+  const declaredSize=Number(req.headers['x-photosync-size']||req.headers['content-length']||0);
+  if(!Number.isFinite(declaredSize)||declaredSize<=0){res.writeHead(411,{'content-type':'application/json'});res.end(JSON.stringify({error:'MEDIA_SIZE_REQUIRED'}));return;}
+  const repo=requireWorkspaceRepository();const workspace=repo.getWorkspace(LEGACY_WORKSPACE_ID);if(!workspace){res.writeHead(503);res.end('Workspace unavailable');return;}
+  const entitlements=entitlementsForPlan(workspace.plan);
+  try{repo.reserveMediaWrite(LEGACY_WORKSPACE_ID,declaredSize,{maxManagedStorageBytes:entitlements.maxManagedStorageBytes,maxMonthlyIngressBytes:entitlements.maxMonthlyIngressBytes});}
+  catch(error){const message=error instanceof Error?error.message:String(error);res.writeHead(413,{'content-type':'application/json'});res.end(JSON.stringify({error:message}));return;}
+  let reservationCommitted=false;
   const declaredMediaType=String(req.headers['x-photosync-media-type']||'photo')==='video'?'video':'photo';
   const declaredMime=String(req.headers['content-type']||'').split(';')[0].trim();const mimeType=declaredMime&&declaredMime!=='application/octet-stream'?declaredMime:mimeTypeForFilename(filename);
   const date=new Date(Number.isFinite(createdAt)?createdAt:Date.now()); const folder=path.join(libraryDir(),String(date.getFullYear()),String(date.getMonth()+1).padStart(2,'0'));
-  await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(folder,{recursive:true}); const tmp=path.join(incomingDir(),`${crypto.randomUUID()}.part`); await pipeline(req,createWriteStream(tmp));
-  const stat=await fs.stat(tmp); const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
+  await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(folder,{recursive:true}); const tmp=path.join(incomingDir(),`${crypto.randomUUID()}.part`);
+  try{
+    await pipeline(req,createWriteStream(tmp));
+    const stat=await fs.stat(tmp);
+    if(stat.size!==declaredSize)throw new Error(`MEDIA_SIZE_MISMATCH:${declaredSize}:${stat.size}`);
+    const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
   await fs.rename(tmp,target); const row:MediaIndexRow={key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; rows.push(row); await writeIndex(rows);
   lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
   res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
+  reservationCommitted=true;
+  repo.appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:deviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size}});
   if(declaredMediaType==='video')void processVideoRow(key);void enqueueCloudUpload(row);
+  }catch(error){
+    await fs.unlink(tmp).catch(()=>undefined);
+    if(!reservationCommitted)repo.releaseMediaReservation(LEGACY_WORKSPACE_ID,declaredSize);
+    throw error;
+  }
 }
 
 async function desktopStatus():Promise<DesktopStatus>{
@@ -555,12 +591,12 @@ ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigra
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
       if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}
       return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
   });createWindow();const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
-app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;migrationService=null});
+app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;migrationService=null});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());

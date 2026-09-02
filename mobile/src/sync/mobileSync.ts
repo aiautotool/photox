@@ -332,6 +332,7 @@ export async function syncAssetsToLaptop(
             'x-photosync-filename': encodeURIComponent(asset.filename),
             'x-photosync-created-at': String(asset.creationTime),
             'x-photosync-media-type': asset.mediaType,
+            'x-photosync-size': String(local!.size),
           },
         }, ({ totalBytesSent, totalBytesExpectedToSend }) => {
           const total = totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : local!.size;

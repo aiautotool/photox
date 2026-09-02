@@ -205,6 +205,45 @@ export class SqliteWorkspaceRepository {
     };
   }
 
+
+  reserveMediaWrite(workspaceId: string, bytes: number, limits: { maxManagedStorageBytes: number | null; maxMonthlyIngressBytes: number | null }): WorkspaceUsage {
+    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('INVALID_MEDIA_RESERVATION_BYTES');
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      const usage = this.getUsage(workspaceId);
+      const nextManaged = usage.managedStorageBytes + bytes;
+      const nextIngress = usage.monthlyIngressBytes + bytes;
+      if (limits.maxManagedStorageBytes !== null && nextManaged > limits.maxManagedStorageBytes) throw new Error('WORKSPACE_MANAGED_STORAGE_QUOTA_EXCEEDED');
+      if (limits.maxMonthlyIngressBytes !== null && nextIngress > limits.maxMonthlyIngressBytes) throw new Error('WORKSPACE_MONTHLY_INGRESS_QUOTA_EXCEEDED');
+      const next = { ...usage, managedStorageBytes: nextManaged, monthlyIngressBytes: nextIngress };
+      this.setUsage(workspaceId, next);
+      this.store.db.exec('COMMIT');
+      return next;
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  releaseMediaReservation(workspaceId: string, bytes: number, options: { releaseManaged?: boolean; releaseIngress?: boolean } = { releaseManaged: true, releaseIngress: true }): WorkspaceUsage {
+    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('INVALID_MEDIA_RESERVATION_BYTES');
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      const usage = this.getUsage(workspaceId);
+      const next = {
+        ...usage,
+        managedStorageBytes: options.releaseManaged === false ? usage.managedStorageBytes : Math.max(0, usage.managedStorageBytes - bytes),
+        monthlyIngressBytes: options.releaseIngress === false ? usage.monthlyIngressBytes : Math.max(0, usage.monthlyIngressBytes - bytes),
+      };
+      this.setUsage(workspaceId, next);
+      this.store.db.exec('COMMIT');
+      return next;
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   appendAudit(event: Omit<WorkspaceAuditEvent, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): WorkspaceAuditEvent {
     if (!this.getWorkspace(event.workspaceId)) throw new Error('WORKSPACE_NOT_FOUND');
     const stored: WorkspaceAuditEvent = { ...event, id: event.id ?? randomUUID(), createdAt: event.createdAt ?? Date.now() };

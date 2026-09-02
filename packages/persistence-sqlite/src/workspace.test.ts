@@ -42,6 +42,18 @@ describe('SqliteWorkspaceRepository', () => {
     store.close();
   });
 
+
+  it('atomically reserves media bytes and rolls back rejected quota writes', () => {
+    const { store, repo } = setup();
+    repo.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'user-a' });
+    repo.setUsage('ws-a', { managedStorageBytes: 100, monthlyIngressBytes: 200, members: 1, devices: 1, storageProviders: 0, publicShares: 0 });
+    expect(repo.reserveMediaWrite('ws-a', 50, { maxManagedStorageBytes: 200, maxMonthlyIngressBytes: 300 })).toMatchObject({ managedStorageBytes: 150, monthlyIngressBytes: 250 });
+    expect(() => repo.reserveMediaWrite('ws-a', 60, { maxManagedStorageBytes: 200, maxMonthlyIngressBytes: 300 })).toThrow('WORKSPACE_MANAGED_STORAGE_QUOTA_EXCEEDED');
+    expect(repo.getUsage('ws-a')).toMatchObject({ managedStorageBytes: 150, monthlyIngressBytes: 250 });
+    expect(repo.releaseMediaReservation('ws-a', 50)).toMatchObject({ managedStorageBytes: 100, monthlyIngressBytes: 200 });
+    store.close();
+  });
+
   it('preserves workspace identity across refresh sessions', async () => {
     const { store } = setup();
     const sessions = new SqliteRefreshSessionStore(store);
