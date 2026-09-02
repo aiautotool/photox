@@ -503,7 +503,7 @@ async function streamWebMedia(req:IncomingMessage,res:ServerResponse,key:string,
   }
   if(variant==='playback'&&row.playbackPath){try{await streamNodeFile(req,res,row.playbackPath,'video/mp4');return}catch{}}
   try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
-  const requestHeaders=req.headers.range?{range:req.headers.range}:{};
+  const requestHeaders:Record<string,string>={};if(req.headers.range)requestHeaders.range=req.headers.range;
   const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}/api/v1/media/${encodeURIComponent(key)}`,{headers:requestHeaders}));
   const headers=Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase())));
   if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
