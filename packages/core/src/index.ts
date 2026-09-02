@@ -1,12 +1,14 @@
 export const GIB = 1024 ** 3;
-export const APP_CAP_BYTES = 10 * GIB;
 export const RESERVE_BYTES = 100 * 1024 ** 2;
+export const DEFAULT_PROVIDER_USAGE_RATIO = 2 / 3;
 
 export type StorageAccount = {
   id: string;
   email: string;
   appUsedBytes: number;
   providerFreeBytes: number;
+  providerTotalBytes?: number;
+  maxUsageRatio?: number;
   status?: 'READY' | 'NEAR_LIMIT' | 'FULL_FOR_BACKUP' | 'INSUFFICIENT_RESERVE';
 };
 
@@ -98,14 +100,18 @@ export function evaluateBackupHealth(
   return { health: 'at_risk', originalCopies: originals.length, remoteOriginalCopies: remoteOriginals.length, viewableCopies, missingOriginalCopies, reasons };
 }
 
+export function accountUsageLimit(account: StorageAccount): number {
+  const total = account.providerTotalBytes;
+  if (!total || !Number.isFinite(total) || total <= 0) return Number.POSITIVE_INFINITY;
+  const requestedRatio = account.maxUsageRatio ?? DEFAULT_PROVIDER_USAGE_RATIO;
+  const ratio = Math.max(0, Math.min(1, requestedRatio));
+  return Math.floor(total * ratio);
+}
+
 export function safeAvailable(account: StorageAccount): number {
-  return Math.max(
-    0,
-    Math.min(
-      APP_CAP_BYTES - account.appUsedBytes,
-      account.providerFreeBytes - RESERVE_BYTES,
-    ),
-  );
+  const ratioRemaining = Math.max(0, accountUsageLimit(account) - account.appUsedBytes);
+  const providerRemaining = Math.max(0, account.providerFreeBytes - RESERVE_BYTES);
+  return Math.max(0, Math.min(ratioRemaining, providerRemaining));
 }
 
 export function chooseAccount(accounts: StorageAccount[], fileSize: number): StorageAccount | null {
