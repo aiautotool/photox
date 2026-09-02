@@ -1,0 +1,27 @@
+name: Wire viewer
+on:
+  push:
+    branches: [v3]
+    paths:
+      - '.github/scripts/wire_viewer.py'
+      - '.github/workflows/wire-viewer.yml'
+permissions:
+  contents: write
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply viewer wiring
+        run: python .github/scripts/wire_viewer.py
+      - name: Verify
+        run: git diff --check
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mobile/src/home/MobileHome.tsx
+          git commit -m "wire swipe and zoom viewer"
+          git push origin HEAD:v3
