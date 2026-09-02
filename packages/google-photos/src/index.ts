@@ -168,3 +168,5 @@ export async function transferPickedItems(
   if (sourceItems.length) onProgress?.(sourceItems.length, sourceItems.length, sourceItems[sourceItems.length - 1]);
   return results;
 }
+
+export * from './migration';
