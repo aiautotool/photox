@@ -1,0 +1,27 @@
+name: Patch Workspace Session Persistence
+on:
+  push:
+    branches: [v4]
+    paths: ['.github/workflows/patch-workspace-session.yml']
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: v4 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install --ignore-scripts
+      - run: npm --workspace @photosync/core run build
+      - run: npm --workspace @photox/media-api run build
+      - run: python .github/scripts/patch-workspace-session.py
+      - run: npm --workspace @photox/persistence-sqlite test
+      - run: npm --workspace @photox/persistence-sqlite run typecheck
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/persistence-sqlite/src/index.ts packages/persistence-sqlite/src/workspace.test.ts
+          git diff --cached --quiet || git commit -m "persist workspace identity in refresh sessions"
+          git push origin HEAD:v4
