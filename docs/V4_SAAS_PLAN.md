@@ -49,10 +49,11 @@ V4 must extend these instead of replacing them.
    - common role/feature/quota policy exists.
    - media ingest enforces byte quotas, while remaining provider/admin write paths still need uniform entitlement enforcement.
 
-4. **Pairing v2 is workspace-aware but session exchange is transitional**
+4. **Pairing v2 now exchanges into durable workspace sessions**
    - Desktop QR v2 carries workspace ID, workspace role, desktop device ID, short-lived challenge expiry and capabilities.
-   - Mobile stores this workspace pairing context in SecureStore and uses it for LAN/public/relay requests while valid.
-   - legacy v1 pair-code/pair-token compatibility remains temporarily available until a v2 challenge is exchanged for normal access/refresh tokens.
+   - Mobile exchanges the challenge for a 15-minute JOSE access token plus durable refresh session, persists them in SecureStore, refreshes before expiry, and revokes on forget.
+   - Desktop registers/refreshes the mobile WorkspaceDevice, enforces active membership/device state, and accepts bearer scopes on status/library/media/download/delete.
+   - Relay preserves Authorization and workspace headers end-to-end; legacy v1 pair-code/pair-token compatibility remains temporarily available only for old clients.
 
 5. **Control-plane persistence needs service wiring**
    - durable workspace, membership, device, usage and audit tables/repository exist.
@@ -124,7 +125,7 @@ Authorization is two-stage:
 1. API scope check (`media:read`, `media:write`, ...).
 2. Workspace entitlement/role/quota check.
 
-Legacy V3 pair-code sessions remain temporarily valid during migration. Pairing v2 no longer relies on pair-code for modern relay-to-desktop authorization: the workspace challenge is propagated through Relay and verified by the same shared Desktop challenge manager used by LAN/public requests. V1 devices retain pair-code/pair-token fallback until the access/refresh session exchange endpoint is complete.
+Legacy V3 pair-code sessions remain temporarily valid during migration. Pairing v2 exchanges its one-time workspace challenge for a scoped JOSE access token and SQLite-backed refresh session. Modern LAN/public/relay media requests carry Bearer authorization; Relay forwards it to the desktop receiver. V1 devices retain pair-code/pair-token fallback only for compatibility while upgraded clients use normal sessions.
 
 Refresh-token persistence preserves workspace identity. Existing SQLite databases are migrated in place by adding nullable `workspace_id` and `workspace_role` columns so V3-era sessions remain readable during rollout.
 
@@ -204,16 +205,16 @@ All feature UI must read the entitlement state. A disabled feature must be hidde
 
 ### Phase C — workspace-aware pairing
 
-Implemented transitional v2 flow:
+Implemented v2 session flow:
 
 - Desktop tunnel QR carries workspace ID, workspace role, deterministic desktop device ID, challenge, challenge expiry and capability metadata.
 - a shared in-process challenge manager is used by both the tunnel module and LAN/public receiver so the same v2 challenge is valid across transports.
 - Relay preserves workspace ID and challenge end-to-end; Desktop validates the challenge before forwarding modern uploads into the receiver.
-- Mobile parses/persists v2 workspace pairing context in SecureStore and attaches workspace/challenge headers for modern LAN/public/relay operations.
-- expired or invalid v2 challenges are rejected.
-- v1 pairing remains compatible through legacy pair-code/pair-token fallback.
-
-Next pairing step: exchange the short-lived challenge for a workspace-scoped access/refresh session, register/revoke the mobile device session, and stop using pair-code as authorization for v2 clients entirely.
+- Mobile parses/persists v2 workspace pairing context, immediately exchanges the short-lived challenge for access/refresh credentials, refreshes the access token before expiry, and sends Bearer authorization for modern LAN/public/relay operations.
+- Desktop stores refresh sessions in SQLite, registers the mobile as a WorkspaceDevice, enforces membership/device revocation, and audits device registration/session pairing.
+- Relay forwards Bearer authorization, workspace ID, media type and upload metadata to the Desktop receiver.
+- expired/invalid challenges, expired/revoked sessions, revoked devices and workspace mismatches are rejected.
+- v1 pairing remains compatible through legacy pair-code/pair-token fallback for migration only.
 
 ### Phase D — SaaS UX
 
@@ -271,7 +272,7 @@ Monthly ingress now has a UTC `YYYY-MM` accounting period. A period transition r
 - [x] Enforce media ingest quota before upload acceptance using declared bytes, atomic SQLite reservation, size verification and rollback.
 - [x] Keep workspace managed-storage/provider usage consistent on media delete and Google Drive connect/disconnect, with durable audit events.
 - [x] Add backward-safe monthly ingress accounting period and UTC month rollover.
-- [ ] Exchange v2 pairing challenge for workspace-scoped access/refresh session and revoke device sessions server-side.
+- [x] Exchange v2 pairing challenge for workspace-scoped JOSE access/refresh session, register the mobile device, refresh before expiry, enforce active device/membership state and revoke sessions on forget.
 - [ ] Scope media/provider index operations by workspace.
 - [ ] Replace Web edge bootstrap identity with authoritative SaaS access/refresh sessions.
 
@@ -310,9 +311,9 @@ Monthly ingress now has a UTC `YYYY-MM` accounting period. A period transition r
 
 ## 10. Next Batch
 
-1. Add a v2 pairing exchange endpoint that consumes the short-lived challenge and returns workspace-scoped access + refresh tokens, registers the mobile device, supports session revocation, and removes pair-code fallback for upgraded clients.
-2. Add `workspace_id` to media index/provider connection rows with backward-safe migration; enforce workspace scope in list/read/delete/upload/replica operations and add cross-tenant tests.
-3. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and refresh-session flow.
+1. Add `workspace_id` to media index/provider connection rows with backward-safe migration; enforce workspace scope in list/read/delete/upload/replica operations and add cross-tenant tests.
+2. Replace static Web edge bootstrap role/workspace configuration with the same verified SaaS access/refresh session flow now used by Mobile.
+3. Add device/session management APIs and shared Mobile/Desktop/Web UX for listing devices, revoking a device and invalidating all associated refresh sessions.
 4. Add workspace/plan/usage APIs and surface authoritative quota state in shared Desktop/Web UI and Mobile.
 5. Extend durable audit emission to all administrative mutations and expose an operations/activity view.
 6. Continue Google Photos migration hardening: streaming large files, resumable per-file checkpoints across restart, speed/ETA and live OAuth verification with real accounts.
