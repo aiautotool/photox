@@ -17,6 +17,7 @@ import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaP
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
+import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -37,6 +38,7 @@ let repairSweepActive=false;
 let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
+let webEdgeServer:PhotoXWebEdgeServer|null=null;
 let webEdgeServer:PhotoXWebEdgeServer|null=null;
 
 function notifyRenderer(channel:string,payload:unknown){
