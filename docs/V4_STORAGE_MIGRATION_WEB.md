@@ -40,16 +40,18 @@ The same source Picker flow supports both Google Photos -> Google Photos and Goo
 
 ## Desktop UX
 
-Add a top-level `Migration` / `Chuyển dữ liệu` page with:
+The shared Desktop/Web UI now has a top-level `Chuyển dữ liệu` page backed by the real migration service:
 
-- Source: Google Photos account + connect/select media.
-- Destination: Google Photos or Google Drive account.
-- selected photo/video count and estimated bytes when known.
-- current filename, transferred bytes, batch progress, speed and ETA.
+- Source: Google Photos account with Picker capability.
+- Destination: Google Photos append-only account or any connected Google Drive account.
+- user-driven Google Photos Picker selection.
+- current per-item state/error/transferred bytes and batch progress.
 - queued/running/completed/failed/cancelled states.
 - pause/resume/cancel/retry failed.
 - migration history with per-item detail.
-- no destructive source delete by default.
+- no destructive source delete.
+
+Progress is refreshed from the durable SQLite ledger while a job is running, so pause/cancel controls stay responsive instead of waiting for the long-running IPC call to finish.
 
 No control is shown as active until its backing API/worker path exists.
 
@@ -87,17 +89,27 @@ Rules:
 - [x] Add generic selected-media transfer worker with per-item success/failure results.
 - [x] Add package tests and include package in root test/typecheck/build commands.
 
-### Batch B — in progress
+### Batch B — implemented end-to-end desktop path
 
-- [ ] Persist Google Photos OAuth accounts separately from Google Drive accounts.
+- [x] Persist Google Photos OAuth accounts separately from Google Drive accounts.
+- [x] Preserve refresh tokens and distinct Picker/append capabilities when reconnecting an account.
 - [x] Add migration job/item domain and state machine with pause/cancel/resume/retry-safe behavior.
-- [x] Add migration ledger + resumable state in SQLite.
+- [x] Add migration ledger + resumable job state in SQLite.
 - [x] Persist item attempts, transferred bytes, target ID/URL and per-item errors.
-- [ ] Add Desktop IPC migration service and progress events.
-- [ ] Add Migration page to the shared Desktop/Web UI.
-- [ ] Wire Google Photos -> Google Photos destination.
-- [ ] Wire Google Photos -> Google Drive resumable destination.
-- [ ] Verify destination checksums/size where APIs permit.
+- [x] Add Desktop IPC migration service and renderer bridge methods.
+- [x] Add live migration progress polling from the durable ledger and non-blocking run/resume/retry IPC handlers.
+- [x] Add Migration page to the shared Desktop/Web UI.
+- [x] Wire Google Photos -> Google Photos destination using append-only upload and batchCreate acknowledgement.
+- [x] Wire Google Photos -> Google Drive destination using a Drive resumable upload session.
+- [x] Verify Google Drive destination ID and byte size before marking the item transferred.
+- [x] Refresh Picker-selected media before run/resume instead of persisting session-bound base URLs.
+
+Remaining migration hardening:
+
+- [ ] Stream/chunk very large source files instead of buffering the entire item in memory.
+- [ ] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
+- [ ] Add transfer speed and ETA metrics.
+- [ ] Add real-Google-account end-to-end test outside CI with OAuth credentials and consent configuration.
 
 ### Batch C — Web parity
 
@@ -105,6 +117,7 @@ Rules:
 - [x] Make the existing renderer resolve Electron or Web transport without forking the React UI tree.
 - [x] Keep Electron IPC adapter.
 - [x] Add authenticated HTTP/WebSocket adapter contract/client; server endpoints and auth enforcement remain pending.
+- [x] Extend the shared bridge contract with Google Photos account and migration operations.
 - [ ] Expose desktop status/library/accounts/health/migration/jobs APIs through the edge service.
 - [ ] Serve the same Vite production bundle from the edge service.
 - [ ] Add configurable bind host/port/base URL/domain/CORS origins.
@@ -114,6 +127,15 @@ Rules:
 
 ## Validation note
 
-The migration ledger + shared bridge integration was validated with the repository's full unit/integration test command, TypeScript typecheck and production build before commit. The build order now compiles `@photosync/google-photos` before `@photox/persistence-sqlite`, which consumes its migration contracts.
+The Desktop migration orchestration, shared migration UI and Drive destination verification passed the repository full validation command sequence after a production-build-only NodeNext export issue was found and fixed:
+
+- `npm install`
+- `npm test`
+- `npm run typecheck`
+- `npm run build`
+
+The Google Photos package uses NodeNext-compatible `.js` re-export specifiers for migration contracts consumed by Electron. The lockfile is regenerated after dependency changes.
+
+CI cannot validate a live Google OAuth consent/Picking/transfer session because CI does not have user Google credentials. That path remains explicitly NOT VERIFIED end-to-end until tested with configured Google Cloud OAuth credentials.
 
 Every batch must pass unit tests, TypeScript typecheck and production build before being marked complete.
