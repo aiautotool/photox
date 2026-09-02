@@ -512,11 +512,11 @@ ipcMain.handle('photosync:migration-list',()=>requireMigrationService().listJobs
 ipcMain.handle('photosync:migration-snapshot',(_event,jobId:string)=>requireMigrationService().getSnapshot(jobId));
 ipcMain.handle('photosync:migration-create',(_event,input:any)=>requireMigrationService().createSelection(input));
 ipcMain.handle('photosync:migration-materialize',(_event,jobId:string)=>requireMigrationService().materializeSelection(jobId));
-ipcMain.handle('photosync:migration-run',(_event,jobId:string)=>requireMigrationService().run(jobId));
+ipcMain.handle('photosync:migration-run',async(_event,jobId:string)=>{const service=requireMigrationService();void service.run(jobId).catch(error=>console.error('Migration run failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 ipcMain.handle('photosync:migration-pause',(_event,jobId:string)=>{requireMigrationService().pause(jobId);return requireMigrationService().getSnapshot(jobId)});
-ipcMain.handle('photosync:migration-resume',(_event,jobId:string)=>requireMigrationService().resume(jobId));
+ipcMain.handle('photosync:migration-resume',async(_event,jobId:string)=>{const service=requireMigrationService();void service.resume(jobId).catch(error=>console.error('Migration resume failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigrationService().cancel(jobId);return requireMigrationService().getSnapshot(jobId)});
-ipcMain.handle('photosync:migration-retry',(_event,jobId:string)=>requireMigrationService().retryFailed(jobId));
+ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
 
 app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
