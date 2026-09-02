@@ -18,6 +18,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add desktop/electron/main.ts
-          git diff --cached --quiet || git commit -m "wire authenticated web edge server"
+          git diff --cached --quiet || git commit -m "normalize web edge wiring"
           git push origin HEAD:v4
-# trigger
+# cleanup-trigger
