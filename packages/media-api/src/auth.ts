@@ -6,10 +6,14 @@ export type MediaApiScope =
   | 'cloud:read'
   | 'cloud:manage';
 
+export type WorkspaceSessionRole = 'owner' | 'admin' | 'member' | 'viewer';
+
 export interface AccessPrincipal {
   subject: string;
   deviceId?: string;
   sessionId?: string;
+  workspaceId?: string;
+  workspaceRole?: WorkspaceSessionRole;
   scopes: MediaApiScope[];
   issuedAt?: number;
   expiresAt?: number;
@@ -25,20 +29,35 @@ export interface AccessTokenIssuer {
 }
 
 export interface RefreshSessionStore {
-  create(input: { subject: string; deviceId?: string; scopes: MediaApiScope[]; expiresAt: number }): Promise<{ refreshToken: string; sessionId: string }>;
-  consume(refreshToken: string): Promise<{ subject: string; deviceId?: string; scopes: MediaApiScope[]; sessionId: string } | null>;
+  create(input: {
+    subject: string;
+    deviceId?: string;
+    workspaceId?: string;
+    workspaceRole?: WorkspaceSessionRole;
+    scopes: MediaApiScope[];
+    expiresAt: number;
+  }): Promise<{ refreshToken: string; sessionId: string }>;
+  consume(refreshToken: string): Promise<{
+    subject: string;
+    deviceId?: string;
+    workspaceId?: string;
+    workspaceRole?: WorkspaceSessionRole;
+    scopes: MediaApiScope[];
+    sessionId: string;
+  } | null>;
   revoke(sessionId: string): Promise<void>;
 }
 
 export class AuthorizationService {
   constructor(private readonly verifier: AccessTokenVerifier) {}
 
-  async authorize(token: string | undefined, required: MediaApiScope[]): Promise<AccessPrincipal> {
+  async authorize(token: string | undefined, required: MediaApiScope[], workspaceId?: string): Promise<AccessPrincipal> {
     if (!token) throw new Error('AUTH_REQUIRED');
     const principal = await this.verifier.verify(token);
     const now = Math.floor(Date.now() / 1000);
     if (principal.expiresAt !== undefined && principal.expiresAt <= now) throw new Error('TOKEN_EXPIRED');
     for (const scope of required) if (!principal.scopes.includes(scope)) throw new Error(`SCOPE_REQUIRED:${scope}`);
+    if (workspaceId && principal.workspaceId && principal.workspaceId !== workspaceId) throw new Error('WORKSPACE_SCOPE_MISMATCH');
     return principal;
   }
 }
