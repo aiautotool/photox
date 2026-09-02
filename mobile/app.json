@@ -38,7 +38,11 @@
         "expo-build-properties",
         {
           "android": {
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "minSdkVersion": 24,
+            "extraMavenRepos": [
+              "https://artifactory.img.ly/artifactory/maven"
+            ]
           },
           "ios": {
             "deploymentTarget": "16.4"
