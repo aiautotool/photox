@@ -115,12 +115,16 @@ export class SqliteWorkspaceRepository {
       return { workspace: existing, membership: this.getMembership(input.workspaceId, input.ownerUserId)!, created: false };
     }
     const legacy = createLegacyPersonalWorkspace(input);
-    const tx = this.store.db.transaction(() => {
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
       this.putWorkspace(legacy.workspace);
       this.putMembership(legacy.membership);
       this.setUsage(legacy.workspace.id, { ...ZERO_USAGE, members: 1 });
-    });
-    tx();
+      this.store.db.exec('COMMIT');
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
     return { ...legacy, created: true };
   }
 
