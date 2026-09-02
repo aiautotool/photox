@@ -1,0 +1,22 @@
+name: Apply V4 storage policy patch
+on:
+  push:
+    branches: [v4]
+    paths:
+      - '.github/scripts/apply_v4_storage_policy.py'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+      - run: python .github/scripts/apply_v4_storage_policy.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add desktop/electron/main.ts
+          git diff --cached --quiet || git commit -m "apply proportional Google Drive account quota"
+          git push origin v4
