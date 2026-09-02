@@ -16,6 +16,7 @@ import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDr
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
+import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -36,11 +37,14 @@ let repairSweepActive=false;
 let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
+let webEdgeServer:PhotoXWebEdgeServer|null=null;
 
 function notifyRenderer(channel:string,payload:unknown){
   const win=mainWindow;
   if(!win||win.isDestroyed()||win.webContents.isDestroyed())return;
   win.webContents.send(channel,payload);
+  const event=channel==='photosync:migration-updated'?'migration-updated':channel==='photosync:file-received'?'file-received':channel==='photosync:storage-updated'?'storage-updated':channel==='photosync:tunnel-state'?'tunnel-state':null;
+  if(event)webEdgeServer?.publish(event,payload);
 }
 
 type DesktopStatus = {
@@ -492,6 +496,39 @@ async function startReceiver(){
   }catch(e){console.error(e);res.writeHead(500);res.end(e instanceof Error?e.message:String(e))}}); receiver.listen(RECEIVER_PORT,'0.0.0.0');
 }
 
+async function streamWebMedia(req:IncomingMessage,res:ServerResponse,key:string,variant:'original'|'playback'|'thumbnail'){
+  const row=(await readIndex()).find(item=>item.key===key);if(!row){res.writeHead(404);res.end('Not found');return;}
+  if(variant==='thumbnail'){
+    if(!row.thumbnailPath){res.writeHead(404);res.end('Thumbnail unavailable');return;}
+    try{await streamNodeFile(req,res,row.thumbnailPath,'image/jpeg');return}catch{res.writeHead(404);res.end('Thumbnail unavailable');return;}
+  }
+  if(variant==='playback'&&row.playbackPath){try{await streamNodeFile(req,res,row.playbackPath,'video/mp4');return}catch{}}
+  try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
+  const requestHeaders=req.headers.range?{range:req.headers.range}:{};
+  const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}/api/v1/media/${encodeURIComponent(key)}`,{headers:requestHeaders}));
+  const headers=Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase())));
+  if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
+  res.writeHead(response.status,headers);if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();
+}
+
+async function startWebEdge(){
+  const config=webEdgeConfigFromEnv(path.join(__dirname,'../dist'));
+  if(!config.enabled)return;
+  const migrations=()=>requireMigrationService();
+  webEdgeServer=new PhotoXWebEdgeServer(config,{
+    getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
+    listLocalMedia,listCloudUploads,getBackupHealth:backupHealthSnapshot,openLibrary:()=>shell.openPath(libraryDir()),addGoogleAccount:connectGoogle,listGoogleAccounts:listDriveAccounts,removeGoogleAccount:removeDriveAccount,
+    retryCloud:async()=>{await retryQueuedCloud();return desktopStatus();},listGooglePhotosAccounts:()=>migrations().listAccounts(),connectGooglePhotosAccount:capability=>migrations().connectAccount(capability),removeGooglePhotosAccount:accountId=>migrations().removeAccount(accountId),
+    listMigrations:()=>migrations().listJobs(),getMigration:jobId=>migrations().getSnapshot(jobId),createMigration:input=>migrations().createSelection(input),materializeMigration:jobId=>migrations().materializeSelection(jobId),
+    runMigration:async jobId=>{void migrations().run(jobId).catch(error=>console.error('Web migration run failed',jobId,error));return (await migrations().getSnapshot(jobId)).job;},
+    pauseMigration:async jobId=>{migrations().pause(jobId);return migrations().getSnapshot(jobId);},resumeMigration:async jobId=>{void migrations().resume(jobId).catch(error=>console.error('Web migration resume failed',jobId,error));return (await migrations().getSnapshot(jobId)).job;},
+    cancelMigration:async jobId=>{migrations().cancel(jobId);return migrations().getSnapshot(jobId);},retryMigration:async jobId=>{void migrations().retryFailed(jobId).catch(error=>console.error('Web migration retry failed',jobId,error));return (await migrations().getSnapshot(jobId)).job;},
+    streamMedia:streamWebMedia,
+  });
+  await webEdgeServer.start();
+  console.log(`PhotoX Web enabled on http://${config.host}:${config.port}`);
+}
+
 function createWindow(){const win=new BrowserWindow({width:1500,height:940,minWidth:1040,minHeight:700,backgroundColor:'#ffffff',titleBarStyle:process.platform==='darwin'?'hiddenInset':'default',trafficLightPosition:process.platform==='darwin'?{x:18,y:22}:undefined,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false}});mainWindow=win;win.on('closed',()=>{if(mainWindow===win)mainWindow=null});const devUrl=process.env.VITE_DEV_SERVER_URL||'http://localhost:5173';if(!app.isPackaged)win.loadURL(devUrl);else win.loadFile(path.join(__dirname,'../dist/index.html'),{query:{build:String(Date.now())}});}
 
 ipcMain.handle('photosync:status',()=>desktopStatus());
@@ -519,12 +556,12 @@ ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigra
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
       if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}
       return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
   });createWindow();const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
-app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();migrationStore?.close();migrationStore=null;migrationService=null});
+app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;migrationService=null});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());
