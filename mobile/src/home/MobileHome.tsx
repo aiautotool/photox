@@ -42,6 +42,7 @@ import { mobileLibraryController } from '../library/LibraryController';
 import type { MobileAlbum, MobileLibraryState } from '../library/LibraryStateStore';
 import { SwipeMediaStage } from '../viewer/SwipeMediaStage';
 import { PhotoTimeline } from './PhotoTimeline';
+import { searchMedia } from '../search/mediaSearch';
 
 type Tab = 'photos' | 'collections' | 'search';
 type Sheet = 'backup' | 'account' | 'settings' | 'create-album' | 'rename-album' | 'add-to-album' | null;
@@ -131,7 +132,7 @@ export default function MobileHome(){
   const archived=useMemo(()=>new Set(library.archived),[library.archived]);
   const trashed=useMemo(()=>new Set(library.trash.map(x=>x.mediaId)),[library.trash]);
   const visiblePhotos=useMemo(()=>photos.filter(x=>!archived.has(x.id)&&!trashed.has(x.id)),[photos,archived,trashed]);
-  const filtered=useMemo(()=>{const q=query.trim().toLowerCase();if(!q)return visiblePhotos;return visiblePhotos.filter(x=>x.filename.toLowerCase().includes(q)||x.mediaType.includes(q));},[visiblePhotos,query]);
+  const filtered=useMemo(()=>searchMedia(visiblePhotos,query,library.albums),[visiblePhotos,query,library.albums]);
   const currentCustomAlbum=library.albums.find(a=>a.id===customAlbumId)||null;
   const customAlbumItems=useMemo(()=>albumItems(currentCustomAlbum,photos),[currentCustomAlbum,photos]);
   const smartAlbumItems=useMemo(()=>{
@@ -215,7 +216,7 @@ export default function MobileHome(){
 
     {tab==='collections'&&collection&&<SubPage title={collection} onBack={()=>{setSelected(new Set());setCollection(null);}} right={collection==='Thùng rác'&&specialItems.length?<Pressable onPress={()=>void emptyTrash()}><Text style={s.danger}>Dọn sạch</Text></Pressable>:undefined}>{specialItems.length?renderGrid(specialItems,collection==='Thùng rác'):<Empty title="Chưa có mục nào" body={collection==='Thùng rác'?'Mục đã xóa sẽ ở đây trước khi bị xóa vĩnh viễn.':'Ảnh bạn thêm sẽ xuất hiện ở đây.'}/>}</SubPage>}
 
-    {tab==='search'&&<ScrollView contentContainerStyle={s.scrollBottom}><Text style={s.pageTitle}>Tìm kiếm</Text><View style={s.searchBox}><Icon name="search"/><TextInput style={s.searchInput} placeholder="Tên file hoặc loại media" value={query} onChangeText={setQuery}/></View>{query?filtered.length?renderGrid(filtered):<Empty title="Không tìm thấy" body="Thử từ khóa khác."/>:<Text style={s.hint}>Tìm theo filename hoặc image/video. Metadata index nâng cao sẽ dùng search engine phía Core.</Text>}</ScrollView>}
+    {tab==='search'&&<ScrollView contentContainerStyle={s.scrollBottom}><Text style={s.pageTitle}>Tìm kiếm</Text><View style={s.searchBox}><Icon name="search"/><TextInput style={s.searchInput} placeholder="Tên file, ngày, album, codec, kích thước…" value={query} onChangeText={setQuery}/></View>{query?filtered.length?renderGrid(filtered):<Empty title="Không tìm thấy" body="Thử từ khóa khác."/>:<Text style={s.hint}>Tìm theo tên file, ngày/tháng/năm, loại media, MIME, kích thước, thời lượng, codec/container và album.</Text>}</ScrollView>}
 
     {selected.size>0&&<View style={s.selectionBar}>{addTargetAlbumId?<><Action icon="album" label="Thêm vào album" onPress={()=>void addSelectedToTarget()}/><Action icon="close" label="Hủy" onPress={cancelSelection}/></>:currentCustomAlbum?<><Action icon="album" label="Thêm album khác" onPress={()=>setSheet('add-to-album')}/><Action icon="trash" label="Xóa khỏi album" onPress={()=>void removeSelectedFromCurrentAlbum()}/></>:<><Action icon="share" label="Chia sẻ" onPress={()=>void batchShare()}/><Action icon="album" label="Thêm vào" onPress={()=>setSheet('add-to-album')}/><Action icon="cloudUpload" label="Sao lưu" onPress={()=>void batchSync()}/><Action icon="trash" label="Xóa" onPress={()=>void batchTrash()}/></>}</View>}
 
