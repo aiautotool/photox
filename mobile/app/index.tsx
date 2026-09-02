@@ -16,6 +16,7 @@ import { loadFailedAssets, loadSyncedAssetIds } from '../src/sync/syncLedger';
 type Tab = 'photos' | 'collections' | 'search';
 type Sheet = 'backup' | 'account' | 'settings' | 'create' | null;
 type Collection = 'Yêu thích' | 'Lưu trữ' | 'Thư mục khóa' | 'Thùng rác' | null;
+type Album = 'Camera' | 'Video' | 'Gần đây' | 'Đã sao lưu' | null;
 
 const BLUE = '#1769e0';
 const COLUMNS = Dimensions.get('window').width > 700 ? 6 : 4;
@@ -60,6 +61,7 @@ export default function Home() {
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [editorOpening, setEditorOpening] = useState(false);
   const [collection, setCollection] = useState<Collection>(null);
+  const [album, setAlbum] = useState<Album>(null);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [archived, setArchived] = useState<Set<string>>(new Set());
   const [trashed, setTrashed] = useState<Set<string>>(new Set());
@@ -130,6 +132,13 @@ export default function Home() {
 
   const visiblePhotos = useMemo(() => photos.filter(item => !archived.has(item.id) && !trashed.has(item.id)), [photos, archived, trashed]);
   const filtered = useMemo(() => visiblePhotos.filter(item => item.filename.toLowerCase().includes(query.trim().toLowerCase())), [visiblePhotos, query]);
+  const albumItems = useMemo(() => {
+    if (album === 'Video') return visiblePhotos.filter(item => item.mediaType === 'video');
+    if (album === 'Gần đây') return visiblePhotos.slice(0, 24);
+    if (album === 'Đã sao lưu') return visiblePhotos.filter(item => item.cloudOnly || syncedIds.has(item.id));
+    if (album === 'Camera') return visiblePhotos;
+    return [];
+  }, [album, visiblePhotos, syncedIds]);
   const pendingCount = devicePhotos.filter(item => !syncedIds.has(item.id)).length;
   const failedCount = Object.keys(failedAssets).length;
   const doneCount = progress ? progress.completed + progress.skipped + progress.failed : 0;
@@ -277,16 +286,20 @@ export default function Home() {
       {visiblePhotos.length ? renderGrid(visiblePhotos) : <View style={s.empty}><Text style={s.emptyIcon}>▧</Text><Text style={s.emptyTitle}>Chưa có ảnh</Text><Text style={s.emptyBody}>Ảnh và video trên thiết bị sẽ xuất hiện ở đây.</Text></View>}
     </ScrollView>}
 
-    {tab === 'collections' && !collection && <ScrollView contentContainerStyle={s.page}>
+    {tab === 'collections' && !collection && !album && <ScrollView contentContainerStyle={s.page}>
       <Text style={s.pageTitle}>Bộ sưu tập</Text>
       <View style={s.quickRow}>{([['favorite','Yêu thích'],['archive','Lưu trữ'],['lock','Thư mục khóa'],['trash','Thùng rác']] as const).map(([icon, label]) => <Pressable key={label} style={s.quickItem} onPress={() => setCollection(label as Collection)}><View style={s.quickIcon}><Icon name={icon} size={23} color={BLUE} /></View><Text style={s.quickLabel}>{label}</Text></Pressable>)}</View>
       <View style={s.sectionHead}><Text style={s.sectionTitle}>Album</Text><Pressable onPress={() => setSheet('create')}><Text style={s.selectLink}>＋ Tạo mới</Text></Pressable></View>
-      <View style={s.albumGrid}>{[['Camera', photos.slice(0, 1), photos.length], ['Video', photos.filter(x => x.mediaType === 'video').slice(0, 1), photos.filter(x => x.mediaType === 'video').length], ['Gần đây', photos.slice(2, 3), Math.min(photos.length, 24)], ['Đã sao lưu', photos.filter(x => syncedIds.has(x.id)).slice(0, 1), syncedIds.size]].map(([name, cover, count]) => <Pressable key={String(name)} style={s.album}>
+      <View style={s.albumGrid}>{[['Camera', photos.slice(0, 1), visiblePhotos.length], ['Video', photos.filter(x => x.mediaType === 'video').slice(0, 1), photos.filter(x => x.mediaType === 'video').length], ['Gần đây', photos.slice(0, 1), Math.min(visiblePhotos.length, 24)], ['Đã sao lưu', photos.filter(x => x.cloudOnly || syncedIds.has(x.id)).slice(0, 1), visiblePhotos.filter(x => x.cloudOnly || syncedIds.has(x.id)).length]].map(([name, cover, count]) => <Pressable key={String(name)} style={s.album} onPress={() => setAlbum(String(name) as Album)}>
         <View style={s.albumCover}>{(cover as DisplayAsset[])[0] ? <Image source={imageSource((cover as DisplayAsset[])[0])} style={s.photo} contentFit="cover" /> : <Text style={s.albumEmpty}>▧</Text>}</View>
         <Text style={s.albumName}>{String(name)}</Text><Text style={s.albumCount}>{String(count)} mục</Text>
       </Pressable>)}</View>
       <Pressable style={s.manageCard} onPress={() => setSheet('account')}><View><Text style={s.manageTitle}>Thiết bị sao lưu</Text><Text style={s.manageSub}>{target ? target.desktopId : 'Chưa kết nối máy tính'}</Text></View><Icon name="chevron" size={17} color="#777b82" /></Pressable>
     </ScrollView>}
+
+    {tab === 'collections' && album && <View style={s.flex}><View style={s.subHeader}><Pressable style={s.iconButton} onPress={() => { setAlbum(null); setSelected(new Set()); }}><Icon name="back" size={22} color="#333" /></Pressable><Text style={s.subTitle}>{album}</Text><Pressable style={s.iconButton} onPress={() => setSelected(new Set(albumItems.map(item => item.id)))}><Text style={s.selectLink}>Chọn</Text></Pressable></View><ScrollView contentContainerStyle={s.scrollBottom}>
+      {albumItems.length ? renderGrid(albumItems) : <View style={s.empty}><Text style={s.emptyIcon}>▧</Text><Text style={s.emptyTitle}>Album trống</Text><Text style={s.emptyBody}>Chưa có ảnh hoặc video phù hợp trong album {album}.</Text></View>}
+    </ScrollView></View>}
 
     {tab === 'collections' && collection && <View style={s.flex}><View style={s.subHeader}><Pressable style={s.iconButton} onPress={() => setCollection(null)}><Icon name="back" size={22} color="#333" /></Pressable><Text style={s.subTitle}>{collection}</Text><Icon name="more" size={23} color="#333" /></View><ScrollView contentContainerStyle={s.scrollBottom}>
       {collection === 'Thư mục khóa' ? <View style={s.empty}><Text style={s.emptyIcon}>▣</Text><Text style={s.emptyTitle}>Thư mục khóa</Text><Text style={s.emptyBody}>Ảnh và video ở đây được ẩn khỏi thư viện, tìm kiếm và kỷ niệm.</Text><Pressable style={s.smallPrimary}><Text style={s.primaryButtonText}>Di chuyển mục</Text></Pressable></View> : (() => { const items = collection === 'Yêu thích' ? photos.filter(x => favorites.has(x.id)) : collection === 'Lưu trữ' ? photos.filter(x => archived.has(x.id)) : photos.filter(x => trashed.has(x.id)); return items.length ? renderGrid(items) : <View style={s.empty}><Text style={s.emptyIcon}>{collection === 'Yêu thích' ? '☆' : collection === 'Lưu trữ' ? '⌁' : '♲'}</Text><Text style={s.emptyTitle}>Chưa có mục nào</Text><Text style={s.emptyBody}>{collection === 'Thùng rác' ? 'Các mục trong thùng rác sẽ được xóa vĩnh viễn sau một khoảng thời gian.' : 'Ảnh bạn thêm sẽ xuất hiện ở đây.'}</Text></View>; })()}
@@ -299,7 +312,7 @@ export default function Home() {
 
     {selected.size > 0 && <View style={s.selectionBar}>{([['share','Chia sẻ'],['album','Thêm vào'],['cloudUpload','Sao lưu'],['trash','Xóa']] as const).map(([icon,label]) => <Pressable key={label} style={s.action}><Icon name={icon} size={22} color="#333" /><Text style={s.actionLabel}>{label}</Text></Pressable>)}</View>}
 
-    <View style={s.nav}>{([['photos','photos','Ảnh'],['collections','collections','Bộ sưu tập'],['search','search','Tìm kiếm']] as const).map(([id,icon,label]) => <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: tab === id }} style={s.navItem} onPress={() => { setTab(id); setSelected(new Set()); }}><View style={[s.navIconWrap, tab === id && s.navActive]}><Icon name={icon} size={21} color={tab === id ? BLUE : '#5f6368'} weight={tab === id ? 'semibold' : 'regular'} /></View><Text style={[s.navText, tab === id && s.navTextActive]}>{label}</Text></Pressable>)}</View>
+    <View style={s.nav}>{([['photos','photos','Ảnh'],['collections','collections','Bộ sưu tập'],['search','search','Tìm kiếm']] as const).map(([id,icon,label]) => <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: tab === id }} style={s.navItem} onPress={() => { setTab(id); setSelected(new Set()); setCollection(null); setAlbum(null); }}><View style={[s.navIconWrap, tab === id && s.navActive]}><Icon name={icon} size={21} color={tab === id ? BLUE : '#5f6368'} weight={tab === id ? 'semibold' : 'regular'} /></View><Text style={[s.navText, tab === id && s.navTextActive]}>{label}</Text></Pressable>)}</View>
 
     <Modal visible={sheet !== null} transparent animationType="slide" onRequestClose={() => setSheet(null)}><Pressable style={s.modalShade} onPress={() => setSheet(null)} /><View style={s.sheet}><View style={s.handle}/>
       {sheet === 'backup' && <><Text style={s.sheetTitle}>Sao lưu</Text><View style={s.backupHero}><View style={[s.bigStatus, { backgroundColor: failedCount ? '#fff0e9' : '#eaf2ff' }]}><Text style={s.bigStatusIcon}>{failedCount ? '!' : syncPhase === 'syncing' ? '◔' : '✓'}</Text></View><Text style={s.backupHeroTitle}>{backupLabel}</Text><Text style={s.backupHeroSub}>{message}</Text></View>
@@ -329,902 +342,54 @@ export default function Home() {
 }
 
 const s = StyleSheet.create({
-    root: {
-      flex: 1,
-      backgroundColor: '#fff'
-    },
-    flex: {
-      flex: 1
-    },
-    scrollBottom: {
-      paddingBottom: 104
-    },
-    header: {
-      height: 58,
-      paddingHorizontal: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: '#fff'
-    },
-    brand: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 9
-    },
-    pinwheel: {
-      width: 30,
-      height: 30,
-      borderRadius: 10,
-      backgroundColor: '#eaf2ff',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    pinwheelText: {
-      color: BLUE,
-      fontSize: 21,
-      fontWeight: '900'
-    },
-    logo: {
-      fontSize: 21,
-      fontWeight: '700',
-      color: '#202124',
-      letterSpacing: -0.4
-    },
-    headerActions: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10
-    },
-    iconButton: {
-      width: 36,
-      height: 36,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    plus: {
-      fontSize: 27,
-      color: '#303238'
-    },
-    bell: {
-      fontSize: 27,
-      color: '#303238'
-    },
-    avatar: {
-      width: 32,
-      height: 32,
-      borderRadius: 16,
-      backgroundColor: '#795548',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    avatarText: {
-      color: '#fff',
-      fontWeight: '700'
-    },
-    backupWrap: {
-      backgroundColor: '#fff',
-      paddingHorizontal: 16,
-      paddingVertical: 8
-    },
-    backupChip: {
-      height: 38,
-      borderRadius: 20,
-      backgroundColor: '#eef4ff',
-      paddingHorizontal: 13,
-      alignSelf: 'flex-start',
-      maxWidth: '100%',
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8
-    },
-    warningChip: {
-      backgroundColor: '#fff1eb'
-    },
-    backupIcon: {
-      color: BLUE,
-      fontSize: 16,
-      fontWeight: '800'
-    },
-    backupText: {
-      color: '#30343b',
-      fontWeight: '600',
-      fontSize: 13,
-      maxWidth: 250
-    },
-    chevron: {
-      fontSize: 25,
-      color: '#777b82'
-    },
-    memoriesBlock: {
-      paddingTop: 11
-    },
-    sectionTitle: {
-      fontSize: 19,
-      fontWeight: '700',
-      color: '#24262a',
-      marginHorizontal: 16,
-      marginBottom: 12
-    },
-    memoryRow: {
-      paddingHorizontal: 16,
-      gap: 10
-    },
-    memoryCard: {
-      width: 108,
-      height: 152,
-      borderRadius: 17,
-      overflow: 'hidden',
-      backgroundColor: '#e9ecf1'
-    },
-    memoryImage: {
-      width: '100%',
-      height: '100%'
-    },
-    scrim: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      backgroundColor: '#0002'
-    },
-    memoryLabel: {
-      position: 'absolute',
-      left: 10,
-      right: 8,
-      bottom: 10,
-      color: '#fff',
-      fontSize: 12,
-      fontWeight: '800',
-      textShadowColor: '#0009',
-      textShadowRadius: 4
-    },
-    memoryPlaceholder: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 12
-    },
-    memoryEmpty: {
-      textAlign: 'center',
-      fontSize: 12,
-      color: '#73777d'
-    },
-    dateRow: {
-      marginTop: 24,
-      height: 40,
-      paddingHorizontal: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between'
-    },
-    dateTitle: {
-      fontSize: 17,
-      fontWeight: '700',
-      color: '#292b2f'
-    },
-    selectLink: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: BLUE
-    },
-    grid: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: GAP
-    },
-    tile: {
-      width: TILE,
-      height: TILE,
-      backgroundColor: '#e7e9ed'
-    },
-    selectedTile: {
-      opacity: .72
-    },
-    photo: {
-      width: '100%',
-      height: '100%'
-    },
-    videoBadge: {
-      position: 'absolute',
-      left: 6,
-      bottom: 6,
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: '#0008',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    videoText: {
-      color: '#fff',
-      fontSize: 10
-    },
-    cloudBadge: {
-      position: 'absolute',
-      right: 5,
-      bottom: 5,
-      width: 18,
-      height: 18,
-      borderRadius: 9,
-      backgroundColor: '#fffddd',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    cloudText: {
-      color: '#267352',
-      fontSize: 11,
-      fontWeight: '900'
-    },
-    errorBadge: {
-      position: 'absolute',
-      right: 5,
-      top: 5,
-      width: 21,
-      height: 21,
-      borderRadius: 11,
-      backgroundColor: '#f9ab00',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    errorText: {
-      fontWeight: '900',
-      color: '#fff'
-    },
-    check: {
-      position: 'absolute',
-      right: 6,
-      top: 6,
-      width: 23,
-      height: 23,
-      borderRadius: 12,
-      backgroundColor: BLUE,
-      borderWidth: 2,
-      borderColor: '#fff',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    checkText: {
-      color: '#fff',
-      fontWeight: '900',
-      fontSize: 12
-    },
-    empty: {
-      padding: 60,
-      alignItems: 'center'
-    },
-    emptyIcon: {
-      fontSize: 52,
-      color: '#aeb4bd'
-    },
-    emptyTitle: {
-      fontSize: 20,
-      fontWeight: '700',
-      color: '#303238',
-      marginTop: 14
-    },
-    emptyBody: {
-      fontSize: 14,
-      color: '#757980',
-      textAlign: 'center',
-      marginTop: 6
-    },
-    page: {
-      paddingBottom: 115
-    },
-    pageTitle: {
-      fontSize: 30,
-      fontWeight: '700',
-      letterSpacing: -0.7,
-      color: '#202124',
-      margin: 16,
-      marginTop: 13
-    },
-    quickRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-around',
-      paddingHorizontal: 8,
-      marginBottom: 30
-    },
-    quickItem: {
-      width: 82,
-      alignItems: 'center'
-    },
-    quickIcon: {
-      width: 52,
-      height: 52,
-      borderRadius: 26,
-      backgroundColor: '#eef4ff',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    quickGlyph: {
-      fontSize: 22,
-      color: BLUE
-    },
-    quickLabel: {
-      fontSize: 12,
-      color: '#3d4045',
-      textAlign: 'center',
-      marginTop: 8
-    },
-    sectionHead: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      marginBottom: 2
-    },
-    albumGrid: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      paddingHorizontal: 12
-    },
-    album: {
-      width: '50%',
-      padding: 4,
-      marginBottom: 14
-    },
-    albumCover: {
-      width: '100%',
-      aspectRatio: 1.18,
-      borderRadius: 15,
-      overflow: 'hidden',
-      backgroundColor: '#edf0f3',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    albumEmpty: {
-      fontSize: 34,
-      color: '#aab0b8'
-    },
-    albumName: {
-      fontSize: 15,
-      fontWeight: '600',
-      color: '#303238',
-      marginTop: 8
-    },
-    albumCount: {
-      fontSize: 12,
-      color: '#777b82',
-      marginTop: 2
-    },
-    manageCard: {
-      margin: 16,
-      padding: 16,
-      borderRadius: 14,
-      backgroundColor: '#f4f6f8',
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between'
-    },
-    manageTitle: {
-      fontSize: 15,
-      fontWeight: '700',
-      color: '#292b2f'
-    },
-    manageSub: {
-      fontSize: 13,
-      color: '#74777d',
-      marginTop: 3
-    },
-    searchBox: {
-      height: 50,
-      borderRadius: 26,
-      marginHorizontal: 16,
-      marginBottom: 26,
-      backgroundColor: '#edf2f7',
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: 15
-    },
-    searchIcon: {
-      fontSize: 25,
-      color: '#4d5156'
-    },
-    searchInput: {
-      flex: 1,
-      fontSize: 16,
-      color: '#202124',
-      paddingHorizontal: 11
-    },
-    mic: {
-      fontSize: 22,
-      color: '#5e6268'
-    },
-    discovery: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      paddingHorizontal: 12,
-      marginBottom: 30
-    },
-    discoveryItem: {
-      width: '50%',
-      padding: 4
-    },
-    discoveryIcon: {
-      height: 76,
-      borderRadius: 15,
-      backgroundColor: '#eef4ff',
-      fontSize: 29,
-      color: BLUE,
-      textAlign: 'center',
-      textAlignVertical: 'center',
-      lineHeight: 76
-    },
-    discoveryLabel: {
-      fontSize: 14,
-      fontWeight: '600',
-      color: '#3b3e43',
-      marginTop: 7
-    },
-    hint: {
-      fontSize: 14,
-      color: '#777b82',
-      marginHorizontal: 16
-    },
-    resultText: {
-      fontSize: 13,
-      color: '#74777d',
-      marginHorizontal: 16,
-      marginBottom: 12
-    },
-    nav: {
-      height: 78,
-      paddingBottom: Platform.OS === 'android' ? 7 : 0,
-      backgroundColor: '#f8f9fb',
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: '#dfe2e7',
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-around'
-    },
-    navItem: {
-      flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    navIconWrap: {
-      height: 29,
-      minWidth: 61,
-      borderRadius: 16,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    navActive: {
-      backgroundColor: '#dce8fb'
-    },
-    icon: {
-      fontSize: 21,
-      color: '#5f6368'
-    },
-    navText: {
-      fontSize: 11,
-      color: '#5f6368',
-      marginTop: 4,
-      fontWeight: '500'
-    },
-    navTextActive: {
-      color: '#1f4f8e',
-      fontWeight: '700'
-    },
-    selectHeader: {
-      height: 58,
-      paddingHorizontal: 18,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      backgroundColor: '#fff'
-    },
-    close: {
-      fontSize: 31,
-      color: '#333'
-    },
-    selectCount: {
-      fontSize: 17,
-      fontWeight: '700',
-      color: '#202124'
-    },
-    more: {
-      fontSize: 18,
-      color: '#333',
-      letterSpacing: 1
-    },
-    selectionBar: {
-      position: 'absolute',
-      left: 0,
-      right: 0,
-      bottom: 78,
-      height: 72,
-      zIndex: 10,
-      backgroundColor: '#fff',
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: '#ddd',
-      flexDirection: 'row',
-      justifyContent: 'space-around'
-    },
-    action: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      minWidth: 70
-    },
-    actionIcon: {
-      fontSize: 22,
-      color: '#333'
-    },
-    actionLabel: {
-      fontSize: 11,
-      color: '#45484d',
-      marginTop: 4
-    },
-    modalShade: {
-      flex: 1,
-      backgroundColor: '#0005'
-    },
-    sheet: {
-      maxHeight: '86%',
-      backgroundColor: '#fff',
-      borderTopLeftRadius: 26,
-      borderTopRightRadius: 26,
-      paddingHorizontal: 18,
-      paddingBottom: 34
-    },
-    handle: {
-      width: 40,
-      height: 4,
-      borderRadius: 2,
-      backgroundColor: '#c8cbd0',
-      alignSelf: 'center',
-      marginTop: 9,
-      marginBottom: 13
-    },
-    sheetTitle: {
-      fontSize: 22,
-      fontWeight: '700',
-      color: '#202124',
-      marginBottom: 18
-    },
-    backupHero: {
-      alignItems: 'center',
-      paddingBottom: 18
-    },
-    bigStatus: {
-      width: 58,
-      height: 58,
-      borderRadius: 29,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    bigStatusIcon: {
-      fontSize: 28,
-      color: BLUE,
-      fontWeight: '800'
-    },
-    backupHeroTitle: {
-      fontSize: 19,
-      fontWeight: '700',
-      color: '#26282c',
-      marginTop: 12
-    },
-    backupHeroSub: {
-      fontSize: 13,
-      color: '#74777d',
-      marginTop: 5,
-      textAlign: 'center'
-    },
-    progressTrack: {
-      height: 7,
-      backgroundColor: '#e3e7ed',
-      borderRadius: 4,
-      overflow: 'hidden'
-    },
-    progressFill: {
-      height: 7,
-      backgroundColor: BLUE,
-      borderRadius: 4
-    },
-    progressLabel: {
-      fontSize: 12,
-      color: '#6e7278',
-      marginTop: 7
-    },
-    infoRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginVertical: 18,
-      padding: 14,
-      borderRadius: 14,
-      backgroundColor: '#f5f7f9'
-    },
-    infoIcon: {
-      fontSize: 23,
-      color: BLUE,
-      marginRight: 13
-    },
-    infoCopy: {
-      flex: 1
-    },
-    infoTitle: {
-      fontSize: 15,
-      fontWeight: '700',
-      color: '#303238'
-    },
-    infoSub: {
-      fontSize: 12,
-      color: '#73777d',
-      marginTop: 3
-    },
-    primaryButton: {
-      height: 48,
-      borderRadius: 24,
-      backgroundColor: BLUE,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginTop: 9
-    },
-    primaryButtonText: {
-      color: '#fff',
-      fontSize: 15,
-      fontWeight: '700'
-    },
-    textButton: {
-      height: 45,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    textButtonText: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: BLUE
-    },
-    account: {
-      alignItems: 'center',
-      paddingBottom: 18
-    },
-    avatarLarge: {
-      width: 62,
-      height: 62,
-      borderRadius: 31,
-      backgroundColor: '#795548',
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    avatarLargeText: {
-      fontSize: 25,
-      color: '#fff',
-      fontWeight: '700'
-    },
-    accountName: {
-      fontSize: 18,
-      fontWeight: '700',
-      color: '#25272b',
-      marginTop: 10
-    },
-    accountSub: {
-      fontSize: 13,
-      color: '#757980',
-      marginTop: 4
-    },
-    accountCard: {
-      padding: 15,
-      borderRadius: 14,
-      backgroundColor: '#f5f7fa'
-    },
-    menuRow: {
-      height: 56,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 14,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: '#e3e5e8'
-    },
-    menuGlyph: {
-      fontSize: 22,
-      color: BLUE,
-      width: 38
-    },
-    menuText: {
-      fontSize: 16,
-      color: '#303238',
-      flex: 1
-    },
-    settingRow: {
-      minHeight: 60,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: '#e1e3e6'
-    },
-    settingLabel: {
-      fontSize: 15,
-      color: '#303238'
-    },
-    settingNote: {
-      fontSize: 12,
-      color: '#74777d',
-      lineHeight: 18,
-      marginTop: 14
-    },
-    scanner: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      zIndex: 50,
-      backgroundColor: '#000'
-    },
-    scanFrame: {
-      position: 'absolute',
-      top: '25%',
-      left: '13%',
-      right: '13%',
-      aspectRatio: 1,
-      borderWidth: 3,
-      borderColor: '#fff',
-      borderRadius: 24
-    },
-    scanBottom: {
-      position: 'absolute',
-      left: 20,
-      right: 20,
-      bottom: 65,
-      alignItems: 'center'
-    },
-    scanTitle: {
-      color: '#fff',
-      fontSize: 17,
-      fontWeight: '700',
-      marginBottom: 16
-    },
-    cancel: {
-      paddingHorizontal: 25,
-      paddingVertical: 12,
-      borderRadius: 22,
-      backgroundColor: '#fff'
-    },
-    cancelText: {
-      color: '#222',
-      fontWeight: '700'
-    },
-    subHeader: {
-      height: 55,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: 16
-    },
-    back: {
-      fontSize: 38,
-      color: '#333'
-    },
-    subTitle: {
-      fontSize: 19,
-      fontWeight: '700',
-      color: '#202124'
-    },
-    smallPrimary: {
-      marginTop: 18,
-      paddingHorizontal: 22,
-      height: 44,
-      borderRadius: 22,
-      backgroundColor: BLUE,
-      alignItems: 'center',
-      justifyContent: 'center'
-    },
-    viewer: {
-      flex: 1,
-      backgroundColor: '#070707'
-    },
-    viewerHeader: {
-      height: 64,
-      paddingHorizontal: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between'
-    },
-    viewerButton: {
-      fontSize: 42,
-      color: '#fff',
-      width: 45
-    },
-    viewerDate: {
-      fontSize: 14,
-      fontWeight: '700',
-      color: '#fff',
-      textAlign: 'center'
-    },
-    viewerName: {
-      fontSize: 11,
-      color: '#aaa',
-      textAlign: 'center',
-      marginTop: 2,
-      maxWidth: 240
-    },
-    viewerMore: {
-      fontSize: 18,
-      color: '#fff',
-      letterSpacing: 1,
-      width: 45,
-      textAlign: 'right'
-    },
-    viewerImage: {
-      flex: 1,
-      width: '100%'
-    },
-    viewerToolbar: {
-      height: 100,
-      paddingBottom: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-around',
-      backgroundColor: '#111'
-    },
-    viewerAction: {
-      alignItems: 'center',
-      minWidth: 70
-    },
-    viewerActionIcon: {
-      fontSize: 25,
-      color: '#fff'
-    },
-    viewerActionLabel: {
-      fontSize: 11,
-      color: '#fff',
-      marginTop: 6
-    },
-    viewerActionDisabled: {
-      opacity: 0.55
-    },
-    details: {
-      position: 'absolute',
-      left: 0,
-      right: 0,
-      bottom: 0,
-      minHeight: 310,
-      maxHeight: '72%',
-      borderTopLeftRadius: 25,
-      borderTopRightRadius: 25,
-      backgroundColor: '#fff',
-      paddingHorizontal: 20,
-      paddingBottom: 30
-    },
-    detailsContent: {
-      paddingBottom: 8
-    },
-    detailName: {
-      fontSize: 16,
-      fontWeight: '700',
-      color: '#202124',
-      marginBottom: 12
-    },
-    detailLine: {
-      fontSize: 14,
-      color: '#656970',
-      marginBottom: 8
-    },
-    detailMuted: {
-      fontSize: 12,
-      color: '#8a8e94',
-      marginBottom: 8
-    },
-    detailBackup: {
-      fontSize: 14,
-      color: '#276b4c',
-      fontWeight: '600',
-      marginTop: 10
-    },
-    detailBackupError: {
-      color: '#c24e00'
-    },
-  currentUpload:{flexDirection:'row',alignItems:'center',marginTop:14,padding:10,borderRadius:14,backgroundColor:'#eef4ff'},
-  currentUploadImage:{width:58,height:58,borderRadius:10,backgroundColor:'#dfe5ed'},
-  currentUploadCopy:{flex:1,minWidth:0,marginLeft:12},
-  currentUploadEyebrow:{fontSize:9,fontWeight:'800',letterSpacing:.6,color:BLUE},
-  currentUploadName:{fontSize:14,fontWeight:'700',color:'#292b2f',marginTop:4},
-  currentUploadType:{fontSize:11,color:'#73777d',marginTop:3},
-  currentUploadBytes:{fontSize:11,fontWeight:'600',color:'#3f65a3',marginTop:4},
-  resumeButton:{backgroundColor:'#fff',borderWidth:1.5,borderColor:BLUE},
-  resumeButtonText:{color:BLUE},
-  disabledButton:{backgroundColor:'#9bbce9'},
+    root: { flex: 1, backgroundColor: '#fff' },
+    flex: { flex: 1 },
+    scrollBottom: { paddingBottom: 104 },
+    header: { height: 58, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#fff' },
+    brand: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+    pinwheel: { width: 30, height: 30, borderRadius: 10, backgroundColor: '#eaf2ff', alignItems: 'center', justifyContent: 'center' },
+    pinwheelText: { color: BLUE, fontSize: 21, fontWeight: '900' },
+    logo: { fontSize: 21, fontWeight: '700', color: '#202124', letterSpacing: -0.4 },
+    headerActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    iconButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+    plus: { fontSize: 27, color: '#303238' }, bell: { fontSize: 27, color: '#303238' },
+    avatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#795548', alignItems: 'center', justifyContent: 'center' },
+    avatarText: { color: '#fff', fontWeight: '700' },
+    backupWrap: { backgroundColor: '#fff', paddingHorizontal: 16, paddingVertical: 8 },
+    backupChip: { height: 38, borderRadius: 20, backgroundColor: '#eef4ff', paddingHorizontal: 13, alignSelf: 'flex-start', maxWidth: '100%', flexDirection: 'row', alignItems: 'center', gap: 8 },
+    warningChip: { backgroundColor: '#fff1eb' }, backupIcon: { color: BLUE, fontSize: 16, fontWeight: '800' },
+    backupText: { color: '#30343b', fontWeight: '600', fontSize: 13, maxWidth: 250 }, chevron: { fontSize: 25, color: '#777b82' },
+    memoriesBlock: { paddingTop: 11 }, sectionTitle: { fontSize: 19, fontWeight: '700', color: '#24262a', marginHorizontal: 16, marginBottom: 12 },
+    memoryRow: { paddingHorizontal: 16, gap: 10 }, memoryCard: { width: 108, height: 152, borderRadius: 17, overflow: 'hidden', backgroundColor: '#e9ecf1' }, memoryImage: { width: '100%', height: '100%' },
+    scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#0002' },
+    memoryLabel: { position: 'absolute', left: 10, right: 8, bottom: 10, color: '#fff', fontSize: 12, fontWeight: '800', textShadowColor: '#0009', textShadowRadius: 4 },
+    memoryPlaceholder: { alignItems: 'center', justifyContent: 'center', padding: 12 }, memoryEmpty: { textAlign: 'center', fontSize: 12, color: '#73777d' },
+    dateRow: { marginTop: 24, height: 40, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    dateTitle: { fontSize: 17, fontWeight: '700', color: '#292b2f' }, selectLink: { fontSize: 14, fontWeight: '700', color: BLUE },
+    grid: { flexDirection: 'row', flexWrap: 'wrap', gap: GAP }, tile: { width: TILE, height: TILE, backgroundColor: '#e7e9ed' }, selectedTile: { opacity: .72 }, photo: { width: '100%', height: '100%' },
+    videoBadge: { position: 'absolute', left: 6, bottom: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: '#0008', alignItems: 'center', justifyContent: 'center' }, videoText: { color: '#fff', fontSize: 10 },
+    cloudBadge: { position: 'absolute', right: 5, bottom: 5, width: 18, height: 18, borderRadius: 9, backgroundColor: '#fffddd', alignItems: 'center', justifyContent: 'center' }, cloudText: { color: '#267352', fontSize: 11, fontWeight: '900' },
+    errorBadge: { position: 'absolute', right: 5, top: 5, width: 21, height: 21, borderRadius: 11, backgroundColor: '#f9ab00', alignItems: 'center', justifyContent: 'center' }, errorText: { fontWeight: '900', color: '#fff' },
+    check: { position: 'absolute', right: 6, top: 6, width: 23, height: 23, borderRadius: 12, backgroundColor: BLUE, borderWidth: 2, borderColor: '#fff', alignItems: 'center', justifyContent: 'center' }, checkText: { color: '#fff', fontWeight: '900', fontSize: 12 },
+    empty: { padding: 60, alignItems: 'center' }, emptyIcon: { fontSize: 52, color: '#aeb4bd' }, emptyTitle: { fontSize: 20, fontWeight: '700', color: '#303238', marginTop: 14 }, emptyBody: { fontSize: 14, color: '#757980', textAlign: 'center', marginTop: 6 },
+    page: { paddingBottom: 115 }, pageTitle: { fontSize: 30, fontWeight: '700', letterSpacing: -0.7, color: '#202124', margin: 16, marginTop: 13 },
+    quickRow: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 8, marginBottom: 30 }, quickItem: { width: 82, alignItems: 'center' }, quickIcon: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#eef4ff', alignItems: 'center', justifyContent: 'center' }, quickGlyph: { fontSize: 22, color: BLUE }, quickLabel: { fontSize: 12, color: '#3d4045', textAlign: 'center', marginTop: 8 },
+    sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }, albumGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12 }, album: { width: '50%', padding: 4, marginBottom: 14 },
+    albumCover: { width: '100%', aspectRatio: 1.18, borderRadius: 15, overflow: 'hidden', backgroundColor: '#edf0f3', alignItems: 'center', justifyContent: 'center' }, albumEmpty: { fontSize: 34, color: '#aab0b8' }, albumName: { fontSize: 15, fontWeight: '600', color: '#303238', marginTop: 8 }, albumCount: { fontSize: 12, color: '#777b82', marginTop: 2 },
+    manageCard: { margin: 16, padding: 16, borderRadius: 14, backgroundColor: '#f4f6f8', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, manageTitle: { fontSize: 15, fontWeight: '700', color: '#292b2f' }, manageSub: { fontSize: 13, color: '#74777d', marginTop: 3 },
+    searchBox: { height: 50, borderRadius: 26, marginHorizontal: 16, marginBottom: 26, backgroundColor: '#edf2f7', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15 }, searchIcon: { fontSize: 25, color: '#4d5156' }, searchInput: { flex: 1, fontSize: 16, color: '#202124', paddingHorizontal: 11 }, mic: { fontSize: 22, color: '#5e6268' },
+    discovery: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, marginBottom: 30 }, discoveryItem: { width: '50%', padding: 4 }, discoveryIcon: { height: 76, borderRadius: 15, backgroundColor: '#eef4ff', fontSize: 29, color: BLUE, textAlign: 'center', textAlignVertical: 'center', lineHeight: 76 }, discoveryLabel: { fontSize: 14, fontWeight: '600', color: '#3b3e43', marginTop: 7 }, hint: { fontSize: 14, color: '#777b82', marginHorizontal: 16 }, resultText: { fontSize: 13, color: '#74777d', marginHorizontal: 16, marginBottom: 12 },
+    nav: { height: 78, paddingBottom: Platform.OS === 'android' ? 7 : 0, backgroundColor: '#f8f9fb', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#dfe2e7', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' }, navItem: { flex: 1, alignItems: 'center', justifyContent: 'center' }, navIconWrap: { height: 29, minWidth: 61, borderRadius: 16, alignItems: 'center', justifyContent: 'center' }, navActive: { backgroundColor: '#dce8fb' }, icon: { fontSize: 21, color: '#5f6368' }, navText: { fontSize: 11, color: '#5f6368', marginTop: 4, fontWeight: '500' }, navTextActive: { color: '#1f4f8e', fontWeight: '700' },
+    selectHeader: { height: 58, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#fff' }, close: { fontSize: 31, color: '#333' }, selectCount: { fontSize: 17, fontWeight: '700', color: '#202124' }, more: { fontSize: 18, color: '#333', letterSpacing: 1 },
+    selectionBar: { position: 'absolute', left: 0, right: 0, bottom: 78, height: 72, zIndex: 10, backgroundColor: '#fff', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ddd', flexDirection: 'row', justifyContent: 'space-around' }, action: { alignItems: 'center', justifyContent: 'center', minWidth: 70 }, actionIcon: { fontSize: 22, color: '#333' }, actionLabel: { fontSize: 11, color: '#45484d', marginTop: 4 },
+    modalShade: { flex: 1, backgroundColor: '#0005' }, sheet: { maxHeight: '86%', backgroundColor: '#fff', borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 18, paddingBottom: 34 }, handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#c8cbd0', alignSelf: 'center', marginTop: 9, marginBottom: 13 }, sheetTitle: { fontSize: 22, fontWeight: '700', color: '#202124', marginBottom: 18 },
+    backupHero: { alignItems: 'center', paddingBottom: 18 }, bigStatus: { width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center' }, bigStatusIcon: { fontSize: 28, color: BLUE, fontWeight: '800' }, backupHeroTitle: { fontSize: 19, fontWeight: '700', color: '#26282c', marginTop: 12 }, backupHeroSub: { fontSize: 13, color: '#74777d', marginTop: 5, textAlign: 'center' }, progressTrack: { height: 7, backgroundColor: '#e3e7ed', borderRadius: 4, overflow: 'hidden' }, progressFill: { height: 7, backgroundColor: BLUE, borderRadius: 4 }, progressLabel: { fontSize: 12, color: '#6e7278', marginTop: 7 },
+    infoRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 18, padding: 14, borderRadius: 14, backgroundColor: '#f5f7f9' }, infoIcon: { fontSize: 23, color: BLUE, marginRight: 13 }, infoCopy: { flex: 1 }, infoTitle: { fontSize: 15, fontWeight: '700', color: '#303238' }, infoSub: { fontSize: 12, color: '#73777d', marginTop: 3 }, primaryButton: { height: 48, borderRadius: 24, backgroundColor: BLUE, alignItems: 'center', justifyContent: 'center', marginTop: 9 }, primaryButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' }, textButton: { height: 45, alignItems: 'center', justifyContent: 'center' }, textButtonText: { fontSize: 14, fontWeight: '700', color: BLUE },
+    account: { alignItems: 'center', paddingBottom: 18 }, avatarLarge: { width: 62, height: 62, borderRadius: 31, backgroundColor: '#795548', alignItems: 'center', justifyContent: 'center' }, avatarLargeText: { fontSize: 25, color: '#fff', fontWeight: '700' }, accountName: { fontSize: 18, fontWeight: '700', color: '#25272b', marginTop: 10 }, accountSub: { fontSize: 13, color: '#757980', marginTop: 4 }, accountCard: { padding: 15, borderRadius: 14, backgroundColor: '#f5f7fa' },
+    menuRow: { height: 56, flexDirection: 'row', alignItems: 'center', gap: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e3e5e8' }, menuGlyph: { fontSize: 22, color: BLUE, width: 38 }, menuText: { fontSize: 16, color: '#303238', flex: 1 }, settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e1e3e6' }, settingLabel: { fontSize: 15, color: '#303238' }, settingNote: { fontSize: 12, color: '#74777d', lineHeight: 18, marginTop: 14 },
+    scanner: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 50, backgroundColor: '#000' }, scanFrame: { position: 'absolute', top: '25%', left: '13%', right: '13%', aspectRatio: 1, borderWidth: 3, borderColor: '#fff', borderRadius: 24 }, scanBottom: { position: 'absolute', left: 20, right: 20, bottom: 65, alignItems: 'center' }, scanTitle: { color: '#fff', fontSize: 17, fontWeight: '700', marginBottom: 16 }, cancel: { paddingHorizontal: 25, paddingVertical: 12, borderRadius: 22, backgroundColor: '#fff' }, cancelText: { color: '#222', fontWeight: '700' },
+    subHeader: { height: 55, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16 }, back: { fontSize: 38, color: '#333' }, subTitle: { fontSize: 19, fontWeight: '700', color: '#202124' }, smallPrimary: { marginTop: 18, paddingHorizontal: 22, height: 44, borderRadius: 22, backgroundColor: BLUE, alignItems: 'center', justifyContent: 'center' },
+    viewer: { flex: 1, backgroundColor: '#070707' }, viewerHeader: { height: 64, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, viewerButton: { fontSize: 42, color: '#fff', width: 45 }, viewerDate: { fontSize: 14, fontWeight: '700', color: '#fff', textAlign: 'center' }, viewerName: { fontSize: 11, color: '#aaa', textAlign: 'center', marginTop: 2, maxWidth: 240 }, viewerMore: { fontSize: 18, color: '#fff', letterSpacing: 1, width: 45, textAlign: 'right' }, viewerImage: { flex: 1, width: '100%' }, viewerToolbar: { height: 100, paddingBottom: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', backgroundColor: '#111' }, viewerAction: { alignItems: 'center', minWidth: 70 }, viewerActionIcon: { fontSize: 25, color: '#fff' }, viewerActionLabel: { fontSize: 11, color: '#fff', marginTop: 6 }, viewerActionDisabled: { opacity: 0.55 },
+    details: { position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: 310, maxHeight: '72%', borderTopLeftRadius: 25, borderTopRightRadius: 25, backgroundColor: '#fff', paddingHorizontal: 20, paddingBottom: 30 }, detailsContent: { paddingBottom: 8 }, detailName: { fontSize: 16, fontWeight: '700', color: '#202124', marginBottom: 12 }, detailLine: { fontSize: 14, color: '#656970', marginBottom: 8 }, detailMuted: { fontSize: 12, color: '#8a8e94', marginBottom: 8 }, detailBackup: { fontSize: 14, color: '#276b4c', fontWeight: '600', marginTop: 10 }, detailBackupError: { color: '#c24e00' },
+    currentUpload:{flexDirection:'row',alignItems:'center',marginTop:14,padding:10,borderRadius:14,backgroundColor:'#eef4ff'}, currentUploadImage:{width:58,height:58,borderRadius:10,backgroundColor:'#dfe5ed'}, currentUploadCopy:{flex:1,minWidth:0,marginLeft:12}, currentUploadEyebrow:{fontSize:9,fontWeight:'800',letterSpacing:.6,color:BLUE}, currentUploadName:{fontSize:14,fontWeight:'700',color:'#292b2f',marginTop:4}, currentUploadType:{fontSize:11,color:'#73777d',marginTop:3}, currentUploadBytes:{fontSize:11,fontWeight:'600',color:'#3f65a3',marginTop:4}, resumeButton:{backgroundColor:'#fff',borderWidth:1.5,borderColor:BLUE}, resumeButtonText:{color:BLUE}, disabledButton:{backgroundColor:'#9bbce9'},
 });
