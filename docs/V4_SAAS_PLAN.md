@@ -194,7 +194,8 @@ All feature UI must read the entitlement state. A disabled feature must be hidde
 ### Phase B — durable workspace persistence
 
 - SQLite schema/repository for workspace, membership, device, usage and audit is implemented.
-- next: create/default the legacy personal workspace from Desktop startup and control-plane bootstrap.
+- legacy personal workspace bootstrap is implemented in Desktop startup, including desktop-device registration and existing-usage reconstruction.
+- media ingest now enforces workspace plan byte quotas before consuming the request body and rolls reservations back on failed ingest.
 - next: scope media metadata and provider connections by workspace.
 - repository interfaces remain platform-neutral so desktop edge and future cloud control plane can share contracts.
 
