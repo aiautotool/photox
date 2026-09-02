@@ -240,6 +240,12 @@ Introduce a deployable service for:
 
 Media bytes should continue to use the most efficient available data-plane route.
 
+### Phase B1 — legacy edge bootstrap and write quota enforcement (implemented)
+
+Desktop now creates the legacy personal workspace deterministically at startup, registers itself as a workspace device, and reconstructs managed storage/provider usage from existing state. Mobile sends the materialized file byte size before upload. Desktop reserves managed-storage and monthly-ingress bytes atomically before consuming the body, rejects over-quota writes, verifies the received byte count, rolls the reservation back on failed ingest, and records successful ingest in the workspace audit log. Media deletion releases managed storage but intentionally retains monthly ingress for the current accounting period. Google Drive connect/disconnect updates provider usage and durable audit state.
+
+The remaining accounting gap is period rollover for monthly ingress; until implemented, the counter is cumulative rather than calendar-month authoritative.
+
 ## 8. Delivery priorities
 
 ### P0 — current
@@ -253,10 +259,11 @@ Media bytes should continue to use the most efficient available data-plane route
 - [x] Add durable workspace/membership/device/usage persistence and migrations.
 - [x] Add durable workspace-scoped audit repository.
 - [x] Preserve workspace ID/role in SQLite refresh sessions, including backward-safe schema upgrade.
-- [ ] Instantiate/migrate the default legacy workspace from Desktop startup.
+- [x] Instantiate/migrate the default legacy workspace from Desktop startup and register the desktop device.
 - [ ] Add workspace-aware pairing credential implementation in Desktop.
 - [ ] Persist workspace context on Mobile after pairing/login.
-- [ ] Enforce media ingest quota before upload acceptance.
+- [x] Enforce media ingest quota before upload acceptance using declared bytes, atomic SQLite reservation, size verification and rollback.
+- [x] Keep workspace managed-storage/provider usage consistent on media delete and Google Drive connect/disconnect, with durable audit events.
 - [ ] Scope media/provider index operations by workspace.
 - [ ] Replace Web edge bootstrap identity with authoritative SaaS access/refresh sessions.
 
@@ -295,9 +302,9 @@ Media bytes should continue to use the most efficient available data-plane route
 
 ## 10. Next Batch
 
-1. Instantiate `SqliteWorkspaceRepository` in Desktop startup and create/migrate the legacy personal workspace deterministically.
-2. Put workspace ID + desktop device ID + short-lived challenge/capability metadata into the pairing flow.
-3. Persist returned workspace identity and session material in Mobile SecureStore.
-4. Add authoritative WorkspaceUsage byte reservation/check before `/api/v1/media` accepts a write; roll back reservations on failed ingest.
-5. Add `workspace_id` to media/provider catalog rows with safe migration and prove cross-workspace reads/writes are rejected.
-6. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and emit durable audit events for mutations.
+1. Put workspace ID + desktop device ID + short-lived challenge/capability metadata into the pairing flow.
+2. Persist returned workspace identity and session material in Mobile SecureStore and stop treating pair-code as the long-lived authorization secret.
+3. Add `workspace_id` to media/provider catalog rows with backward-safe migration and prove cross-workspace reads/writes are rejected.
+4. Add a monthly usage period/reset model so `monthlyIngressBytes` is authoritative across month boundaries.
+5. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and extend durable audit emission to all administrative mutations.
+6. Add workspace/plan/usage APIs and surface real quota state in the shared Desktop/Web UI and Mobile.
