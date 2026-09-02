@@ -22,6 +22,7 @@ type Pending = {
   pairToken: string;
   pairingChallenge: string;
   workspaceId: string;
+  authorization: string;
   deviceId: string;
   assetId: string;
   filename: string;
@@ -163,6 +164,7 @@ const server = http.createServer(async (req, res) => {
         pairToken: clean(String(req.headers['x-photosync-pair-token'] || '')),
         pairingChallenge: clean(String(req.headers['x-photosync-pairing-challenge'] || '')),
         workspaceId: clean(String(req.headers['x-photosync-workspace-id'] || '')),
+        authorization: clean(String(req.headers['authorization'] || '')),
         deviceId: clean(String(req.headers['x-photosync-device-id'] || '')),
         assetId: clean(String(req.headers['x-photosync-asset-id'] || '')),
         filename: decodeURIComponent(clean(String(req.headers['x-photosync-filename'] || 'file.bin'))),
@@ -199,6 +201,7 @@ const server = http.createServer(async (req, res) => {
         'x-photosync-pair-token': encodeURIComponent(item.pairToken),
         'x-photosync-pairing-challenge': encodeURIComponent(item.pairingChallenge),
         'x-photosync-workspace-id': encodeURIComponent(item.workspaceId),
+        ...(item.authorization ? { authorization: item.authorization } : {}),
         'x-photosync-device-id': encodeURIComponent(item.deviceId),
         'x-photosync-asset-id': encodeURIComponent(item.assetId),
         'x-photosync-filename': encodeURIComponent(item.filename),

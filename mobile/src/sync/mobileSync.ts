@@ -2,6 +2,7 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import * as FileSystem from 'expo-file-system/legacy';
 import { File as ExpoFile } from 'expo-file-system';
 import type { PairedDesktop } from './pairing';
+import { accessHeaders, ensureWorkspaceAccess } from './pairing';
 import { clearAssetFailed, markAssetFailed, markAssetSynced } from './syncLedger';
 
 declare const require: (id: string) => any;
@@ -192,10 +193,7 @@ function localEndpoint(target: PairedDesktop, path: string) {
   return `${target.receiverUrl!.replace(/\/$/, '')}${path}`;
 }
 
-function workspaceAuthHeaders(target: PairedDesktop): Record<string,string> {
-  if (target.pairingChallenge && target.workspaceId && (!target.challengeExpiresAt || target.challengeExpiresAt > Date.now())) return { 'x-photosync-pairing-challenge': target.pairingChallenge, 'x-photosync-workspace-id': target.workspaceId };
-  return target.pairCode ? { 'x-photosync-pair-code': target.pairCode } : {};
-}
+function workspaceAuthHeaders(target: PairedDesktop): Record<string,string> { return accessHeaders(target); }
 
 function publicEndpoint(target: PairedDesktop, path: string) {
   const base = target.publicUrl || (/photox\.aiautotool\.com/i.test(target.relayUrl) ? target.relayUrl : undefined);
@@ -203,6 +201,7 @@ function publicEndpoint(target: PairedDesktop, path: string) {
 }
 
 export async function loadCloudPhotos(target: PairedDesktop): Promise<DisplayAsset[]> {
+  await ensureWorkspaceAccess(target);
   const endpoint = publicEndpoint(target, '/api/v1/library');
   if (!endpoint) return [];
   const auth=workspaceAuthHeaders(target); if (!Object.keys(auth).length) return [];
@@ -263,6 +262,7 @@ async function fetchWithTimeout(url:string, init:RequestInit = {}, timeoutMs = 8
 }
 
 export async function pingLaptop(target: PairedDesktop, signal?:AbortSignal) {
+  await ensureWorkspaceAccess(target);
   const publicUrl = publicEndpoint(target, '/api/v1/status');
   if (publicUrl && Object.keys(workspaceAuthHeaders(target)).length) {
     try {
@@ -332,7 +332,7 @@ export async function syncAssetsToLaptop(
             'content-type': mimeFor(asset),
             ...(transport !== 'relay'
               ? workspaceAuthHeaders(target)
-              : { 'x-photosync-pair-token': target.pairToken, ...(target.pairingChallenge ? { 'x-photosync-pairing-challenge': target.pairingChallenge } : {}), ...(target.workspaceId ? { 'x-photosync-workspace-id': target.workspaceId } : {}) }),
+              : { 'x-photosync-pair-token': target.pairToken, ...workspaceAuthHeaders(target) }),
             'x-photosync-device-id': target.deviceId,
             'x-photosync-asset-id': asset.id,
             'x-photosync-filename': encodeURIComponent(asset.filename),
