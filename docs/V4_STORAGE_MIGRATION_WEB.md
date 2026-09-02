@@ -87,10 +87,12 @@ Rules:
 - [x] Add generic selected-media transfer worker with per-item success/failure results.
 - [x] Add package tests and include package in root test/typecheck/build commands.
 
-### Batch B — next
+### Batch B — in progress
 
 - [ ] Persist Google Photos OAuth accounts separately from Google Drive accounts.
+- [x] Add migration job/item domain and state machine with pause/cancel/resume/retry-safe behavior.
 - [x] Add migration ledger + resumable state in SQLite.
+- [x] Persist item attempts, transferred bytes, target ID/URL and per-item errors.
 - [ ] Add Desktop IPC migration service and progress events.
 - [ ] Add Migration page to the shared Desktop/Web UI.
 - [ ] Wire Google Photos -> Google Photos destination.
@@ -100,6 +102,7 @@ Rules:
 ### Batch C — Web parity
 
 - [x] Extract the renderer bridge contract from `App.tsx`.
+- [x] Make the existing renderer resolve Electron or Web transport without forking the React UI tree.
 - [x] Keep Electron IPC adapter.
 - [x] Add authenticated HTTP/WebSocket adapter contract/client; server endpoints and auth enforcement remain pending.
 - [ ] Expose desktop status/library/accounts/health/migration/jobs APIs through the edge service.
@@ -108,5 +111,9 @@ Rules:
 - [ ] Add SaaS workspace authentication and role enforcement for web admin actions.
 - [ ] Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
 - [ ] Add browser end-to-end smoke test for parity-critical routes.
+
+## Validation note
+
+The migration ledger + shared bridge integration was validated with the repository's full unit/integration test command, TypeScript typecheck and production build before commit. The build order now compiles `@photosync/google-photos` before `@photox/persistence-sqlite`, which consumes its migration contracts.
 
 Every batch must pass unit tests, TypeScript typecheck and production build before being marked complete.
