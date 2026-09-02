@@ -169,4 +169,4 @@ export async function transferPickedItems(
   return results;
 }
 
-export * from './migration';
+export * from './migration.js';
