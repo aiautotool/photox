@@ -7,7 +7,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import * as MediaLibrary from 'expo-media-library/legacy';
-import IMGLYEditor, { EditorPreset, EditorSettingsModel, SourceType } from '@imgly/editor-react-native';
+import { router } from 'expo-router';
 import { SymbolView, type AndroidSymbol, type SFSymbol } from 'expo-symbols';
 import { downloadCloudAsset, loadAssetMetadata, loadCloudPhotos, loadDevicePhotos, pingLaptop, prepareAssetForEditing, syncAssetsToLaptop, type AssetMetadata, type DisplayAsset, type MediaAsset, type SyncProgress } from '../src/sync/mobileSync';
 import { forgetPairedDesktop, loadPairedDesktop, savePairedDesktop, type PairedDesktop } from '../src/sync/pairing';
@@ -108,23 +108,22 @@ export default function Home() {
   const imageSource = (asset: DisplayAsset) => ({ uri: asset.uri, headers: asset.requestHeaders });
 
   async function openEditor(asset: DisplayAsset) {
-    if (asset.mediaType === 'video') { setMessage('Trình chỉnh sửa chuyên nghiệp hiện chỉ áp dụng cho ảnh.'); return; }
+    if (asset.mediaType === 'video') { setMessage('Trình chỉnh sửa hiện chỉ áp dụng cho ảnh.'); return; }
     if (editorOpening) return;
     setEditorOpening(true);
     try {
       const source = await prepareAssetForEditing(asset);
-      const settings = new EditorSettingsModel({
-        license: process.env.EXPO_PUBLIC_IMGLY_LICENSE || undefined,
-        userId: target?.desktopId || 'photosync-mobile',
+      router.push({
+        pathname: '/editor',
+        params: {
+          id: asset.id,
+          uri: source,
+          filename: asset.filename,
+          width: asset.width ? String(asset.width) : undefined,
+          height: asset.height ? String(asset.height) : undefined,
+          mimeType: asset.filename?.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg',
+        },
       });
-      const result = await IMGLYEditor.openEditor(settings, { source, type:SourceType.IMAGE }, EditorPreset.PHOTO, { sourceAssetId:asset.id });
-      if (result?.artifact) {
-        const artifact = result.artifact.startsWith('/') ? `file://${result.artifact}` : result.artifact;
-        const saved = await MediaLibrary.createAssetAsync(artifact);
-        const assets = await loadDevicePhotos(500);
-        setDevicePhotos(assets); setPhotos(assets); setViewer(saved);
-        setMessage('Đã lưu bản chỉnh sửa mới, ảnh gốc được giữ nguyên.');
-      }
     } catch (error) { setMessage(`Không mở được trình chỉnh sửa: ${error instanceof Error ? error.message : String(error)}`); }
     finally { setEditorOpening(false); }
   }
