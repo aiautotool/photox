@@ -17,7 +17,6 @@ import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaP
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
-import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -39,14 +38,12 @@ let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
 let webEdgeServer:PhotoXWebEdgeServer|null=null;
-let webEdgeServer:PhotoXWebEdgeServer|null=null;
 
 function notifyRenderer(channel:string,payload:unknown){
-  const win=mainWindow;
-  if(!win||win.isDestroyed()||win.webContents.isDestroyed())return;
-  win.webContents.send(channel,payload);
   const event=channel==='photosync:migration-updated'?'migration-updated':channel==='photosync:file-received'?'file-received':channel==='photosync:storage-updated'?'storage-updated':channel==='photosync:tunnel-state'?'tunnel-state':null;
   if(event)webEdgeServer?.publish(event,payload);
+  const win=mainWindow;
+  if(win&&!win.isDestroyed()&&!win.webContents.isDestroyed())win.webContents.send(channel,payload);
 }
 
 type DesktopStatus = {
