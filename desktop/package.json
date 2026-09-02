@@ -18,14 +18,16 @@
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@photosync/core": "*",
     "@photosync/google-drive": "*",
+    "@photosync/google-photos": "*",
+    "@photox/persistence-sqlite": "*",
     "@photox/video-ffmpeg": "*",
     "@photox/video-media": "*",
     "dotenv": "^17.2.2",
     "exifr": "^7.1.3",
     "google-auth-library": "^10.3.0",
     "qrcode.react": "^4.2.0",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "ws": "^8.18.3"
   },
   "devDependencies": {
