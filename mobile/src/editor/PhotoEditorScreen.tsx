@@ -75,7 +75,7 @@ export function PhotoEditorScreen({visible,asset,onClose,onSave}:PhotoEditorScre
   function pickFilter(name:FilterName){
     setFilter(name);
     setIntensity(1);
-    session?.apply({id:`filter:${Date.now()}`,type:'filter',name:String(name),intensity:1});
+    session?.apply({id:`filter:${Date.now()}`,type:'filter',filterId:String(name),intensity:1});
   }
 
   async function applyCrop(){
