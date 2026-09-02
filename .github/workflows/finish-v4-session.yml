@@ -1,0 +1,30 @@
+name: Finish V4 workspace sessions
+on:
+  push:
+    branches: [v4]
+    paths:
+      - '.github/workflows/finish-v4-session.yml'
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python .github/scripts/v4_session_finish.py
+      - run: npm install
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Commit validated final hardening
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add relay/src/server.ts docs/V4_SAAS_PLAN.md
+          git commit -m "finish workspace bearer session migration"
+          git push origin v4
