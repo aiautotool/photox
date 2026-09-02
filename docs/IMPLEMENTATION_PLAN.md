@@ -4,136 +4,105 @@
 Audit against the current PhotoX master requirements, with priority on real implementation over mock UI.
 
 ## Current architecture
-- Mobile: Expo/React Native under `mobile/`. The previous oversized `mobile/app/index.tsx` has been reduced to a route export; the main screen now lives in `mobile/src/home/MobileHome.tsx` and durable library metadata lives under `mobile/src/library/`.
-- Desktop: Electron + React/Vite under `desktop/`, with local receiver/core behavior in Electron main process.
-- Shared packages: existing packages already cover auth/JWS, media, media API/cloud/delivery, image-editor recipes, persistence SQLite, jobs, storage providers/replication, Google Drive, Telegram and SDK layers.
-- Docs: architecture/security/API/test/run-sync docs exist; this file tracks implementation gaps and progress.
+- Mobile: Expo/React Native under `mobile/`. Main screen is `mobile/src/home/MobileHome.tsx`; durable library metadata is under `mobile/src/library/`.
+- Desktop: Electron + React/Vite under `desktop/`, with PhotoX receiver/core in Electron main process.
+- Shared packages already cover auth/JWS, media, media API/cloud/delivery, image-editor recipes, persistence SQLite, jobs, storage providers/replication, Google Drive, Telegram, video media and FFmpeg adapters.
+- Foundation is reusable; do not rewrite it without a migration reason.
 
-## Working or substantially implemented
-### Mobile
-- Local device media loading.
-- QR pairing and saved desktop pairing.
-- LAN/public receiver connectivity.
-- Real sync calls with progress and retry state.
-- Cloud library merging.
-- Photo/video fullscreen viewer.
-- Video playback through `expo-video`.
-- Metadata reading for images.
-- Download cloud media to device.
-- Smart album cards open filtered grids: Camera, Video, Recent, Backed up.
-- Photo editing route uses `@dariyd/react-native-image-filters` with GPU preview, native crop, rotate, adjustments and rendered export.
-- Durable Favorite / Archive / Trash metadata via `LibraryStateStore`.
-- User album model with create/delete/add/remove/cover operations in `LibraryController`.
-- Trash restore, permanent local delete, empty-trash and retention helpers.
-- Multi-select actions now call real handlers for backup, trash and add-to-album; native file sharing is integrated through `expo-sharing`.
-- Obsolete IMG.LY dependency and patch-package patch were removed.
-
-### Desktop/Core
-- Receiver/API endpoints.
-- Local/cloud media delivery.
-- Range streaming for desktop video.
-- Storage abstraction and provider registry.
-- Replication service.
-- Google Drive / Telegram related packages already exist.
-
-## Partially working
+## Implemented in the current hardening pass
 ### Mobile library
-- Album rename UI still needs a production interaction flow; controller support exists.
-- Album cover selection and remove-from-album need dedicated UI actions; controller support exists.
-- Multi-file OS sharing currently needs a staging/export bundle; single-file native share is implemented.
-- Search currently covers filename/type in the mobile UI; metadata/date/camera/lens/location/album index is not yet wired.
-- Timeline is still a flat grid, not grouped/virtualized by date and not scalable to 100k media.
-- Viewer lacks swipe-between-assets, pinch/double-tap zoom and neighbor preload.
-- Sharing bottom tab/shared-link collaboration model is not implemented.
+- Persistent Favorite, Archive, Trash and user Albums.
+- Trash restore, permanent delete for local media and Empty Trash.
+- User album create, rename, delete, add photos, remove photos and album cover.
+- Smart albums Camera, Video, Recent and Backed up open real filtered grids.
+- Multi-select Backup, Trash and Add-to-album have real handlers.
+- Single-file native share uses `expo-sharing`; unsupported fake create actions were removed.
+- Cloud download preserves the original media endpoint even when playback uses a compatibility derivative.
 
 ### Photo editor
-- Core filter/adjust/crop/rotate/export is implemented.
-- Undo/redo history UI and replay of recipe operations are incomplete.
-- Flip/straighten/perspective are incomplete in the new editor path.
-- Retouch/effects/draw/text are not implemented and stay hidden rather than exposing fake buttons.
-- Export format/options (JPEG/PNG/HEIC/WebP, size, quality, metadata stripping) are incomplete.
+- `@dariyd/react-native-image-filters` is the active OSS editor path.
+- GPU filter preview and adjustable intensity.
+- Brightness, contrast, saturation, exposure, temperature, tint, sharpness and vibrance.
+- Interactive crop with aspect ratios.
+- Rotate, flip horizontal, flip vertical and straighten.
+- Undo/Redo/Reset backed by editor snapshots plus `EditSession` recipe history.
+- Hold-to-compare original.
+- Full-size rendered save; original is never overwritten.
+- Unsupported Retouch/Draw/Text remain hidden instead of exposing fake controls.
 
-### Video
-- Mobile native player works for supported codecs.
-- Receiver media endpoint supports byte Range, but MIME mapping is still too coarse for MOV/HEVC and images.
-- Thumbnail/duration metadata is not consistently populated for every remote/cloud video.
-- HEVC/MOV transcoding fallback path is not fully integrated into mobile delivery.
-- Player UX still needs explicit loading/error/retry/current-time handling.
+### Video pipeline
+- Mobile upload now sends correct MIME for MP4, MOV/QuickTime, M4V, WebM, MKV and AVI; image MIME mapping also covers HEIC/HEIF/PNG/WebP/GIF/TIFF/DNG.
+- Desktop receiver persists MIME and media type at ingestion.
+- HTTP byte Range is implemented for receiver media/playback and Electron `photosync://` playback.
+- Desktop now runs FFprobe/FFmpeg processing asynchronously after original ingestion.
+- Video index stores width, height, duration, rotation, fps, bitrate, container, video codec, audio codec and processing/error state.
+- JPEG video thumbnail generation is integrated.
+- Compatibility playback derivative is generated as MP4 H.264/AAC when the original container/codec/audio is not broadly compatible.
+- `/api/v1/thumbnail/:key` serves generated thumbnails.
+- `/api/v1/playback/:key` serves compatibility playback when present, otherwise safely falls back to original/cloud source.
+- `/api/v1/library` exposes processed metadata, thumbnail availability and playback availability to mobile.
+- Processing failures do not reject or delete the already-ingested original.
+- FFmpeg/FFprobe binaries are packaged via installer dependencies and unpacked from Electron ASAR.
 
-### Sync
-- Current upload loop is retryable but is not a true persisted chunk-resume protocol for every interrupted file.
-- Background execution is present in dependencies/config but needs end-to-end persisted job recovery verification.
-- Network-change and Wi-Fi-only policy need stronger enforcement and tests.
+### Storage/core already present
+- Receiver/API endpoints and cloud delivery.
+- Storage abstraction/provider registry.
+- Google Drive multi-account support and replication service.
+- Telegram/provider packages and SDK layers.
+- Backup health calculation and repair sweep structure.
 
-### Storage
-- Abstractions and replication code exist.
-- Need verification that every provider checks object existence/checksum before marking replicas healthy.
-- Need UI drill-down for under-replicated/failed/missing assets.
+## Remaining work
+### P0 — Release/build correctness
+- [ ] Regenerate and commit root `package-lock.json` after native dependency changes.
+- [ ] Latest CI must pass install, SDK tests, full typecheck and desktop production build.
+- [ ] Device-test image-filter native module on supported iOS/Android builds.
+- [ ] Make mobile grid prefer processed `thumbnailUri` for remote videos; metadata and endpoint are already available.
 
-## Mock-only / misleading UI removed or identified
-- Old collection album cards without `onPress` were fixed.
-- Old multi-select action bar without handlers was replaced.
-- Old collage/movie/animation create-menu mock entries were removed from the main mobile screen.
-- Notification/bell mock was removed from the refactored mobile header.
-- Unsupported editor tools remain hidden rather than presented as working.
-
-## Broken / high-risk areas
-1. Root package lock is stale after editor/sharing native dependency changes and must be regenerated before release.
-2. Video MIME/codec assumptions still need hardening for MOV/HEVC.
-3. New image-filter editor requires native rebuild and newer OS deployment targets; device matrix must be verified.
-4. Physical cloud delete is intentionally not exposed until PhotoX Core has a safe delete endpoint; cloud trash therefore remains metadata-only to avoid accidental data loss.
-
-## Priority plan
-
-### P0 — Mobile library correctness
-- [x] Persistent mobile library metadata store for favorite/archive/trash and user albums.
-- [x] Trash restore/permanent local delete/empty trash + retention metadata.
-- [x] User album domain operations: create/rename/delete/add/remove/cover.
-- [x] Multi-select backup/trash/add-to-album handlers.
-- [x] Remove fake create-menu actions.
-- [ ] Finish rename/cover/remove album UI.
-- [ ] Multi-file native share staging.
-
-### P0 — Video reliability
-- [ ] Persist and expose video duration/thumbnail/codec metadata.
-- [x] HTTP Range support on desktop viewer and mobile-consumed receiver endpoint.
-- [ ] Correct MIME for MOV/M4V/WebM/HEIC/PNG/WebP.
-- [ ] Codec capability detection and transcode-proxy fallback for unsupported HEVC/MOV.
-- [ ] Explicit loading/error/retry UI.
+### P0 — Video UX and acceptance
+- [ ] Explicit player loading/error/retry UI.
+- [ ] Verify iPhone MOV/HEVC acceptance path on a real generated sample/device: ingest → ffprobe → thumbnail → duration → compatibility playback → seek/audio/fullscreen.
+- [ ] Add video-processing regression tests around MOV/HEVC and corrupt video.
 
 ### P1 — Viewer
 - [ ] Asset-indexed viewer state.
 - [ ] Horizontal swipe left/right.
 - [ ] Pinch and double-tap zoom for photos.
 - [ ] Neighbor preload.
-- [x] Archive action and persisted metadata.
+- [x] Favorite/archive/trash persistence and real actions.
 
 ### P1 — Editor
-- [ ] Undo/redo/reset backed by recipe history.
-- [ ] Flip horizontal/vertical and straighten.
-- [ ] Export format/quality/metadata options.
-- [x] Unsupported Retouch/Draw/Text hidden until real engine exists.
+- [x] Undo/redo/reset history.
+- [x] Flip horizontal/vertical and straighten.
+- [ ] Perspective correction.
+- [ ] Export format/quality/metadata options for JPEG/PNG/HEIC/WebP.
+- [ ] Preset data/categories and live per-photo preset thumbnails.
+- [ ] HSL/tone curve/highlights/shadows/whites/blacks/clarity/dehaze/noise reduction/effects.
+
+### P1 — Albums/sharing
+- [x] Create/rename/delete/add/remove/cover.
+- [ ] Sort album contents.
+- [ ] Album share model/link API.
+- [ ] True multi-file native share staging rather than opening only one file.
 
 ### P1 — Timeline/search/performance
 - [ ] Date grouping Today/Yesterday/month.
+- [ ] Year/Month/Day/All Photos density modes and pinch grid density.
 - [ ] Replace whole-library `.map()` grids with virtualized/paginated lists.
-- [ ] Add search index over filename/date/type/camera/lens/location/album/dimensions/duration.
-- [ ] Cache-aware thumbnail loading instead of originals.
+- [ ] Search index over filename/date/type/camera/lens/location/album/dimensions/duration.
+- [ ] OCR/face/object/semantic-search extension interfaces.
 
 ### P2 — Sync/storage hardening
-- [ ] Persist upload jobs/chunks and resume from acknowledged offset.
-- [ ] Add interruption/restart tests.
-- [ ] Verify replica checksum/existence before healthy status.
-- [ ] Add under-replicated repair queue and health drill-down.
+- [ ] Persist upload chunks/jobs and resume from acknowledged byte offsets after restart/network interruption.
+- [ ] Network-change/Wi-Fi/charging policy enforcement and tests.
+- [ ] Verify remote object existence/checksum before every replica is considered healthy.
+- [ ] Under-replicated/failed/missing UI drill-down and repair actions.
+- [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
-## CI / release notes
-- The first CI after removing IMG.LY failed during `npm install` because a stale `patches/@imgly+editor-react-native+1.81.1.patch` remained. That obsolete patch has now been deleted.
-- CI must pass `npm install`, SDK tests, mobile typecheck and desktop build before this batch is considered release-ready.
+## CI notes
+- A stale IMG.LY patch-package file was removed after it blocked `npm install`.
+- Mobile + SDK typecheck passed on the editor/mobile-library hardening commit before video integration.
+- Desktop production build then exposed a pre-existing missing iconset asset. The build path now points to a real repository icon blob rather than a placeholder.
+- The current HEAD must still complete CI after the new video integration before the batch is release-ready.
 
-## Definition of done for every next change
-- UI exists only if logic exists.
-- Persistence added when the feature changes user data.
-- Loading/error/empty states exist.
-- Android/iOS behavior considered for mobile.
-- Tests added for business logic where feasible.
-- Documentation updated with the code.
+## Definition of done
+A feature is DONE only when UI, business logic, persistence (where needed), error/loading/empty states, platform behavior, tests and documentation agree. Rendering a screen or button alone is not completion.
