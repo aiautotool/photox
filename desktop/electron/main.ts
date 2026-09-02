@@ -299,7 +299,7 @@ async function runtimeDriveAccounts():Promise<RuntimeDriveAccount[]>{
     if(!email){try{email=(await client.getTokenInfo(token.token)).email}catch{}}
     email=email||account.id;
     if(email!==account.email)await fs.writeFile(path.join(driveAccountsDir(),`${account.id}.json`),JSON.stringify({...account,email,tokens:client.credentials},null,2),'utf8');
-    result.push({id:account.id,email,client,folderId,storage:{id:account.id,email,appUsedBytes,providerFreeBytes},quota:{limit:Number(quota.limit||0),usage:Number(quota.usage||0),free:providerFreeBytes}});
+    result.push({id:account.id,email,client,folderId,storage:{id:account.id,email,appUsedBytes,providerFreeBytes,providerTotalBytes:Number(quota.limit||0)},quota:{limit:Number(quota.limit||0),usage:Number(quota.usage||0),free:providerFreeBytes}});
   }catch(e){console.error('Drive account unavailable',account.id,e)}}
   return result;
 }
