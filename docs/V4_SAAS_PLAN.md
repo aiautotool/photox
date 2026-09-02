@@ -28,6 +28,8 @@ The current code already has strong reusable foundations:
 - video probe/thumbnail/transcoding pipeline.
 - mobile persistent favorite/archive/trash/album state.
 - real image editor, cloud download/delete, search, timeline, swipe/zoom viewer.
+- browser-accessible Web edge using the exact Desktop React renderer with authenticated HTTP/WebSocket bridge.
+- compliant Google Photos Picker migration with durable migration ledger.
 
 V4 must extend these instead of replacing them.
 
@@ -35,24 +37,27 @@ V4 must extend these instead of replacing them.
 
 ### P0 gaps
 
-1. **No first-class workspace/tenant boundary**
-   - media, provider, device and session state are not consistently scoped by a workspace ID.
-   - desktop currently behaves like the root trust boundary.
+1. **Tenant boundary is not yet end-to-end**
+   - workspace/member/device/usage persistence now exists, but legacy media/provider indexes are not consistently workspace-scoped yet.
+   - Web edge still uses an edge bootstrap identity instead of the final SaaS access/refresh session issuer.
 
-2. **No multi-user membership model**
-   - no owner/admin/member/viewer lifecycle.
-   - no invite/disable/leave/transfer ownership workflow.
+2. **Multi-user lifecycle is incomplete**
+   - owner/admin/member/viewer domain and durable membership storage exist.
+   - invite/disable/leave/transfer ownership flows and UX remain.
 
-3. **No central entitlement/quota enforcement**
-   - no common policy for storage, ingress, device count, provider count, members, sharing or premium capabilities.
+3. **Entitlement/quota enforcement is not connected to every write path**
+   - common role/feature/quota policy exists.
+   - media ingest still needs authoritative usage lookup and byte reservation before accepting writes.
 
-4. **Pairing is device-centric, not workspace-aware**
-   - current access/refresh design is useful but pairing needs to bind a device to workspace + user + role.
+4. **Pairing remains device-centric**
+   - access/refresh contracts can carry workspace identity and SQLite refresh sessions now preserve it.
+   - Desktop QR/pairing challenge and Mobile secure state still need workspace binding.
 
-5. **No durable SaaS control-plane persistence model**
-   - workspace, memberships, subscriptions, usage counters and registered devices need durable schemas and migrations.
+5. **Control-plane persistence needs service wiring**
+   - durable workspace, membership, device, usage and audit tables/repository now exist.
+   - subscription snapshots, SaaS API service wiring and event-driven usage counters remain.
 
-6. **No server-side billing boundary**
+6. **No authoritative billing boundary yet**
    - UI pricing must not be built before entitlement/subscription state is authoritative.
 
 ### P1 gaps
@@ -62,7 +67,7 @@ V4 must extend these instead of replacing them.
 - no provider ownership/credential isolation per workspace.
 - no public share token service with expiry/revocation.
 - no centralized usage dashboard.
-- no server-side activity/audit stream.
+- audit persistence exists but Web/Desktop mutations are not fully emitting audit events yet.
 - no reliable cloud control-plane for multiple desktops per workspace.
 - no SaaS-grade job observability/dead-letter/retry dashboard.
 
@@ -120,7 +125,9 @@ Authorization is two-stage:
 
 Legacy V3 pair-code sessions remain temporarily valid during migration, with workspace fields optional until all clients have upgraded.
 
-## 5. SaaS domain model introduced in Batch 1
+Refresh-token persistence must preserve workspace identity. Existing SQLite databases are migrated in place by adding nullable `workspace_id` and `workspace_role` columns so V3-era sessions remain readable during rollout.
+
+## 5. SaaS domain and persistence
 
 `@photosync/core` owns shared, platform-neutral policy types and logic:
 
@@ -134,6 +141,17 @@ Legacy V3 pair-code sessions remain temporarily valid during migration, with wor
 - authorization decision
 - quota evaluation
 - V3 personal-workspace migration helper
+
+`@photox/persistence-sqlite` now adds durable edge/control-plane compatible storage for:
+
+- workspaces
+- memberships
+- registered devices
+- workspace usage counters
+- audit events
+- workspace-aware refresh sessions
+
+Tenant-scoped repository tests use two workspaces with overlapping device IDs and prove queries do not cross the workspace boundary.
 
 No billing price is hard-coded into this domain. The default plan catalog is technical migration configuration and can be replaced by an authoritative catalog later.
 
@@ -171,12 +189,14 @@ All feature UI must read the entitlement state. A disabled feature must be hidde
 - Add shared entitlement engine.
 - Create one default personal workspace for each legacy owner installation/account.
 - Keep existing pairing and media APIs functional.
+- Preserve workspace identity across refresh sessions while remaining backward-compatible with existing SQLite databases.
 
 ### Phase B — durable workspace persistence
 
-- add SQLite schema/migrations for workspace, membership, device, usage and subscription snapshots.
-- scope media metadata and provider connections by workspace.
-- add repository interfaces so desktop and future cloud control plane use the same contracts.
+- SQLite schema/repository for workspace, membership, device, usage and audit is implemented.
+- next: create/default the legacy personal workspace from Desktop startup and control-plane bootstrap.
+- next: scope media metadata and provider connections by workspace.
+- repository interfaces remain platform-neutral so desktop edge and future cloud control plane can share contracts.
 
 ### Phase C — workspace-aware pairing
 
@@ -199,7 +219,7 @@ Mobile:
 - members/invites when entitled.
 - sync destination and remote-node status.
 
-Desktop:
+Desktop/Web shared renderer:
 
 - signed-in workspace identity.
 - node/device status.
@@ -230,22 +250,26 @@ Media bytes should continue to use the most efficient available data-plane route
 - [x] Add optional workspace identity to media API principal/session contracts.
 - [x] Carry workspace context from pairing exchange through refresh sessions.
 - [x] Encode workspace ID/role into JOSE access tokens.
-- [ ] Add durable workspace/membership/device/usage persistence and migrations.
+- [x] Add durable workspace/membership/device/usage persistence and migrations.
+- [x] Add durable workspace-scoped audit repository.
+- [x] Preserve workspace ID/role in SQLite refresh sessions, including backward-safe schema upgrade.
+- [ ] Instantiate/migrate the default legacy workspace from Desktop startup.
 - [ ] Add workspace-aware pairing credential implementation in Desktop.
 - [ ] Persist workspace context on Mobile after pairing/login.
 - [ ] Enforce media ingest quota before upload acceptance.
 - [ ] Scope media/provider index operations by workspace.
+- [ ] Replace Web edge bootstrap identity with authoritative SaaS access/refresh sessions.
 
 ### P1
 
 - [ ] Workspace/plan/usage API.
 - [ ] Mobile workspace/account + quota UI.
-- [ ] Desktop workspace/node + quota UI.
+- [ ] Desktop/Web workspace/node + quota UI.
 - [ ] Device registry/revoke session UX.
 - [ ] Member/invite lifecycle.
 - [ ] Provider ownership per workspace.
 - [ ] Public share service with expiry/password/revoke.
-- [ ] Audit events and operations dashboard.
+- [ ] Wire audit events into Web/Desktop/provider/member/device mutations and operations dashboard.
 - [ ] Persistent retry/dead-letter visibility.
 
 ### P2
@@ -267,13 +291,13 @@ Media bytes should continue to use the most efficient available data-plane route
 7. Quota downgrade blocks new writes/features but keeps read/export access unless an explicit policy says otherwise.
 8. Every schema migration must be backward-safe and recoverable.
 9. New auth/session fields remain optional until legacy V3-compatible migration completes.
-10. Every batch must run tests/typecheck/build before being marked complete.
+10. Every code batch must run tests, typecheck, production build and repository CI before being marked complete.
 
 ## 10. Next Batch
 
-1. Design SQLite workspace/membership/device/usage schema and repository APIs.
-2. Add migration that creates a default personal workspace for legacy installs.
-3. Bind Desktop pairing verifier to workspace + owner membership.
-4. Store returned workspace identity in Mobile secure pairing/session state.
-5. Add media-ingest entitlement check using actual incoming byte size.
-6. Add tests proving one workspace cannot read/write another workspace when workspace scoping is present.
+1. Instantiate `SqliteWorkspaceRepository` in Desktop startup and create/migrate the legacy personal workspace deterministically.
+2. Put workspace ID + desktop device ID + short-lived challenge/capability metadata into the pairing flow.
+3. Persist returned workspace identity and session material in Mobile SecureStore.
+4. Add authoritative WorkspaceUsage byte reservation/check before `/api/v1/media` accepts a write; roll back reservations on failed ingest.
+5. Add `workspace_id` to media/provider catalog rows with safe migration and prove cross-workspace reads/writes are rejected.
+6. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and emit durable audit events for mutations.
