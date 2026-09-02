@@ -1,12 +1,13 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
+
+type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};
 
 export interface WebEdgeHandlers {
   getStatus():Promise<unknown>;
@@ -49,6 +50,7 @@ export interface WebEdgeConfig {
 
 type Bucket={minute:number;count:number};
 const ROLE_RANK:Record<WebRole,number>={viewer:0,member:1,admin:2,owner:3};
+const MEDIA_TTL_SECONDS=10*60;
 
 export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
@@ -56,16 +58,18 @@ export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   if(enabled&&accessToken.length<32)throw new Error('PHOTOX_WEB_ACCESS_TOKEN must be at least 32 characters when Web is enabled');
   const rawRole=process.env.PHOTOX_WEB_ROLE||'owner';
   const role=(['owner','admin','member','viewer'].includes(rawRole)?rawRole:'owner') as WebRole;
+  const port=Number(process.env.PHOTOX_WEB_PORT||43118);
+  if(!Number.isInteger(port)||port<1||port>65535)throw new Error('PHOTOX_WEB_PORT is invalid');
   return {
     enabled,
     host:process.env.PHOTOX_WEB_HOST||'127.0.0.1',
-    port:Number(process.env.PHOTOX_WEB_PORT||43118),
+    port,
     accessToken,
     role,
     workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',
     allowedOrigins:(process.env.PHOTOX_WEB_ALLOWED_ORIGINS||'').split(',').map(v=>v.trim()).filter(Boolean),
     staticDir,
-    publicBaseUrl:process.env.PHOTOX_WEB_PUBLIC_BASE_URL,
+    publicBaseUrl:process.env.PHOTOX_WEB_PUBLIC_BASE_URL?.replace(/\/$/,''),
     rateLimitPerMinute:Math.max(30,Number(process.env.PHOTOX_WEB_RATE_LIMIT||300)),
   };
 }
@@ -97,15 +101,35 @@ export class PhotoXWebEdgeServer {
 
   publish(event:WebEdgeEvent,payload:unknown){
     const message=JSON.stringify({event,payload,workspaceId:this.config.workspaceId,at:new Date().toISOString()});
-    for(const socket of this.sockets)if(socket.readyState===socket.OPEN)socket.send(message);
+    for(const socket of this.sockets)if(socket.readyState===WebSocket.OPEN)socket.send(message);
   }
 
   private authorized(req:IncomingMessage){
     const bearer=/^Bearer\s+(.+)$/i.exec(String(req.headers.authorization||''))?.[1];
     const protocols=String(req.headers['sec-websocket-protocol']||'').split(',').map(v=>v.trim());
-    const token=bearer||protocols.find(v=>v!== 'photox-v1');
+    const token=bearer||protocols.find(v=>v!=='photox-v1');
     if(!token||token.length!==this.config.accessToken.length)return false;
     return crypto.timingSafeEqual(Buffer.from(token),Buffer.from(this.config.accessToken));
+  }
+
+  private mediaSignature(key:string,variant:string,expires:number){
+    return crypto.createHmac('sha256',this.config.accessToken).update(`${this.config.workspaceId}\n${variant}\n${key}\n${expires}`).digest('base64url');
+  }
+
+  private mediaUrl(key:string,variant:'media'|'playback'|'thumbnail'){
+    const expires=Math.floor(Date.now()/1000)+MEDIA_TTL_SECONDS;
+    const sig=this.mediaSignature(key,variant,expires);
+    const base=this.config.publicBaseUrl||'';
+    return `${base}/api/web/v1/${variant}/${encodeURIComponent(key)}?exp=${expires}&sig=${encodeURIComponent(sig)}`;
+  }
+
+  private signedMediaAuthorized(url:URL){
+    const match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(url.pathname);if(!match)return false;
+    const expires=Number(url.searchParams.get('exp')||0);const supplied=url.searchParams.get('sig')||'';
+    if(!Number.isInteger(expires)||expires<Math.floor(Date.now()/1000)||expires>Math.floor(Date.now()/1000)+MEDIA_TTL_SECONDS+60)return false;
+    const expected=this.mediaSignature(decodeURIComponent(match[2]),match[1],expires);
+    if(supplied.length!==expected.length)return false;
+    return crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected));
   }
 
   private originAllowed(req:IncomingMessage){
@@ -146,7 +170,7 @@ export class PhotoXWebEdgeServer {
     if(!this.rateAllowed(req)){res.setHeader('retry-after','60');this.json(res,429,{error:'RATE_LIMITED'});return;}
     const url=new URL(req.url||'/','http://localhost');
     if(url.pathname.startsWith('/api/web/v1/')){
-      if(!this.authorized(req)){this.json(res,401,{error:'AUTH_REQUIRED'});return;}
+      if(!this.authorized(req)&&!this.signedMediaAuthorized(url)){this.json(res,401,{error:'AUTH_REQUIRED'});return;}
       try{await this.api(req,res,url);return;}catch(error){this.json(res,500,{error:error instanceof Error?error.message:String(error)});return;}
     }
     await this.static(req,res,url.pathname);
@@ -158,7 +182,10 @@ export class PhotoXWebEdgeServer {
     const mutate=async(role:WebRole,fn:()=>Promise<unknown>)=>{if(!this.requireRole(role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}this.json(res,200,await fn());};
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
     if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);
-    if(m==='GET'&&p==='/api/web/v1/library')return read(this.handlers.listLocalMedia);
+    if(m==='GET'&&p==='/api/web/v1/library'){
+      const raw=await this.handlers.listLocalMedia();const items=Array.isArray(raw)?raw as BrowserMedia[]:[];
+      return this.json(res,200,items.map(item=>({...item,url:this.mediaUrl(item.key,'media'),thumbnailUri:this.mediaUrl(item.key,'thumbnail')})));
+    }
     if(m==='GET'&&p==='/api/web/v1/cloud/uploads')return read(this.handlers.listCloudUploads);
     if(m==='GET'&&p==='/api/web/v1/backup/health')return read(this.handlers.getBackupHealth);
     if(m==='POST'&&p==='/api/web/v1/library/open')return mutate('admin',this.handlers.openLibrary);
@@ -167,7 +194,7 @@ export class PhotoXWebEdgeServer {
     let match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
     if(m==='POST'&&p==='/api/web/v1/cloud/retry')return mutate('member',this.handlers.retryCloud);
     if(m==='GET'&&p==='/api/web/v1/google-photos/accounts')return read(this.handlers.listGooglePhotosAccounts);
-    if(m==='POST'&&p==='/api/web/v1/google-photos/accounts/connect'){const b=await this.body(req);return mutate('admin',()=>this.handlers.connectGooglePhotosAccount(b.capability));}
+    if(m==='POST'&&p==='/api/web/v1/google-photos/accounts/connect'){const b=await this.body(req);if(!['picker','append'].includes(String(b.capability))){this.json(res,400,{error:'INVALID_CAPABILITY'});return;}return mutate('admin',()=>this.handlers.connectGooglePhotosAccount(b.capability));}
     match=/^\/api\/web\/v1\/google-photos\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',()=>this.handlers.removeGooglePhotosAccount(decodeURIComponent(match![1])));
     if(m==='GET'&&p==='/api/web/v1/migrations')return read(this.handlers.listMigrations);
     if(m==='POST'&&p==='/api/web/v1/migrations'){const b=await this.body(req);return mutate('member',()=>this.handlers.createMigration(b));}
@@ -190,7 +217,7 @@ export class PhotoXWebEdgeServer {
         body=Buffer.from(body.toString('utf8').replace('</head>',`${bootstrap}</head>`));
       }
       const ext=path.extname(filePath);const types:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};
-      res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','content-length':String(body.length),'cache-control':ext==='.html'?'no-store':'public, max-age=31536000, immutable','content-security-policy':"default-src 'self'; img-src 'self' data: blob: photosync:; media-src 'self' blob: photosync:; connect-src 'self' ws: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});
+      res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','content-length':String(body.length),'cache-control':ext==='.html'?'no-store':'public, max-age=31536000, immutable','content-security-policy':"default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});
       if(req.method==='HEAD')res.end();else res.end(body);
     }catch{res.writeHead(404);res.end('Not found');}
   }
