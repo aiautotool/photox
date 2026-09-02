@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SqlitePhotoXStore } from './index.js';
+import { SqlitePhotoXStore, SqliteRefreshSessionStore } from './index.js';
 import { SqliteWorkspaceRepository } from './workspace.js';
 
 function setup() {
@@ -39,6 +39,22 @@ describe('SqliteWorkspaceRepository', () => {
     repo.setUsage('ws-a', { managedStorageBytes: 123, monthlyIngressBytes: 50, members: 1, devices: 2, storageProviders: 3, publicShares: 4 }, 99);
     expect(repo.getUsage('ws-a')).toEqual({ managedStorageBytes: 123, monthlyIngressBytes: 50, members: 1, devices: 2, storageProviders: 3, publicShares: 4 });
     expect(() => repo.setUsage('ws-a', { managedStorageBytes: -1, monthlyIngressBytes: 0, members: 0, devices: 0, storageProviders: 0, publicShares: 0 })).toThrow('INVALID_WORKSPACE_USAGE');
+    store.close();
+  });
+
+  it('preserves workspace identity across refresh sessions', async () => {
+    const { store } = setup();
+    const sessions = new SqliteRefreshSessionStore(store);
+    const created = await sessions.create({
+      subject: 'user-a', deviceId: 'phone-a', workspaceId: 'ws-a', workspaceRole: 'member',
+      scopes: ['media:read', 'media:write'], expiresAt: Math.floor(Date.now() / 1000) + 60,
+    });
+    await expect(sessions.consume(created.refreshToken)).resolves.toMatchObject({
+      subject: 'user-a', deviceId: 'phone-a', workspaceId: 'ws-a', workspaceRole: 'member',
+      scopes: ['media:read', 'media:write'], sessionId: created.sessionId,
+    });
+    await sessions.revoke(created.sessionId);
+    await expect(sessions.consume(created.refreshToken)).resolves.toBeNull();
     store.close();
   });
 
