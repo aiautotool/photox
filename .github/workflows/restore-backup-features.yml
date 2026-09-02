@@ -1,0 +1,33 @@
+name: Restore backup features
+
+on:
+  push:
+    branches: [v3]
+    paths:
+      - '.github/scripts/restore_backup_features.py'
+      - '.github/workflows/restore-backup-features.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply backup restoration patch
+        run: python .github/scripts/restore_backup_features.py
+      - name: Verify changed files
+        run: git diff --check
+      - name: Commit restoration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mobile/src/sync/backupSettings.ts mobile/src/sync/mobileSync.ts mobile/src/library/LibraryController.ts mobile/src/home/MobileHome.tsx desktop/electron/main.ts docs/IMPLEMENTATION_PLAN.md
+          git commit -m "restore detailed backup progress and cloud management"
+          git push origin HEAD:v3
