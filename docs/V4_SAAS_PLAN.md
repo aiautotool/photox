@@ -38,7 +38,7 @@ V4 must extend these instead of replacing them.
 ### P0 gaps
 
 1. **Tenant boundary is not yet end-to-end**
-   - workspace/member/device/usage persistence now exists, but legacy media/provider indexes are not consistently workspace-scoped yet.
+   - workspace/member/device/usage persistence exists, but legacy media/provider indexes are not consistently workspace-scoped yet.
    - Web edge still uses an edge bootstrap identity instead of the final SaaS access/refresh session issuer.
 
 2. **Multi-user lifecycle is incomplete**
@@ -47,14 +47,15 @@ V4 must extend these instead of replacing them.
 
 3. **Entitlement/quota enforcement is not connected to every write path**
    - common role/feature/quota policy exists.
-   - media ingest still needs authoritative usage lookup and byte reservation before accepting writes.
+   - media ingest enforces byte quotas, while remaining provider/admin write paths still need uniform entitlement enforcement.
 
-4. **Pairing remains device-centric**
-   - access/refresh contracts can carry workspace identity and SQLite refresh sessions now preserve it.
-   - Desktop QR/pairing challenge and Mobile secure state still need workspace binding.
+4. **Pairing v2 is workspace-aware but session exchange is transitional**
+   - Desktop QR v2 carries workspace ID, workspace role, desktop device ID, short-lived challenge expiry and capabilities.
+   - Mobile stores this workspace pairing context in SecureStore and uses it for LAN/public/relay requests while valid.
+   - legacy v1 pair-code/pair-token compatibility remains temporarily available until a v2 challenge is exchanged for normal access/refresh tokens.
 
 5. **Control-plane persistence needs service wiring**
-   - durable workspace, membership, device, usage and audit tables/repository now exist.
+   - durable workspace, membership, device, usage and audit tables/repository exist.
    - subscription snapshots, SaaS API service wiring and event-driven usage counters remain.
 
 6. **No authoritative billing boundary yet**
@@ -123,9 +124,9 @@ Authorization is two-stage:
 1. API scope check (`media:read`, `media:write`, ...).
 2. Workspace entitlement/role/quota check.
 
-Legacy V3 pair-code sessions remain temporarily valid during migration, with workspace fields optional until all clients have upgraded.
+Legacy V3 pair-code sessions remain temporarily valid during migration. Pairing v2 no longer relies on pair-code for modern relay-to-desktop authorization: the workspace challenge is propagated through Relay and verified by the same shared Desktop challenge manager used by LAN/public requests. V1 devices retain pair-code/pair-token fallback until the access/refresh session exchange endpoint is complete.
 
-Refresh-token persistence must preserve workspace identity. Existing SQLite databases are migrated in place by adding nullable `workspace_id` and `workspace_role` columns so V3-era sessions remain readable during rollout.
+Refresh-token persistence preserves workspace identity. Existing SQLite databases are migrated in place by adding nullable `workspace_id` and `workspace_role` columns so V3-era sessions remain readable during rollout.
 
 ## 5. SaaS domain and persistence
 
@@ -142,16 +143,17 @@ Refresh-token persistence must preserve workspace identity. Existing SQLite data
 - quota evaluation
 - V3 personal-workspace migration helper
 
-`@photox/persistence-sqlite` now adds durable edge/control-plane compatible storage for:
+`@photox/persistence-sqlite` adds durable edge/control-plane compatible storage for:
 
 - workspaces
 - memberships
 - registered devices
 - workspace usage counters
+- monthly ingress accounting period
 - audit events
 - workspace-aware refresh sessions
 
-Tenant-scoped repository tests use two workspaces with overlapping device IDs and prove queries do not cross the workspace boundary.
+Tenant-scoped repository tests use two workspaces with overlapping device IDs and prove queries do not cross the workspace boundary. Monthly ingress migration is backward-safe: old rows with a NULL period keep their existing counter when first assigned to the current period; the ingress counter resets only when an already-established UTC month changes, while managed storage remains unchanged.
 
 No billing price is hard-coded into this domain. The default plan catalog is technical migration configuration and can be replaced by an authoritative catalog later.
 
@@ -195,20 +197,23 @@ All feature UI must read the entitlement state. A disabled feature must be hidde
 
 - SQLite schema/repository for workspace, membership, device, usage and audit is implemented.
 - legacy personal workspace bootstrap is implemented in Desktop startup, including desktop-device registration and existing-usage reconstruction.
-- media ingest now enforces workspace plan byte quotas before consuming the request body and rolls reservations back on failed ingest.
+- media ingest enforces workspace plan byte quotas before consuming the request body and rolls reservations back on failed ingest.
+- monthly ingress is tracked by an authoritative UTC calendar-month period and rolls over without changing managed storage.
 - next: scope media metadata and provider connections by workspace.
 - repository interfaces remain platform-neutral so desktop edge and future cloud control plane can share contracts.
 
 ### Phase C — workspace-aware pairing
 
-Desktop pairing QR should resolve to:
+Implemented transitional v2 flow:
 
-- workspace ID
-- desktop device/node ID
-- one-time pairing challenge
-- capability/version metadata
+- Desktop tunnel QR carries workspace ID, workspace role, deterministic desktop device ID, challenge, challenge expiry and capability metadata.
+- a shared in-process challenge manager is used by both the tunnel module and LAN/public receiver so the same v2 challenge is valid across transports.
+- Relay preserves workspace ID and challenge end-to-end; Desktop validates the challenge before forwarding modern uploads into the receiver.
+- Mobile parses/persists v2 workspace pairing context in SecureStore and attaches workspace/challenge headers for modern LAN/public/relay operations.
+- expired or invalid v2 challenges are rejected.
+- v1 pairing remains compatible through legacy pair-code/pair-token fallback.
 
-Mobile pairing exchange should produce a workspace-scoped device session. Pair codes should become short-lived challenges, not long-lived authorization secrets.
+Next pairing step: exchange the short-lived challenge for a workspace-scoped access/refresh session, register/revoke the mobile device session, and stop using pair-code as authorization for v2 clients entirely.
 
 ### Phase D — SaaS UX
 
@@ -243,9 +248,9 @@ Media bytes should continue to use the most efficient available data-plane route
 
 ### Phase B1 — legacy edge bootstrap and write quota enforcement (implemented)
 
-Desktop now creates the legacy personal workspace deterministically at startup, registers itself as a workspace device, and reconstructs managed storage/provider usage from existing state. Mobile sends the materialized file byte size before upload. Desktop reserves managed-storage and monthly-ingress bytes atomically before consuming the body, rejects over-quota writes, verifies the received byte count, rolls the reservation back on failed ingest, and records successful ingest in the workspace audit log. Media deletion releases managed storage but intentionally retains monthly ingress for the current accounting period. Google Drive connect/disconnect updates provider usage and durable audit state.
+Desktop creates the legacy personal workspace deterministically at startup, registers itself as a workspace device, and reconstructs managed storage/provider usage from existing state. Mobile sends the materialized file byte size before upload. Desktop reserves managed-storage and monthly-ingress bytes atomically before consuming the body, rejects over-quota writes, verifies the received byte count, rolls the reservation back on failed ingest, and records successful ingest in the workspace audit log. Media deletion releases managed storage but intentionally retains monthly ingress for the current accounting period. Google Drive connect/disconnect updates provider usage and durable audit state.
 
-The remaining accounting gap is period rollover for monthly ingress; until implemented, the counter is cumulative rather than calendar-month authoritative.
+Monthly ingress now has a UTC `YYYY-MM` accounting period. A period transition resets only ingress bytes and preserves managed storage; migration from pre-period databases preserves the existing ingress counter on first assignment.
 
 ## 8. Delivery priorities
 
@@ -261,10 +266,12 @@ The remaining accounting gap is period rollover for monthly ingress; until imple
 - [x] Add durable workspace-scoped audit repository.
 - [x] Preserve workspace ID/role in SQLite refresh sessions, including backward-safe schema upgrade.
 - [x] Instantiate/migrate the default legacy workspace from Desktop startup and register the desktop device.
-- [ ] Add workspace-aware pairing credential implementation in Desktop.
-- [ ] Persist workspace context on Mobile after pairing/login.
+- [x] Add workspace-aware pairing v2 challenge implementation across Desktop LAN/public/Relay transports, preserving v1 compatibility.
+- [x] Persist workspace pairing context on Mobile in SecureStore.
 - [x] Enforce media ingest quota before upload acceptance using declared bytes, atomic SQLite reservation, size verification and rollback.
 - [x] Keep workspace managed-storage/provider usage consistent on media delete and Google Drive connect/disconnect, with durable audit events.
+- [x] Add backward-safe monthly ingress accounting period and UTC month rollover.
+- [ ] Exchange v2 pairing challenge for workspace-scoped access/refresh session and revoke device sessions server-side.
 - [ ] Scope media/provider index operations by workspace.
 - [ ] Replace Web edge bootstrap identity with authoritative SaaS access/refresh sessions.
 
@@ -303,9 +310,9 @@ The remaining accounting gap is period rollover for monthly ingress; until imple
 
 ## 10. Next Batch
 
-1. Put workspace ID + desktop device ID + short-lived challenge/capability metadata into the pairing flow.
-2. Persist returned workspace identity and session material in Mobile SecureStore and stop treating pair-code as the long-lived authorization secret.
-3. Add `workspace_id` to media/provider catalog rows with backward-safe migration and prove cross-workspace reads/writes are rejected.
-4. Add a monthly usage period/reset model so `monthlyIngressBytes` is authoritative across month boundaries.
-5. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and extend durable audit emission to all administrative mutations.
-6. Add workspace/plan/usage APIs and surface real quota state in the shared Desktop/Web UI and Mobile.
+1. Add a v2 pairing exchange endpoint that consumes the short-lived challenge and returns workspace-scoped access + refresh tokens, registers the mobile device, supports session revocation, and removes pair-code fallback for upgraded clients.
+2. Add `workspace_id` to media index/provider connection rows with backward-safe migration; enforce workspace scope in list/read/delete/upload/replica operations and add cross-tenant tests.
+3. Replace static Web edge bootstrap role/workspace configuration with verified SaaS access tokens and refresh-session flow.
+4. Add workspace/plan/usage APIs and surface authoritative quota state in shared Desktop/Web UI and Mobile.
+5. Extend durable audit emission to all administrative mutations and expose an operations/activity view.
+6. Continue Google Photos migration hardening: streaming large files, resumable per-file checkpoints across restart, speed/ETA and live OAuth verification with real accounts.
