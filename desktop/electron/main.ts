@@ -209,7 +209,7 @@ async function backupHealthSnapshot():Promise<BackupHealthSnapshot>{
   for(const row of rows){const video=isVideoFilename(row.filename);if(video)snapshot.videos+=1;else snapshot.photos+=1;const result=await evaluateRow(row);if(result.health==='safe')snapshot.safe+=1;else if(result.health==='at_risk')snapshot.atRisk+=1;else if(result.health==='critical')snapshot.critical+=1;else snapshot.unknown+=1;if(result.health!=='safe')snapshot.problems.push({key:row.key,filename:row.filename,health:result.health,reason:result.reasons.join(',')||'verification_required'})}
   return snapshot;
 }
-async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex();const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all)}notifyRenderer('photosync:storage-updated',{key:row.key,cloudReplicas:replicas})}
+async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex(row.workspaceId);const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],workspaceId:row.workspaceId,cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all,row.workspaceId)}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:replicas})}
 function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').slice(0,220)||`media-${Date.now()}`; }
 
 async function hashFile(filePath:string){
@@ -380,7 +380,7 @@ async function removeDriveAccount(accountId:string){
   const account=(await savedDriveAccounts()).find(item=>item.id===accountId);
   if(!account)throw new Error('Không tìm thấy tài khoản');
   const files=(await fs.readdir(driveAccountsDir())).filter(name=>name.endsWith('.json'));
-  for(const file of files)try{const saved:SavedDriveAccount=JSON.parse(await fs.readFile(path.join(driveAccountsDir(),file),'utf8'));if(saved.id===account.id)await fs.unlink(path.join(driveAccountsDir(),file))}catch{}
+  for(const file of files)try{const saved:SavedDriveAccount=JSON.parse(await fs.readFile(path.join(driveAccountsDir(),file),'utf8'));if(saved.id===account.id&&(saved.workspaceId||LEGACY_WORKSPACE_ID)===LEGACY_WORKSPACE_ID)await fs.unlink(path.join(driveAccountsDir(),file))}catch{}
   await syncWorkspaceProviderUsage();
   requireWorkspaceRepository().appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'provider.disconnect',targetType:'google_drive',targetId:accountId,metadata:{email:account.email||account.id}});
   notifyRenderer('photosync:storage-updated',{accountId,removed:true});
