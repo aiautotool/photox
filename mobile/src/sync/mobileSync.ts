@@ -7,7 +7,22 @@ import { clearAssetFailed, markAssetFailed, markAssetSynced } from './syncLedger
 declare const require: (id: string) => any;
 
 export type MediaAsset = MediaLibrary.Asset;
-export type DisplayAsset = MediaAsset & { cloudOnly?: boolean; requestHeaders?: Record<string, string>; fileSize?: number };
+export type DisplayAsset = MediaAsset & {
+  cloudOnly?: boolean;
+  requestHeaders?: Record<string, string>;
+  fileSize?: number;
+  mimeType?: string;
+  thumbnailUri?: string;
+  playbackUri?: string;
+  rotation?: number;
+  fps?: number;
+  bitrate?: number;
+  container?: string;
+  videoCodec?: string;
+  audioCodec?: string;
+  videoProcessing?: 'queued'|'processing'|'ready'|'error';
+  videoError?: string;
+};
 export type AssetMetadata = {
   make?: string; model?: string; lens?: string; software?: string;
   focalLength?: number; focalLength35mm?: number; aperture?: number;
@@ -66,7 +81,7 @@ export async function prepareAssetForEditing(asset: DisplayAsset): Promise<strin
   return (await FileSystem.downloadAsync(asset.uri, destination, { headers: asset.requestHeaders })).uri;
 }
 
-/** Downloads a cloud asset and stores a copy in the device photo library. */
+/** Downloads the original cloud asset and stores a copy in the device photo library. */
 export async function downloadCloudAsset(asset: DisplayAsset): Promise<MediaAsset> {
   if (!asset.cloudOnly) throw new Error('Mục này đã có trên thiết bị.');
 
@@ -75,8 +90,11 @@ export async function downloadCloudAsset(asset: DisplayAsset): Promise<MediaAsse
 
   const extension = asset.filename.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || (asset.mediaType === 'video' ? 'mp4' : 'jpg');
   const destination = `${FileSystem.cacheDirectory}photosync-download-${Date.now()}.${extension}`;
+  const originalUri = asset.playbackUri && asset.uri === asset.playbackUri
+    ? asset.uri.replace('/api/v1/playback/', '/api/v1/media/')
+    : asset.uri;
   try {
-    const downloaded = await FileSystem.downloadAsync(asset.uri, destination, { headers: asset.requestHeaders });
+    const downloaded = await FileSystem.downloadAsync(originalUri, destination, { headers: asset.requestHeaders });
     return await MediaLibrary.createAssetAsync(downloaded.uri);
   } finally {
     await FileSystem.deleteAsync(destination, { idempotent: true }).catch(() => undefined);
@@ -112,14 +130,28 @@ export async function loadDevicePhotos(limit = 300): Promise<MediaAsset[]> {
   return result.assets;
 }
 
-function mimeFor(asset: MediaAsset): string {
-  if (asset.mediaType === 'video') return 'video/mp4';
-  const ext = asset.filename.split('.').pop()?.toLowerCase();
-  if (ext === 'png') return 'image/png';
-  if (ext === 'heic' || ext === 'heif') return 'image/heic';
-  if (ext === 'webp') return 'image/webp';
-  return 'image/jpeg';
+export function mimeForFilename(filename: string, mediaType?: MediaAsset['mediaType']): string {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  switch (ext) {
+    case 'jpg': case 'jpeg': return 'image/jpeg';
+    case 'png': return 'image/png';
+    case 'heic': return 'image/heic';
+    case 'heif': return 'image/heif';
+    case 'webp': return 'image/webp';
+    case 'gif': return 'image/gif';
+    case 'tif': case 'tiff': return 'image/tiff';
+    case 'dng': return 'image/x-adobe-dng';
+    case 'mp4': return 'video/mp4';
+    case 'mov': return 'video/quicktime';
+    case 'm4v': return 'video/x-m4v';
+    case 'webm': return 'video/webm';
+    case 'mkv': return 'video/x-matroska';
+    case 'avi': return 'video/x-msvideo';
+    default: return mediaType === 'video' ? 'application/octet-stream' : 'image/jpeg';
+  }
 }
+
+function mimeFor(asset: MediaAsset): string { return mimeForFilename(asset.filename, asset.mediaType); }
 
 async function materializeAsset(asset: MediaAsset): Promise<{ uri: string; size: number; temporary: boolean }> {
   const info = await MediaLibrary.getAssetInfoAsync(asset, { shouldDownloadFromNetwork: true });
@@ -130,9 +162,6 @@ async function materializeAsset(asset: MediaAsset): Promise<{ uri: string; size:
   const uri = `${cacheDir}${asset.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${safeName}`;
   await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
   try {
-    // MediaLibrary often returns a file:// URL outside the app sandbox. A
-    // background URLSession cannot reopen that URL after iOS suspends JS, so
-    // every asset must first be copied into PhotoSync's own cache container.
     await FileSystem.copyAsync({ from: originalUri, to: uri });
   } catch (error) {
     throw new Error(`iOS không xuất được file gốc ${asset.filename}: ${error instanceof Error ? error.message : String(error)}`);
@@ -161,23 +190,48 @@ export async function loadCloudPhotos(target: PairedDesktop): Promise<DisplayAss
   if (!endpoint || !target.pairCode) return [];
   const response = await fetchWithTimeout(endpoint, { headers: { 'x-photosync-pair-code': target.pairCode } }, 15_000);
   if (!response.ok) throw new Error(`Cloud library ${response.status}`);
-  const items = await response.json() as Array<{ key:string;assetId:string;filename:string;size:number;createdAt:number;mediaType:'photo'|'video' }>;
-  return items.map((item, index) => ({
-    id: item.assetId || item.key,
-    filename: item.filename,
-    uri: `${publicEndpoint(target, `/api/v1/media/${encodeURIComponent(item.key)}`)}`,
-    mediaType: item.mediaType,
-    mediaSubtypes: [],
-    width: 0,
-    height: 0,
-    creationTime: item.createdAt,
-    modificationTime: item.createdAt,
-    duration: 0,
-    fileSize: item.size,
-    albumId: 'photosync-cloud',
-    cloudOnly: true,
-    requestHeaders: { 'x-photosync-pair-code': target.pairCode! },
-  } as DisplayAsset));
+  const items = await response.json() as Array<{
+    key:string;assetId:string;filename:string;size:number;createdAt:number;mediaType:'photo'|'video';
+    mimeType?:string;width?:number;height?:number;duration?:number;rotation?:number;fps?:number;bitrate?:number;
+    container?:string;videoCodec?:string;audioCodec?:string;videoProcessing?:DisplayAsset['videoProcessing'];videoError?:string;
+    thumbnailAvailable?:boolean;playbackAvailable?:boolean;
+  }>;
+  return items.map((item) => {
+    const mediaUri = publicEndpoint(target, `/api/v1/media/${encodeURIComponent(item.key)}`)!;
+    const playbackUri = item.mediaType === 'video' && item.playbackAvailable
+      ? publicEndpoint(target, `/api/v1/playback/${encodeURIComponent(item.key)}`)!
+      : undefined;
+    const thumbnailUri = item.mediaType === 'video' && item.thumbnailAvailable
+      ? publicEndpoint(target, `/api/v1/thumbnail/${encodeURIComponent(item.key)}`)!
+      : undefined;
+    return {
+      id: item.assetId || item.key,
+      filename: item.filename,
+      uri: playbackUri || mediaUri,
+      mediaType: item.mediaType,
+      mediaSubtypes: [],
+      width: item.width || 0,
+      height: item.height || 0,
+      creationTime: item.createdAt,
+      modificationTime: item.createdAt,
+      duration: item.duration || 0,
+      fileSize: item.size,
+      albumId: 'photosync-cloud',
+      cloudOnly: true,
+      mimeType: item.mimeType || mimeForFilename(item.filename, item.mediaType),
+      thumbnailUri,
+      playbackUri,
+      rotation: item.rotation,
+      fps: item.fps,
+      bitrate: item.bitrate,
+      container: item.container,
+      videoCodec: item.videoCodec,
+      audioCodec: item.audioCodec,
+      videoProcessing: item.videoProcessing,
+      videoError: item.videoError,
+      requestHeaders: { 'x-photosync-pair-code': target.pairCode! },
+    } as DisplayAsset;
+  });
 }
 
 async function fetchWithTimeout(url:string, init:RequestInit = {}, timeoutMs = 8_000, externalSignal?:AbortSignal) {
@@ -225,7 +279,6 @@ export async function syncAssetsToLaptop(
   signal?: AbortSignal,
 ): Promise<SyncProgress> {
   const connection = await pingLaptop(target, signal);
-  console.log('PhotoSync sync transport', connection.transport, 'assets', assets.length);
   const progress: SyncProgress = { total: assets.length, completed: 0, skipped: 0, failed: 0 };
 
   for (const asset of [...assets].reverse()) {
@@ -243,10 +296,7 @@ export async function syncAssetsToLaptop(
       progress.currentBytesTotal = local.size;
       progress.currentBytesRemaining = local.size;
       onProgress?.({ ...progress });
-      console.log('PhotoSync upload start', asset.filename, local.size);
       const upload = async (transport: 'local'|'public'|'relay') => {
-        // A fallback starts a new request, so reset the byte counters instead of
-        // briefly showing the failed LAN request as fully uploaded.
         progress.currentBytesUploaded = 0;
         progress.currentBytesTotal = local!.size;
         progress.currentBytesRemaining = local!.size;
@@ -258,8 +308,6 @@ export async function syncAssetsToLaptop(
             : relayEndpoint(target, `/api/v1/upload/${encodeURIComponent(target.desktopId)}`), local!.uri, {
           httpMethod: 'POST',
           uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-          // Native iOS URLSession keeps the active transfer alive while the
-          // screen is locked or the app is suspended in the background.
           sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
           headers: {
             'content-type': mimeFor(asset),
@@ -293,7 +341,6 @@ export async function syncAssetsToLaptop(
           if (result.status < 200 || result.status >= 300) throw new Error(`LAN ${result.status}: ${result.body}`);
         } catch (error) {
           if (signal?.aborted) throw error;
-          console.warn('PhotoSync LAN upload failed; falling back to Internet relay', asset.filename, error);
           result = await upload('relay');
         }
       } else {
@@ -305,10 +352,8 @@ export async function syncAssetsToLaptop(
       else throw new Error(`Tunnel ${result.status}: ${result.body}`);
       await markAssetSynced(asset.id);
       await clearAssetFailed(asset.id);
-      console.log('PhotoSync upload done', asset.filename, result.status);
     } catch (error) {
       if (signal?.aborted) throw error;
-      console.error('PhotoSync mobile -> Internet tunnel -> laptop failed', asset.filename, error);
       progress.failed += 1;
       progress.lastError = `${asset.filename}: ${error instanceof Error ? error.message : String(error)}`;
       await markAssetFailed(asset.id, progress.lastError);
