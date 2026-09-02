@@ -39,13 +39,10 @@
         {
           "android": {
             "usesCleartextTraffic": true,
-            "minSdkVersion": 24,
-            "extraMavenRepos": [
-              "https://artifactory.img.ly/artifactory/maven"
-            ]
+            "minSdkVersion": 33
           },
           "ios": {
-            "deploymentTarget": "16.4"
+            "deploymentTarget": "18.0"
           }
         }
       ],
