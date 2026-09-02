@@ -1,0 +1,27 @@
+name: Fix editor pipeline
+on:
+  push:
+    branches: [v3]
+    paths:
+      - '.github/scripts/fix_editor_pipeline.py'
+      - '.github/workflows/fix-editor-pipeline.yml'
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply editor pipeline fix
+        run: python .github/scripts/fix_editor_pipeline.py
+      - name: Verify
+        run: git diff --check
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mobile/src/editor/PhotoEditorScreen.tsx
+          git commit -m "fix editor composition pipeline"
+          git push origin HEAD:v3
