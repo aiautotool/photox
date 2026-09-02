@@ -48,8 +48,8 @@ const PRESETS:Preset[]=[
 ];
 const FILTERS:FilterName[]=['vivid','dramatic','warm','cool','vintage','clarendon','juno','lark','reyes','valencia','brooklyn','earlybird','hudson','inkwell','lofi','mayfair','nashville','perpetua','toaster','walden','xpro2','sepia','noir','fade','chrome'];
 const EFFECTS:{name:string;filter:FilterName}[]=[
-  {name:'Vignette',filter:'dramatic'},{name:'Grain',filter:'vintage'},{name:'Glow',filter:'chrome'},
-  {name:'Bleach',filter:'fade'},{name:'Light Leak',filter:'warm'},{name:'Mono',filter:'noir'},
+  {name:'Dramatic',filter:'dramatic'},{name:'Vintage',filter:'vintage'},{name:'Chrome',filter:'chrome'},
+  {name:'Fade',filter:'fade'},{name:'Warm',filter:'warm'},{name:'Noir',filter:'noir'},
 ];
 const ASPECTS:{label:string;value:CropAspect;ratio?:number}[]=[
   {label:'Free',value:'free'},{label:'Original',value:'original'},{label:'1:1',value:'1:1',ratio:1},
@@ -112,13 +112,14 @@ export function PhotoEditorScreen({visible,asset,onClose,onSave}:PhotoEditorScre
   function undo(){const prev=historyRef.current.pop();const cur=snapshot();if(!prev||!cur)return;futureRef.current.push(cur);session?.undo();restore(prev);setHistoryVersion(v=>v+1);}
   function redo(){const next=futureRef.current.pop();const cur=snapshot();if(!next||!cur)return;historyRef.current.push(cur);session?.redo();restore(next);setHistoryVersion(v=>v+1);}
 
-  async function bakeVisuals(){
-    if(!workingUri)return;
+  async function bakeVisuals():Promise<{uri:string;width:number;height:number}>{
+    if(!workingUri)throw new Error('Không có ảnh đang chỉnh.');
     const hasCustom=!sameAdjust(adjust,DEFAULT_ADJUST);
-    if(filter==='custom'&&!hasCustom)return;
+    if(filter==='custom'&&!hasCustom)return {uri:workingUri,width:size.width,height:size.height};
     const result=await applyFilter({sourceUri:workingUri,filter,intensity,customParams:filter==='custom'?customParams:undefined,returnFormat:'uri',quality:100});
     if(!result.uri)throw new Error('Không thể kết xuất bước chỉnh hiện tại.');
     setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setFilter('custom');setIntensity(1);setAdjust(DEFAULT_ADJUST);
+    return {uri:result.uri,width:result.width,height:result.height};
   }
 
   async function openMode(next:Mode){
@@ -136,10 +137,10 @@ export function PhotoEditorScreen({visible,asset,onClose,onSave}:PhotoEditorScre
   function commitAdjustment(name:keyof AdjustmentState,value:number){session?.apply({id:`adjust:${name}:${Date.now()}`,type:'adjust',name:name as AdjustmentName,value});remember(gestureStart.current);gestureStart.current=null;}
   function setAdjustment(name:keyof AdjustmentState,value:number){setFilter('custom');setAdjust(v=>({...v,[name]:value}));}
 
-  async function applyCropNow(){if(!workingUri||!cropRect)return;const before=snapshot();setBusy(true);try{await bakeVisuals();const source=workingUri;const result=await cropImage({sourceUri:source,cropRect,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Crop không trả file.');session?.apply({id:`crop:${Date.now()}`,type:'crop',rect:{x:cropRect.x/Math.max(1,size.width),y:cropRect.y/Math.max(1,size.height),width:cropRect.width/Math.max(1,size.width),height:cropRect.height/Math.max(1,size.height),aspect:cropAspect}});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setCropRect(null);}catch(e){Alert.alert('Crop thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
-  async function rotate(degrees:90|180|270){if(!workingUri)return;const before=snapshot();setBusy(true);try{await bakeVisuals();const result=await rotateImage({sourceUri:workingUri,degrees,expand:true,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Rotate không trả file.');session?.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});}catch(e){Alert.alert('Xoay ảnh thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
-  async function flip(axis:'horizontal'|'vertical'){if(!workingUri)return;const before=snapshot();setBusy(true);try{await bakeVisuals();const result=await ImageManipulator.manipulateAsync(workingUri,[{flip:axis==='horizontal'?ImageManipulator.FlipType.Horizontal:ImageManipulator.FlipType.Vertical}],{compress:1,format:ImageManipulator.SaveFormat.JPEG});session?.apply({id:`flip:${Date.now()}`,type:'flip',axis});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});}catch(e){Alert.alert('Lật ảnh thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
-  async function straightenNow(){if(!workingUri||Math.abs(straighten)<.05)return;const before=snapshot();setBusy(true);try{await bakeVisuals();const result=await rotateImage({sourceUri:workingUri,degrees:straighten,expand:true,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Straighten không trả file.');session?.apply({id:`straighten:${Date.now()}`,type:'straighten',degrees:straighten});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setStraighten(0);}catch(e){Alert.alert('Căn thẳng thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
+  async function applyCropNow(){if(!workingUri||!cropRect)return;const before=snapshot();setBusy(true);try{const baked=await bakeVisuals();const result=await cropImage({sourceUri:baked.uri,cropRect,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Crop không trả file.');session?.apply({id:`crop:${Date.now()}`,type:'crop',rect:{x:cropRect.x/Math.max(1,size.width),y:cropRect.y/Math.max(1,size.height),width:cropRect.width/Math.max(1,size.width),height:cropRect.height/Math.max(1,size.height),aspect:cropAspect}});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setCropRect(null);}catch(e){Alert.alert('Crop thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
+  async function rotate(degrees:90|180|270){if(!workingUri)return;const before=snapshot();setBusy(true);try{const baked=await bakeVisuals();const result=await rotateImage({sourceUri:baked.uri,degrees,expand:true,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Rotate không trả file.');session?.apply({id:`rotate:${Date.now()}`,type:'rotate',degrees});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});}catch(e){Alert.alert('Xoay ảnh thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
+  async function flip(axis:'horizontal'|'vertical'){if(!workingUri)return;const before=snapshot();setBusy(true);try{const baked=await bakeVisuals();const result=await ImageManipulator.manipulateAsync(baked.uri,[{flip:axis==='horizontal'?ImageManipulator.FlipType.Horizontal:ImageManipulator.FlipType.Vertical}],{compress:1,format:ImageManipulator.SaveFormat.JPEG});session?.apply({id:`flip:${Date.now()}`,type:'flip',axis});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});}catch(e){Alert.alert('Lật ảnh thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
+  async function straightenNow(){if(!workingUri||Math.abs(straighten)<.05)return;const before=snapshot();setBusy(true);try{const baked=await bakeVisuals();const result=await rotateImage({sourceUri:baked.uri,degrees:straighten,expand:true,returnFormat:'uri',quality:100});if(!result.uri)throw new Error('Straighten không trả file.');session?.apply({id:`straighten:${Date.now()}`,type:'straighten',degrees:straighten});remember(before);setWorkingUri(result.uri);setSize({width:result.width,height:result.height});setStraighten(0);}catch(e){Alert.alert('Căn thẳng thất bại',e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
 
   async function exportNow(){if(!asset||!session||!workingUri)return;setBusy(true);try{
     let source=workingUri;let w=size.width,h=size.height;
