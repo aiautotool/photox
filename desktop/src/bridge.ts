@@ -45,7 +45,8 @@ declare global { interface Window { photoSyncDesktop?:DesktopBridge; __PHOTOSYNC
 
 export interface WebBridgeConfig {
   baseUrl: string;
-  accessToken: string;
+  accessToken?: string;
+  refreshToken?: string;
   websocketUrl?: string;
 }
 
@@ -54,26 +55,62 @@ function normalizeBaseUrl(value:string){return value.replace(/\/$/,'')}
 export function resolveDesktopBridge(): DesktopBridge | undefined {
   if (window.photoSyncDesktop) return window.photoSyncDesktop;
   const config=window.__PHOTOSYNC_WEB_CONFIG__;
-  if (!config?.baseUrl || !config.accessToken) return undefined;
-  return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,websocketUrl:config.websocketUrl});
+  if (!config?.baseUrl || (!config.accessToken&&!config.refreshToken)) return undefined;
+  return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,websocketUrl:config.websocketUrl});
 }
 
 export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   const baseUrl=normalizeBaseUrl(config.baseUrl);
-  const headers=()=>({authorization:`Bearer ${config.accessToken}`});
-  async function json<T>(path:string,init:RequestInit={}):Promise<T>{
-    const response=await fetch(`${baseUrl}${path}`,{...init,headers:{...headers(),...(init.body?{'content-type':'application/json'}:{}),...(init.headers||{})}});
+  let accessToken=config.accessToken||'';
+  let refreshToken=config.refreshToken||'';
+  let refreshPromise:Promise<boolean>|null=null;
+
+  function persistTokens(){
+    if(typeof sessionStorage==='undefined')return;
+    if(accessToken)sessionStorage.setItem('photox.web.access',accessToken);else sessionStorage.removeItem('photox.web.access');
+    if(refreshToken)sessionStorage.setItem('photox.web.refresh',refreshToken);else sessionStorage.removeItem('photox.web.refresh');
+  }
+
+  async function refreshAccess(){
+    if(!refreshToken)return false;
+    if(refreshPromise)return refreshPromise;
+    refreshPromise=(async()=>{
+      try{
+        const response=await fetch(`${baseUrl}/api/web/v1/auth/refresh`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken})});
+        if(!response.ok)throw new Error('WEB_REFRESH_REJECTED');
+        const next=await response.json() as {accessToken?:string};
+        if(!next.accessToken)throw new Error('WEB_REFRESH_TOKEN_MISSING');
+        accessToken=next.accessToken;persistTokens();return true;
+      }catch{accessToken='';refreshToken='';persistTokens();return false;}
+      finally{refreshPromise=null;}
+    })();
+    return refreshPromise;
+  }
+
+  async function json<T>(path:string,init:RequestInit={},retry=true):Promise<T>{
+    if(!accessToken&&refreshToken)await refreshAccess();
+    const response=await fetch(`${baseUrl}${path}`,{...init,headers:{...(accessToken?{authorization:`Bearer ${accessToken}`}:{ }),...(init.body?{'content-type':'application/json'}:{}),...(init.headers||{})}});
+    if(response.status===401&&retry&&refreshToken&&await refreshAccess())return json<T>(path,init,false);
     if(!response.ok)throw new Error(`PhotoX Web API ${response.status}: ${await response.text()}`);
     if(response.status===204)return undefined as T;
     return response.json() as Promise<T>;
   }
+
   function subscribe(eventName:string,callback:(payload:any)=>void){
+    let socket:WebSocket|undefined;let stopped=false;let retryTimer:number|undefined;
     const wsUrl=config.websocketUrl||baseUrl.replace(/^http:/,'ws:').replace(/^https:/,'wss:')+'/api/web/v1/events';
-    const socket=new WebSocket(wsUrl,['photox-v1',config.accessToken]);
-    const handler=(event:MessageEvent)=>{try{const data=JSON.parse(String(event.data));if(data?.event===eventName)callback(data.payload)}catch{}};
-    socket.addEventListener('message',handler);
-    return()=>{socket.removeEventListener('message',handler);socket.close()};
+    const connect=async()=>{
+      if(stopped)return;
+      if(!accessToken&&refreshToken)await refreshAccess();
+      if(!accessToken)return;
+      socket=new WebSocket(wsUrl,['photox-v2',accessToken]);
+      socket.addEventListener('message',(event:MessageEvent)=>{try{const data=JSON.parse(String(event.data));if(data?.event===eventName)callback(data.payload)}catch{}});
+      socket.addEventListener('close',()=>{if(!stopped)retryTimer=window.setTimeout(()=>void refreshAccess().then(()=>connect()),1500);});
+    };
+    void connect();
+    return()=>{stopped=true;if(retryTimer!==undefined)window.clearTimeout(retryTimer);socket?.close();};
   }
+
   return {
     platform:'web',
     getStatus:()=>json('/api/web/v1/status'),
