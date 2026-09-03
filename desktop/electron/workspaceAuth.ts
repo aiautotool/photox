@@ -110,9 +110,14 @@ export class DesktopWorkspaceAuth {
   }
 
   refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }
-  revoke(sessionId: string) { return this.sessions.revoke(sessionId); }
+  async revoke(sessionId: string) {
+    const row = this.store.db.prepare('SELECT workspace_id FROM photox_refresh_sessions WHERE session_id=?').get(sessionId) as { workspace_id?: string | null } | undefined;
+    if (!row || row.workspace_id !== this.workspaceId) throw new Error('SESSION_NOT_FOUND');
+    return this.sessions.revoke(sessionId);
+  }
   listDevices(actor: DeviceSessionActor) { return this.deviceSessions.listDevices(actor); }
   listSessions(actor: DeviceSessionActor) { return this.deviceSessions.listSessions(actor); }
+  revokeSession(actor: DeviceSessionActor, sessionId: string) { return this.deviceSessions.revokeSession(actor, sessionId); }
   revokeDevice(actor: DeviceSessionActor, deviceId: string) { return this.deviceSessions.revokeDevice(actor, deviceId); }
 
   private async validatePrincipal(token:string,required:MediaApiScope[]){
