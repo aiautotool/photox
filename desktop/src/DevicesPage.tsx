@@ -1,0 +1,101 @@
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { DesktopBridge, WorkspaceDevice, WorkspaceSessionSummary } from './bridge';
+import './DevicesPage.css';
+
+type Props={bridge:DesktopBridge|undefined;pairingCard:ReactNode;connectionReady:boolean;lastRunAt?:string};
+
+const platformLabel:Record<WorkspaceDevice['platform'],string>={ios:'iPhone / iPad',android:'Android',windows:'Windows',macos:'macOS',linux:'Linux',web:'Web',unknown:'Không rõ'};
+const kindLabel:Record<WorkspaceDevice['kind'],string>={desktop:'Desktop',mobile:'Mobile',web:'Web',service:'Service'};
+
+function formatTime(value?:number|string){
+  if(value==null)return 'Chưa có dữ liệu';
+  const date=new Date(typeof value==='number'&&value<10_000_000_000?value*1000:value);
+  return Number.isNaN(date.getTime())?'Chưa có dữ liệu':date.toLocaleString('vi-VN');
+}
+
+function compactId(value:string){return value.length>18?`${value.slice(0,8)}…${value.slice(-6)}`:value}
+
+export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props){
+  const [devices,setDevices]=useState<WorkspaceDevice[]>([]);
+  const [sessions,setSessions]=useState<WorkspaceSessionSummary[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState('');
+  const [sessionNotice,setSessionNotice]=useState('');
+  const [busy,setBusy]=useState<string|null>(null);
+
+  async function refresh(){
+    if(!bridge){setLoading(false);setError('DesktopBridge chưa sẵn sàng.');return}
+    setLoading(true);setError('');setSessionNotice('');
+    try{
+      const nextDevices=await bridge.listWorkspaceDevices();
+      setDevices(nextDevices);
+      try{setSessions(await bridge.listWorkspaceSessions())}
+      catch(err){setSessions([]);setSessionNotice(err instanceof Error?err.message:'Bạn không có quyền xem phiên đăng nhập của workspace này.')}
+    }catch(err){
+      setError(err instanceof Error?err.message:String(err));
+    }finally{setLoading(false)}
+  }
+
+  useEffect(()=>{void refresh()},[bridge]);
+
+  const activeDevices=useMemo(()=>devices.filter(device=>!device.revokedAt),[devices]);
+  const sessionsByDevice=useMemo(()=>{
+    const map=new Map<string,WorkspaceSessionSummary[]>();
+    for(const session of sessions){
+      if(!session.deviceId)continue;
+      map.set(session.deviceId,[...(map.get(session.deviceId)||[]),session]);
+    }
+    return map;
+  },[sessions]);
+
+  async function revokeSession(session:WorkspaceSessionSummary){
+    if(!bridge||!window.confirm('Đăng xuất phiên này? Thiết bị sẽ cần đăng nhập hoặc ghép lại nếu không còn phiên hợp lệ.'))return;
+    setBusy(`session:${session.sessionId}`);setError('');
+    try{await bridge.revokeWorkspaceSession(session.sessionId);await refresh()}
+    catch(err){setError(err instanceof Error?err.message:String(err))}
+    finally{setBusy(null)}
+  }
+
+  async function revokeDevice(device:WorkspaceDevice){
+    if(!bridge||!window.confirm(`Thu hồi thiết bị “${device.name}”? Tất cả refresh session của thiết bị này sẽ bị vô hiệu hóa.`))return;
+    setBusy(`device:${device.id}`);setError('');
+    try{await bridge.revokeWorkspaceDevice(device.id);await refresh()}
+    catch(err){setError(err instanceof Error?err.message:String(err))}
+    finally{setBusy(null)}
+  }
+
+  return <section className="page-section devices-page">
+    <div className="device-overview">
+      <div>{pairingCard}</div>
+      <div className="panel details-panel">
+        <div className="panel-head"><div><h3>Workspace devices</h3><p>Dữ liệu thật từ device registry</p></div><button onClick={()=>void refresh()} disabled={loading}>{loading?'Đang tải…':'↻ Làm mới'}</button></div>
+        <div className="connection-state"><span className={connectionReady?'live-dot':'status-dot'}/><div><b>{connectionReady?'Edge đang trực tuyến':'Edge đang kết nối lại'}</b><small>{connectionReady?'Thiết bị có thể đồng bộ qua LAN hoặc Internet.':'PhotoX sẽ tự thử lại khi kết nối khả dụng.'}</small></div></div>
+        <div className="detail-row"><span>Thiết bị đang hoạt động</span><b>{activeDevices.length}</b></div>
+        <div className="detail-row"><span>Phiên đang hoạt động</span><b>{sessions.length}</b></div>
+        <div className="detail-row"><span>Lần cập nhật media</span><b>{lastRunAt?formatTime(lastRunAt):'Chưa có dữ liệu'}</b></div>
+      </div>
+    </div>
+
+    {error&&<div className="device-error">{error}</div>}
+
+    <div className="panel device-registry-panel">
+      <div className="panel-head"><div><h3>Thiết bị đã đăng ký</h3><p>{activeDevices.length} thiết bị active trong workspace hiện tại</p></div></div>
+      {loading&&devices.length===0?<div className="device-empty">Đang đọc device registry…</div>:activeDevices.length===0?<div className="device-empty">Chưa có thiết bị active. Quét QR ở phía trên để ghép điện thoại.</div>:<div className="device-list">{activeDevices.map(device=>{
+        const linkedSessions=sessionsByDevice.get(device.id)||[];
+        return <article className="device-card" key={device.id}>
+          <div className="device-icon">{device.kind==='mobile'?'▯':device.kind==='web'?'◎':'▣'}</div>
+          <div className="device-main">
+            <div className="device-title"><div><b>{device.name}</b><small>{kindLabel[device.kind]} · {platformLabel[device.platform]}</small></div><span className="device-active">Active</span></div>
+            <div className="device-meta"><span><b>User</b>{compactId(device.userId)}</span><span><b>Device ID</b>{compactId(device.id)}</span><span><b>Lần thấy gần nhất</b>{formatTime(device.lastSeenAt||device.createdAt)}</span><span><b>Phiên</b>{linkedSessions.length}</span></div>
+          </div>
+          <button className="danger-action" disabled={busy===`device:${device.id}`} onClick={()=>void revokeDevice(device)}>{busy===`device:${device.id}`?'Đang thu hồi…':'Thu hồi thiết bị'}</button>
+        </article>})}</div>}
+    </div>
+
+    <div className="panel session-panel">
+      <div className="panel-head"><div><h3>Phiên đăng nhập</h3><p>Chỉ hiển thị metadata an toàn, không hiển thị refresh token hoặc token hash.</p></div></div>
+      {sessionNotice&&<div className="session-notice">Không thể xem danh sách phiên với quyền hiện tại. {sessionNotice}</div>}
+      {!sessionNotice&&sessions.length===0&&!loading?<div className="device-empty">Không có phiên active.</div>:!sessionNotice&&<div className="session-table"><div className="session-row session-head"><span>Chủ thể</span><span>Thiết bị</span><span>Scopes</span><span>Hết hạn / dùng gần nhất</span><span/></div>{sessions.map(session=><div className="session-row" key={session.sessionId}><div><b>{compactId(session.subject)}</b><small>{compactId(session.sessionId)}</small></div><div><b>{session.deviceId?devices.find(d=>d.id===session.deviceId)?.name||compactId(session.deviceId):'Không gắn thiết bị'}</b></div><div><span className="scope-list">{session.scopes.length?session.scopes.join(', '):'—'}</span></div><div><b>{formatTime(session.expiresAt)}</b><small>Dùng: {formatTime(session.lastUsedAt||session.createdAt)}</small></div><div><button className="session-revoke" disabled={busy===`session:${session.sessionId}`} onClick={()=>void revokeSession(session)}>{busy===`session:${session.sessionId}`?'…':'Đăng xuất'}</button></div></div>)}</div>}
+    </div>
+  </section>;
+}
