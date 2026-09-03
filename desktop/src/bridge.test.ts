@@ -12,7 +12,7 @@ test('ticket-only Web bridge bootstraps the session before calling protected API
     calls.push({ url, method, authorization: headers.get('authorization') || undefined });
     if (url.endsWith('/api/web/v1/auth/ticket')) {
       assert.equal(method, 'POST');
-      assert.equal(JSON.parse(String(init?.body)), 'ticket-1');
+      assert.deepEqual(JSON.parse(String(init?.body)), { ticket: 'ticket-1' });
       return new Response(JSON.stringify({ accessToken: 'access-1', csrfToken: 'csrf-1' }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
