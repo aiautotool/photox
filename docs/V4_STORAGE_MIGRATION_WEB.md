@@ -114,11 +114,12 @@ Remaining migration hardening:
 - [x] One-time Desktop-issued Web login ticket.
 - [x] Durable audit events for Web administrative mutations.
 - [x] Reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx updated for the current session/cookie/CSRF model.
-- [ ] Browser end-to-end smoke test for ticket login, refresh cookie, CSRF, WebSocket reconnect and Range streaming.
+- [x] Node transport integration coverage for one-time ticket replay protection, HttpOnly/CSRF cookies, mutation CSRF, refresh, authenticated WebSocket delivery and workspace-bound signed HTTP Range `206` streaming.
+- [ ] Browser-renderer end-to-end smoke test for automatic access refresh, WebSocket reconnect and UI/media behavior.
 
 ## Next priorities
 
-1. Add browser E2E parity coverage for ticket login, refresh cookie, CSRF, WebSocket reconnect and signed Range streaming.
+1. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
 2. Stream large Google Photos downloads and persist Google Drive mid-file resumable checkpoints.
 3. Add transfer speed/ETA and live OAuth migration verification harness.
 4. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
@@ -143,5 +144,23 @@ Still pending:
 
 - browser-level E2E coverage;
 - large-file streaming and process-restart mid-file Drive resume;
+- live Google OAuth migration verification;
+- signed iOS/Android release verification.
+
+## Run 12 — stable Web edge transport integration coverage
+
+Completed:
+
+- Added a loopback integration test that boots the real `PhotoXWebEdgeServer` on an ephemeral free port without Electron or a browser binary.
+- The test redeems a Desktop-issued one-time ticket and proves ticket replay is rejected.
+- It verifies refresh is held in an HttpOnly `SameSite=Strict` cookie, CSRF state is emitted separately, and mutation without CSRF is rejected before backing logic runs.
+- It exercises a successful authenticated mutation with durable-audit callback, refresh-cookie flow, authenticated WebSocket event delivery, signed media URL generation and bearerless HTTP Range `206` streaming scoped to the authenticated workspace.
+- Updated root test ordering to build SDK packages before Desktop transport tests, because `webEdgeServer.ts` imports the built `@photox/media-api` package. Standalone SDK tests remain available through `npm run test:sdk`.
+- Repository CI passed `npm test`, full TypeScript typecheck and full production build with the new transport test enabled.
+
+Still pending:
+
+- browser-renderer E2E for automatic 401 refresh/retry, WebSocket reconnect and React UI behavior;
+- large Google Photos source streaming and durable Google Drive mid-file resumable checkpoint;
 - live Google OAuth migration verification;
 - signed iOS/Android release verification.
