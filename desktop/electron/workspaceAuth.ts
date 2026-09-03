@@ -8,6 +8,7 @@ import { JoseAccessTokenService } from '@photox/auth-jose';
 import { SqliteRefreshSessionStore, type SqlitePhotoXStore, type SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import type { WorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DeviceSessionManagementService, type DeviceSessionActor } from './deviceSessionManagement.js';
+import { WorkspaceOverviewService } from './workspaceOverview.js';
 
 export type PairExchangeInput = {
   workspaceId: string;
@@ -26,6 +27,7 @@ export class DesktopWorkspaceAuth {
   private readonly sessions: AuthSessionService;
   private readonly authorization: AuthorizationService;
   private readonly deviceSessions: DeviceSessionManagementService;
+  private readonly overview: WorkspaceOverviewService;
 
   private constructor(
     secret: Uint8Array,
@@ -55,6 +57,7 @@ export class DesktopWorkspaceAuth {
       },
     });
     this.deviceSessions = new DeviceSessionManagementService(store, workspaces);
+    this.overview = new WorkspaceOverviewService(workspaces);
   }
 
   static async create(input: {
@@ -87,6 +90,7 @@ export class DesktopWorkspaceAuth {
   private async registerElectronIpc(){
     if(workspaceAuthIpcRegistered)return;
     const {ipcMain}=await import('electron');
+    ipcMain.handle('photosync:workspace-overview',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.getWorkspaceOverview(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-devices',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listDevices(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-sessions',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listSessions(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-session-revoke',(_event,sessionId:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.revokeSession(auth.trustedDesktopActor(),String(sessionId||''));});
@@ -138,6 +142,7 @@ export class DesktopWorkspaceAuth {
     if (!row || row.workspace_id !== this.workspaceId) throw new Error('SESSION_NOT_FOUND');
     return this.sessions.revoke(sessionId);
   }
+  getWorkspaceOverview(actor: DeviceSessionActor) { return this.overview.snapshot(actor); }
   listDevices(actor: DeviceSessionActor) { return this.deviceSessions.listDevices(actor); }
   listSessions(actor: DeviceSessionActor) { return this.deviceSessions.listSessions(actor); }
   revokeSession(actor: DeviceSessionActor, sessionId: string) { return this.deviceSessions.revokeSession(actor, sessionId); }
