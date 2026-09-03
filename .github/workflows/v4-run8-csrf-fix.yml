@@ -1,0 +1,41 @@
+name: V4 Run8 CSRF Fix
+on:
+  push:
+    branches: [v4]
+    paths:
+      - .github/workflows/v4-run8-csrf-fix.yml
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fix CSRF cookie path
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('desktop/electron/webEdgeServer.ts')
+          s=p.read_text()
+          s=s.replace("`${WEB_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/api/web/v1; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`","`${WEB_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`")
+          s=s.replace("`${WEB_CSRF_COOKIE}=; Path=/api/web/v1; SameSite=Strict; Max-Age=0${secure}`","`${WEB_CSRF_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0${secure}`")
+          p.write_text(s)
+          PY
+      - run: npm install
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Commit verified fix
+        run: |
+          rm .github/workflows/v4-run8-csrf-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix web csrf cookie reload path"
+          git push origin HEAD:v4
