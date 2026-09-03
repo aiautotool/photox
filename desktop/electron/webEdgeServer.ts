@@ -174,12 +174,12 @@ export class PhotoXWebEdgeServer {
 
   private sessionCookies(req:IncomingMessage,refreshToken:string,csrfToken:string){
     const secure=this.secureCookie(req)?'; Secure':'';
-    return [`${WEB_REFRESH_COOKIE}=${encodeURIComponent(refreshToken)}; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`,`${WEB_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/api/web/v1; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`];
+    return [`${WEB_REFRESH_COOKIE}=${encodeURIComponent(refreshToken)}; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`,`${WEB_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`];
   }
 
   private clearSessionCookies(req:IncomingMessage){
     const secure=this.secureCookie(req)?'; Secure':'';
-    return [`${WEB_REFRESH_COOKIE}=; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,`${WEB_CSRF_COOKIE}=; Path=/api/web/v1; SameSite=Strict; Max-Age=0${secure}`];
+    return [`${WEB_REFRESH_COOKIE}=; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,`${WEB_CSRF_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0${secure}`];
   }
 
   private csrfValid(req:IncomingMessage){
