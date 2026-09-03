@@ -38,8 +38,8 @@ V4 must extend these instead of replacing them.
 ### P0 gaps
 
 1. **Tenant boundary is not yet end-to-end**
-   - workspace/member/device/usage persistence exists, but legacy media/provider indexes are not consistently workspace-scoped yet.
-   - media-cloud catalog, Telegram provider contracts and durable jobs are now workspace-scoped with cross-tenant tests; video/derived-media persistence is the next remaining reusable index gap.
+   - workspace/member/device/usage persistence exists, and reusable media-cloud, Telegram, durable jobs and video/derived-media indexes are now workspace-scoped with cross-tenant tests.
+   - remaining provider connection stores and future reusable indexes must preserve the same workspace-bound contract.
    - Web edge still uses an edge bootstrap identity instead of the final SaaS access/refresh session issuer.
 
 2. **Multi-user lifecycle is incomplete**
@@ -67,7 +67,7 @@ V4 must extend these instead of replacing them.
 
 - no member/device management UX.
 - no workspace switcher.
-- no provider ownership/credential isolation per workspace.
+- no provider ownership/credential isolation per workspace for every provider store.
 - no public share token service with expiry/revocation.
 - no centralized usage dashboard.
 - audit persistence exists but Web/Desktop mutations are not fully emitting audit events yet.
@@ -155,8 +155,9 @@ Refresh-token persistence preserves workspace identity. Existing SQLite database
 - audit events
 - workspace-aware refresh sessions
 - workspace-scoped durable background jobs
+- workspace-scoped media-cloud and video/derived-media metadata
 
-Tenant-scoped repository tests use two workspaces with overlapping device/job/asset IDs and prove queries do not cross the workspace boundary. Monthly ingress migration is backward-safe: old rows with a NULL period keep their existing counter when first assigned to the current period; the ingress counter resets only when an already-established UTC month changes, while managed storage remains unchanged. Durable job migration is also backward-safe: pre-workspace rows are adopted only by the designated legacy workspace and the SQLite primary key becomes `(workspace_id, id)`.
+Tenant-scoped repository tests use two workspaces with overlapping device/job/asset IDs and prove queries do not cross the workspace boundary. Monthly ingress migration is backward-safe: old rows with a NULL period keep their existing counter when first assigned to the current period; the ingress counter resets only when an already-established UTC month changes, while managed storage remains unchanged. Durable job and video-media migrations are also backward-safe: pre-workspace rows are adopted only by the designated legacy workspace and their SQLite identities become composite workspace keys.
 
 No billing price is hard-coded into this domain. The default plan catalog is technical migration configuration and can be replaced by an authoritative catalog later.
 
@@ -202,8 +203,8 @@ All feature UI must read the entitlement state. A disabled feature must be hidde
 - legacy personal workspace bootstrap is implemented in Desktop startup, including desktop-device registration and existing-usage reconstruction.
 - media ingest enforces workspace plan byte quotas before consuming the request body and rolls reservations back on failed ingest.
 - monthly ingress is tracked by an authoritative UTC calendar-month period and rolls over without changing managed storage.
-- media-cloud catalog, Telegram provider contracts and durable background jobs are workspace-scoped with backward-safe migration/tests.
-- next: scope video/derived-media metadata and remaining provider connections by workspace.
+- media-cloud catalog, Telegram provider contracts, durable background jobs and video/derived-media metadata are workspace-scoped with backward-safe migration/tests.
+- next: audit remaining provider connection stores and move into authoritative SaaS APIs/UX.
 - repository interfaces remain platform-neutral so desktop edge and future cloud control plane can share contracts.
 
 ### Phase C — workspace-aware pairing
@@ -278,7 +279,8 @@ Monthly ingress now has a UTC `YYYY-MM` accounting period. A period transition r
 - [x] Exchange v2 pairing challenge for workspace-scoped JOSE access/refresh session, register the mobile device, refresh before expiry, enforce active device/membership state and revoke sessions on forget.
 - [x] Workspace-scope reusable media-cloud catalog and Telegram provider contracts.
 - [x] Workspace-scope durable background jobs in memory/SQLite with composite `(workspace_id, id)` identity and legacy adoption restricted to the designated legacy workspace.
-- [ ] Complete remaining media/provider index scoping, especially video/derived-media metadata and any future provider connection stores.
+- [x] Workspace-scope video/derived-media metadata in memory/SQLite with composite `(workspace_id, asset_id)` identity, including thumbnail/preview isolation and legacy adoption restricted to the designated legacy workspace.
+- [ ] Audit remaining provider connection/index stores for global IDs and keep all new stores workspace-scoped.
 - [ ] Replace Web edge bootstrap identity with authoritative SaaS access/refresh sessions.
 
 ### P1
@@ -316,10 +318,10 @@ Monthly ingress now has a UTC `YYYY-MM` accounting period. A period transition r
 
 ## 10. Next Batch
 
-1. Workspace-scope `@photox/video-media` and `SqliteVideoMediaRepository`, including backward-safe legacy adoption, composite workspace/asset identity, thumbnail/preview metadata isolation and cross-tenant reopen tests.
-2. Audit any remaining reusable provider/derived-media indexes for global IDs and scope them before adding more SaaS UX.
-3. Add device/session management APIs and shared Mobile/Desktop/Web UX for listing devices, revoking a device and invalidating all associated refresh sessions.
-4. Add workspace/plan/usage APIs and surface authoritative quota state in shared Desktop/Web UI and Mobile.
+1. Add device/session management APIs: list active workspace devices/sessions, revoke a device and invalidate all associated refresh sessions, with owner/admin role enforcement and audit events.
+2. Add workspace/plan/usage APIs backed by authoritative workspace persistence/entitlements and surface them in the shared Desktop/Web renderer without mock controls.
+3. Add Mobile workspace/account + quota/device UX using the same authoritative APIs/session model.
+4. Audit remaining provider connection/index stores for global IDs and scope them before adding provider-management SaaS UX.
 5. Extend durable audit emission to all administrative mutations and expose an operations/activity view.
 6. Continue live Google Photos OAuth migration verification with real accounts; keep Picker-only source and append-only/Drive destinations.
 
@@ -335,9 +337,23 @@ Completed:
 - Updated the SDK runtime persistence test to use the workspace-aware job contract.
 - CI initially failed twice: first on unsafe `unknown` values passed to `node:sqlite`, then on an old SDK integration call-site that constructed an unscoped job repository. Both failures were fixed and the entire validation chain rerun.
 
+## Run 18 — video/derived-media tenant isolation
+
+Completed:
+
+- Added required `workspaceId` to `VideoMediaRecord` and changed `VideoMediaRepository` get/remove operations to require workspace identity.
+- Bound `VideoMediaService` to one workspace so probe/thumbnail/preview/transcode results cannot be persisted under another tenant.
+- Updated `MemoryVideoMediaRepository` to use workspace + asset composite identity.
+- Migrated `SqliteVideoMediaRepository` to `(workspace_id, asset_id)` primary identity with workspace-filtered reads/deletes and fail-closed foreign-workspace writes.
+- Added backward-safe migration for old `photox_video_media` rows. Existing records without workspace identity are adopted only into the designated legacy workspace, while any already embedded workspace identity is preserved.
+- Added persistence tests proving identical asset IDs can carry different thumbnail/preview metadata in two workspaces, survive SQLite close/reopen independently, delete independently, reject foreign writes, and prevent a non-legacy workspace from claiming old unscoped rows.
+- Repository CI passed tests, full TypeScript typecheck and full production build with the new contract and migration enabled.
+
 Still pending:
 
-- workspace-scoping for video/derived-media persistence;
+- authoritative device/session management API + UX;
+- workspace/plan/usage API + shared Desktop/Web/Mobile UX;
+- final audit of remaining provider connection/index stores;
 - real-browser React UI/media smoke coverage;
 - live Google OAuth migration verification with real accounts/consent;
 - signed iOS/Android release verification;
