@@ -31,7 +31,15 @@ export class DeviceSessionManagementService {
   constructor(
     private readonly store: SqlitePhotoXStore,
     private readonly workspaces: SqliteWorkspaceRepository,
-  ) {}
+  ) {
+    this.ensureSessionWorkspaceColumns();
+  }
+
+  private ensureSessionWorkspaceColumns() {
+    const columns = new Set((this.store.db.prepare('PRAGMA table_info(photox_refresh_sessions)').all() as Array<{ name: string }>).map(row => row.name));
+    if (!columns.has('workspace_id')) this.store.db.exec('ALTER TABLE photox_refresh_sessions ADD COLUMN workspace_id TEXT');
+    if (!columns.has('workspace_role')) this.store.db.exec('ALTER TABLE photox_refresh_sessions ADD COLUMN workspace_role TEXT');
+  }
 
   private requireActiveMembership(actor: DeviceSessionActor) {
     const membership = this.workspaces.getMembership(actor.workspaceId, actor.subject);
