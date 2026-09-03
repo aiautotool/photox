@@ -52,11 +52,14 @@ The Web edge implementation now provides:
 - JOSE access tokens and durable refresh sessions issued by the same workspace session service used by Mobile; the old static `PHOTOX_WEB_ACCESS_TOKEN`, env-bound role and env-bound Web authorization path are removed;
 - workspace ID, role, device ID and session ID taken from a verified access-token principal rather than client configuration;
 - membership and device revocation checks on every authenticated Web/API/WebSocket request;
-- one-time browser bootstrap endpoint that accepts the transitional refresh credential, validates it, and immediately moves the refresh credential into an HttpOnly `SameSite=Strict` cookie;
+- one-time Web login ticket issued only by trusted Desktop, held in process memory, expiring after 2 minutes, and consumable exactly once;
+- browser bootstrap reads only `#ticket=...`, strips the fragment immediately, redeems the ticket, and receives only short-lived access + CSRF state;
+- the reusable refresh token is written directly to an HttpOnly `SameSite=Strict` cookie by the edge server and is not returned to browser JavaScript in the normal login flow;
+- legacy `/api/web/v1/auth/bootstrap` refresh-token bootstrap remains temporarily only for compatibility with older V4 deployments;
 - refresh endpoint (`POST /api/web/v1/auth/refresh`) that reads only the HttpOnly cookie, session introspection (`GET /api/web/v1/session`) and revoke endpoint (`POST /api/web/v1/auth/revoke`);
 - a readable CSRF cookie plus required `x-csrf-token` header for refresh and all authenticated mutation routes; the CSRF cookie is scoped to `/` so browser reloads keep mutation/refresh capability;
 - refresh cookies gain `Secure` when the configured public URL or trusted reverse-proxy scheme is HTTPS;
-- browser JavaScript no longer persists the refresh token in `sessionStorage`; only the short-lived access token is persisted for reload convenience;
+- browser JavaScript persists only the short-lived access token for reload convenience;
 - browser HTTP adapter automatically refreshes an expired access token once and retries the failed API call;
 - browser WebSocket reconnect uses the refreshed access token and the server authenticates the socket before upgrade;
 - owner/admin/member/viewer route enforcement based on the verified workspace role;
@@ -68,8 +71,6 @@ The Web edge implementation now provides:
 - media streaming resolves the media row inside the verified/signed workspace, preventing a signed URL for workspace A from resolving workspace B's item with the same key;
 - Google Photos OAuth account credential files are namespaced by workspace and legacy unscoped credential files are migrated into the legacy workspace; accounts belonging to another workspace are ignored by the service;
 - migration job lookup continues to require the job's stored `workspaceId` to match the service workspace.
-
-The remaining Web credential compromise is the transitional first handoff: a refresh token can still appear briefly in the URL fragment so JavaScript can call the bootstrap endpoint. It is stripped from browser history immediately and is not retained in Web storage, but the production target is a one-time pairing/login ticket whose server-side exchange issues the HttpOnly cookie without exposing a reusable refresh credential to browser JavaScript.
 
 ## Implementation batches
 
@@ -115,30 +116,30 @@ Remaining migration hardening:
 - [x] Add server-side workspace-role enforcement and authenticated WebSocket upgrade.
 - [x] Add workspace-bound signed browser media URLs and preserve Range streaming.
 - [x] Add basic request rate limiting and response security headers.
-- [ ] Replace the transitional URL-fragment refresh credential with a one-time Web pairing/login ticket that directly establishes the cookie session.
+- [x] Replace the transitional URL-fragment refresh credential with a one-time Web pairing/login ticket that directly establishes the cookie session.
 - [ ] Persist audit events for Web administrative actions with the authenticated actor/session.
 - [ ] Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
 - [ ] Add browser end-to-end smoke test for parity-critical routes, cookie refresh, CSRF, WebSocket and Range streaming.
 
 ## Next priorities
 
-1. First-class Web pairing/login one-time ticket so no reusable refresh credential is exposed to browser JavaScript.
-2. Add cross-tenant tests for Google Photos credential/account visibility and migration job operations.
-3. Persist Web administrative audit events using authenticated user/device/session identity.
-4. Browser E2E parity test and reverse-proxy deployment docs.
-5. Large-file streaming + mid-file Google Drive migration resume.
-6. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
+1. Add explicit cross-tenant tests for Google Photos credential/account visibility and migration job operations.
+2. Persist Web administrative audit events using authenticated user/device/session identity.
+3. Browser E2E parity test and reverse-proxy deployment docs.
+4. Large-file streaming + mid-file Google Drive migration resume.
+5. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
 
 ## Validation rule
 
 Every batch must pass repository tests, TypeScript typecheck and production build before being marked complete. Live Google OAuth transfer remains explicitly NOT VERIFIED in CI because user OAuth credentials/consent are not available there.
 
-
 ## Web one-time login ticket hardening
 
-- Desktop can issue a cryptographically random Web login ticket with a 2-minute TTL.
+- Desktop issues a cryptographically random Web login ticket with a 2-minute TTL.
 - The ticket is single-use and held only in process memory; a successful or expired consume removes it.
 - Browser bootstrap accepts `#ticket=...`, removes the fragment immediately, redeems it at `/api/web/v1/auth/ticket`, and receives only the short-lived access token + CSRF token.
 - The reusable refresh token is written directly to the existing HttpOnly/SameSite cookie by the edge server and is never returned to browser JavaScript in the normal Web login flow.
-- Desktop Settings exposes a real `Create & copy` Web link action; the Web transport itself cannot mint login links.
-- The legacy `/auth/bootstrap` refresh-token endpoint remains temporarily for compatibility with older V4 deployments, but generated Web links no longer use it.
+- Desktop Settings exposes a real `Tạo & sao chép` Web link action; the Web transport itself cannot mint login links.
+- `OneTimeTicketStore` has automated tests proving one-time consumption and expiry behavior.
+
+Verification marker: one-time ticket implementation passed its integration workflow with `npm install`, `npm test`, full repository typecheck and full production build before commit.
