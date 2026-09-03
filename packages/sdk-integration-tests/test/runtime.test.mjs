@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { JoseAccessTokenService } from '@photox/auth-jose';
+import { MediaCloudCatalog, MediaCloudStatsService, MemoryMediaCloudRepository } from '@photox/media-cloud';
 import { LocalFileDeliveryAdapter } from '@photox/media-delivery-node';
 import { SqlitePhotoXStore, SqliteJobRepository } from '@photox/persistence-sqlite';
 
@@ -59,4 +60,44 @@ test('Local delivery adapter returns correct 206 byte range', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('Media cloud catalog isolates identical asset IDs, replicas, removal and stats by workspace', async () => {
+  const repository = new MemoryMediaCloudRepository();
+  const workspaceA = new MediaCloudCatalog(repository, 'workspace-a');
+  const workspaceB = new MediaCloudCatalog(repository, 'workspace-b');
+
+  await workspaceA.registerAsset({ assetId: 'same-asset', filename: 'a.jpg', sizeBytes: 100 });
+  await workspaceB.registerAsset({ assetId: 'same-asset', filename: 'b.jpg', sizeBytes: 200 });
+  await workspaceA.attachReplica('same-asset', {
+    replicaId: 'replica-a', assetId: 'same-asset', providerId: 'google-drive', accountId: 'account-a', state: 'VERIFIED', sizeBytes: 100,
+  });
+  await workspaceB.attachReplica('same-asset', {
+    replicaId: 'replica-b', assetId: 'same-asset', providerId: 'telegram', accountId: 'account-b', state: 'VERIFIED', sizeBytes: 200,
+  });
+
+  const a = await workspaceA.get('same-asset');
+  const b = await workspaceB.get('same-asset');
+  assert.equal(a?.workspaceId, 'workspace-a');
+  assert.equal(a?.filename, 'a.jpg');
+  assert.deepEqual(a?.locations.map((row) => row.providerId), ['google-drive']);
+  assert.equal(b?.workspaceId, 'workspace-b');
+  assert.equal(b?.filename, 'b.jpg');
+  assert.deepEqual(b?.locations.map((row) => row.providerId), ['telegram']);
+
+  assert.deepEqual((await workspaceA.list()).map((row) => row.filename), ['a.jpg']);
+  assert.deepEqual((await workspaceB.list()).map((row) => row.filename), ['b.jpg']);
+
+  const statsA = await new MediaCloudStatsService(repository, workspaceA, 'workspace-a').snapshot();
+  const statsB = await new MediaCloudStatsService(repository, workspaceB, 'workspace-b').snapshot();
+  assert.equal(statsA.mediaCount, 1);
+  assert.equal(statsA.totalLogicalBytes, 100);
+  assert.deepEqual(statsA.providers.map((row) => row.providerId), ['google-drive']);
+  assert.equal(statsB.mediaCount, 1);
+  assert.equal(statsB.totalLogicalBytes, 200);
+  assert.deepEqual(statsB.providers.map((row) => row.providerId), ['telegram']);
+
+  await workspaceA.remove('same-asset');
+  assert.equal(await workspaceA.get('same-asset'), null);
+  assert.equal((await workspaceB.get('same-asset'))?.filename, 'b.jpg');
 });
