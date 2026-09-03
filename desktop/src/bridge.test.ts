@@ -96,6 +96,39 @@ test('Web bridge refreshes once after a 401 and retries with the new access toke
   }
 });
 
+test('Web bridge maps workspace device/session APIs and sends CSRF on revokes', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  const calls: Array<{url:string;method:string;csrf:string|null}> = [];
+  Object.defineProperty(globalThis,'document',{configurable:true,writable:true,value:{cookie:'photox_csrf=csrf-admin'}});
+  globalThis.fetch=(async(input:string|URL|Request,init?:RequestInit)=>{
+    const url=String(input);const method=String(init?.method||'GET').toUpperCase();const headers=new Headers(init?.headers);
+    calls.push({url,method,csrf:headers.get('x-csrf-token')});
+    assert.equal(headers.get('authorization'),'Bearer admin-access');
+    if(url.endsWith('/api/web/v1/devices'))return new Response(JSON.stringify([{id:'device-a',workspaceId:'workspace-a',userId:'user-a',name:'Phone',platform:'ios',kind:'mobile',createdAt:1}]),{status:200,headers:{'content-type':'application/json'}});
+    if(url.endsWith('/api/web/v1/sessions'))return new Response(JSON.stringify([{sessionId:'session-a',subject:'user-a',scopes:['media:read'],expiresAt:2,createdAt:1}]),{status:200,headers:{'content-type':'application/json'}});
+    if(url.endsWith('/api/web/v1/sessions/session-a'))return new Response(JSON.stringify({sessionId:'session-a',revoked:true}),{status:200,headers:{'content-type':'application/json'}});
+    if(url.endsWith('/api/web/v1/devices/device-a'))return new Response(JSON.stringify({deviceId:'device-a',sessionsRevoked:1,activeDevices:0}),{status:200,headers:{'content-type':'application/json'}});
+    throw new Error(`unexpected fetch ${method} ${url}`);
+  }) as typeof fetch;
+  try{
+    const bridge=createHttpDesktopBridge({baseUrl:'https://photox.example',accessToken:'admin-access'});
+    assert.deepEqual((await bridge.listWorkspaceDevices()).map(item=>item.id),['device-a']);
+    assert.deepEqual((await bridge.listWorkspaceSessions()).map(item=>item.sessionId),['session-a']);
+    assert.deepEqual(await bridge.revokeWorkspaceSession('session-a'),{sessionId:'session-a',revoked:true});
+    assert.deepEqual(await bridge.revokeWorkspaceDevice('device-a'),{deviceId:'device-a',sessionsRevoked:1,activeDevices:0});
+    assert.deepEqual(calls.map(call=>[call.method,call.url,call.csrf]),[
+      ['GET','https://photox.example/api/web/v1/devices',null],
+      ['GET','https://photox.example/api/web/v1/sessions',null],
+      ['DELETE','https://photox.example/api/web/v1/sessions/session-a','csrf-admin'],
+      ['DELETE','https://photox.example/api/web/v1/devices/device-a','csrf-admin'],
+    ]);
+  }finally{
+    globalThis.fetch=originalFetch;
+    Object.defineProperty(globalThis,'document',{configurable:true,writable:true,value:originalDocument});
+  }
+});
+
 test('Web bridge refreshes and reconnects WebSocket with the rotated access token', async () => {
   const originalFetch = globalThis.fetch;
   const originalWebSocket = globalThis.WebSocket;
