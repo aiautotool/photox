@@ -52,19 +52,24 @@ The Web edge implementation now provides:
 - JOSE access tokens and durable refresh sessions issued by the same workspace session service used by Mobile; the old static `PHOTOX_WEB_ACCESS_TOKEN`, env-bound role and env-bound Web authorization path are removed;
 - workspace ID, role, device ID and session ID taken from a verified access-token principal rather than client configuration;
 - membership and device revocation checks on every authenticated Web/API/WebSocket request;
-- refresh endpoint (`POST /api/web/v1/auth/refresh`), session introspection (`GET /api/web/v1/session`) and revoke endpoint (`POST /api/web/v1/auth/revoke`);
+- one-time browser bootstrap endpoint that accepts the transitional refresh credential, validates it, and immediately moves the refresh credential into an HttpOnly `SameSite=Strict` cookie;
+- refresh endpoint (`POST /api/web/v1/auth/refresh`) that reads only the HttpOnly cookie, session introspection (`GET /api/web/v1/session`) and revoke endpoint (`POST /api/web/v1/auth/revoke`);
+- a readable CSRF cookie plus required `x-csrf-token` header for refresh and all authenticated mutation routes; the CSRF cookie is scoped to `/` so browser reloads keep mutation/refresh capability;
+- refresh cookies gain `Secure` when the configured public URL or trusted reverse-proxy scheme is HTTPS;
+- browser JavaScript no longer persists the refresh token in `sessionStorage`; only the short-lived access token is persisted for reload convenience;
 - browser HTTP adapter automatically refreshes an expired access token once and retries the failed API call;
 - browser WebSocket reconnect uses the refreshed access token and the server authenticates the socket before upgrade;
 - owner/admin/member/viewer route enforcement based on the verified workspace role;
 - status, library, backup health, cloud upload, Drive account, Google Photos account and migration APIs;
-- per-IP request rate limiting and explicit CORS origin checks;
+- per-IP request rate limiting and explicit credential-aware CORS origin checks;
 - CSP, frame denial, no-sniff and no-referrer response hardening;
 - original/playback/thumbnail routes with existing byte Range streaming;
 - short-lived HMAC-signed media URLs bound to `workspaceId + variant + media key + expiry`; the HMAC signing key is process-random and separate from the user's bearer token;
 - media streaming resolves the media row inside the verified/signed workspace, preventing a signed URL for workspace A from resolving workspace B's item with the same key;
-- access and refresh credentials may be provisioned through the URL fragment for the current transitional Web handoff and are immediately copied to `sessionStorage` before the fragment is stripped from browser history.
+- Google Photos OAuth account credential files are namespaced by workspace and legacy unscoped credential files are migrated into the legacy workspace; accounts belonging to another workspace are ignored by the service;
+- migration job lookup continues to require the job's stored `workspaceId` to match the service workspace.
 
-The edge no longer treats a long-lived static string as administrator identity. Remaining production hardening is to replace the transitional fragment/sessionStorage credential handoff with a first-class browser pairing/login UX and preferably an HttpOnly refresh-cookie flow, then move issuance to the central SaaS control plane when that service is deployed.
+The remaining Web credential compromise is the transitional first handoff: a refresh token can still appear briefly in the URL fragment so JavaScript can call the bootstrap endpoint. It is stripped from browser history immediately and is not retained in Web storage, but the production target is a one-time pairing/login ticket whose server-side exchange issues the HttpOnly cookie without exposing a reusable refresh credential to browser JavaScript.
 
 ## Implementation batches
 
@@ -85,9 +90,12 @@ The edge no longer treats a long-lived static string as administrator identity. 
 - [x] Google Photos -> Google Drive resumable upload path.
 - [x] Verify Google Drive destination ID and byte size.
 - [x] Pause/resume/cancel/retry without repeating completed items.
+- [x] Namespace Google Photos OAuth account credential persistence by workspace and migrate legacy unscoped credentials into the legacy workspace.
+- [x] Reject migration job access when stored `workspaceId` does not match the active migration service workspace.
 
 Remaining migration hardening:
 
+- [ ] Add explicit cross-tenant automated tests around Google Photos credential migration/account visibility and migration job operations.
 - [ ] Stream/chunk very large Google Photos source files instead of buffering the entire item in memory.
 - [ ] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
 - [ ] Add transfer speed and ETA metrics.
@@ -102,19 +110,20 @@ Remaining migration hardening:
 - [x] Add configurable bind host/port/public base URL/CORS origins.
 - [x] Replace static Web admin token/role/workspace config with verified JOSE workspace sessions.
 - [x] Add automatic browser access-token refresh and session revoke API.
+- [x] Move browser refresh-session persistence from JavaScript storage to HttpOnly/SameSite cookie after bootstrap.
+- [x] Add CSRF double-submit protection for refresh and authenticated mutation routes.
 - [x] Add server-side workspace-role enforcement and authenticated WebSocket upgrade.
 - [x] Add workspace-bound signed browser media URLs and preserve Range streaming.
 - [x] Add basic request rate limiting and response security headers.
-- [ ] Add first-class browser pairing/login UX and HttpOnly refresh-cookie handoff.
+- [ ] Replace the transitional URL-fragment refresh credential with a one-time Web pairing/login ticket that directly establishes the cookie session.
 - [ ] Persist audit events for Web administrative actions with the authenticated actor/session.
-- [ ] Namespace Google Photos OAuth account persistence and every migration operation by workspace principal rather than the current single-edge workspace service instance.
 - [ ] Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
-- [ ] Add browser end-to-end smoke test for parity-critical routes.
+- [ ] Add browser end-to-end smoke test for parity-critical routes, cookie refresh, CSRF, WebSocket and Range streaming.
 
 ## Next priorities
 
-1. First-class Web pairing/login handoff and HttpOnly refresh cookie; remove fragment/sessionStorage refresh-token dependency.
-2. Scope Google Photos OAuth accounts + migration job service by authenticated workspace and add cross-tenant tests.
+1. First-class Web pairing/login one-time ticket so no reusable refresh credential is exposed to browser JavaScript.
+2. Add cross-tenant tests for Google Photos credential/account visibility and migration job operations.
 3. Persist Web administrative audit events using authenticated user/device/session identity.
 4. Browser E2E parity test and reverse-proxy deployment docs.
 5. Large-file streaming + mid-file Google Drive migration resume.
