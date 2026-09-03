@@ -90,7 +90,7 @@ export class DesktopWorkspaceAuth {
       userId: this.ownerUserId,
       name: input.deviceName?.trim() || input.deviceId,
       platform: input.platform ?? 'unknown',
-      kind: 'mobile',
+      kind: input.platform === 'web' ? 'web' : 'mobile',
       createdAt: existing?.createdAt ?? now,
       lastSeenAt: now,
     });
@@ -104,8 +104,8 @@ export class DesktopWorkspaceAuth {
   refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }
   revoke(sessionId: string) { return this.sessions.revoke(sessionId); }
 
-  async authorizeRequest(req: IncomingMessage, required: MediaApiScope[]) {
-    const principal = await this.authorization.authorize(bearerToken(typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined), required, this.workspaceId);
+  private async validatePrincipal(token:string,required:MediaApiScope[]){
+    const principal=await this.authorization.authorize(token,required,this.workspaceId);
     if (!principal.workspaceId) throw new Error('WORKSPACE_SCOPE_REQUIRED');
     const membership = this.workspaces.getMembership(principal.workspaceId, principal.subject);
     if (!membership || membership.status !== 'active') throw new Error('MEMBERSHIP_INACTIVE');
@@ -113,6 +113,14 @@ export class DesktopWorkspaceAuth {
     if (principal.deviceId && (!device || device.revokedAt)) throw new Error('DEVICE_REVOKED');
     if (device) this.workspaces.putDevice({ ...device, lastSeenAt: Date.now() });
     return principal;
+  }
+
+  authorizeToken(token:string,required:MediaApiScope[]){return this.validatePrincipal(token,required);}
+
+  async authorizeRequest(req: IncomingMessage, required: MediaApiScope[]) {
+    const token=bearerToken(typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined);
+    if(!token)throw new Error('AUTH_REQUIRED');
+    return this.validatePrincipal(token,required);
   }
 }
 
