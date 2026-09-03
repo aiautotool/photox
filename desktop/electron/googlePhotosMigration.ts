@@ -28,7 +28,7 @@ type SavedGooglePhotosAccount = { id: string; workspaceId: string; email: string
 export type MigrationSnapshot = { job: GooglePhotosMigrationJob; items: GooglePhotosMigrationItem[] };
 export type DriveMigrationDestination = (input: { accountId: string; source: PickedMediaItem; response: Response; signal?: AbortSignal; onBytes?: (bytes: number) => void }) => Promise<{ targetId?: string; targetUrl?: string }>;
 export interface DesktopGooglePhotosMigrationOptions {
-  accountsDir: string; workspaceId: string; oauthPort?: number; oauthClient: (redirectUri?: string) => OAuth2Client;
+  accountsDir: string; workspaceId: string; legacyWorkspaceId?: string; oauthPort?: number; oauthClient: (redirectUri?: string) => OAuth2Client;
   openExternal: (url: string) => Promise<unknown> | unknown; ledger: GooglePhotosMigrationLedger; uploadToDrive: DriveMigrationDestination;
   onUpdated?: (snapshot: MigrationSnapshot) => void;
 }
@@ -148,6 +148,7 @@ export class DesktopGooglePhotosMigrationService {
     for (const file of (await fs.readdir(this.options.accountsDir)).filter(file => file.endsWith('.json'))) try {
       const filePath=path.join(this.options.accountsDir,file);const parsed=JSON.parse(await fs.readFile(filePath,'utf8')) as Partial<SavedGooglePhotosAccount>;
       if(!parsed.id||!parsed.email||!parsed.tokens)continue;if(parsed.workspaceId&&parsed.workspaceId!==this.options.workspaceId)continue;
+      if(!parsed.workspaceId&&this.options.workspaceId!==(this.options.legacyWorkspaceId??'legacy-personal'))continue;
       const scoped:SavedGooglePhotosAccount={id:parsed.id,workspaceId:this.options.workspaceId,email:parsed.email,tokens:parsed.tokens,capabilities:parsed.capabilities??[],updatedAt:parsed.updatedAt??new Date().toISOString()};
       if(!parsed.workspaceId){const target=path.join(this.options.accountsDir,accountFilename(this.options.workspaceId,scoped.id));await fs.writeFile(target,JSON.stringify(scoped,null,2),{encoding:'utf8',mode:0o600});if(target!==filePath)await fs.unlink(filePath).catch(()=>undefined);}result.push(scoped);
     } catch {}
