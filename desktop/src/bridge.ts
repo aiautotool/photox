@@ -117,7 +117,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   }
 
   async function json<T>(path:string,init:RequestInit={},retry=true):Promise<T>{
-    if(!accessToken&&bootstrapRefreshToken)await bootstrapSession();
+    if(!accessToken&&(loginTicket||bootstrapRefreshToken))await bootstrapSession();
     if(!accessToken)await refreshAccess();
     const method=String(init.method||'GET').toUpperCase();
     if(!csrfToken)csrfToken=decodeURIComponent(cookie('photox_csrf')||'');
@@ -133,7 +133,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     const wsUrl=config.websocketUrl||baseUrl.replace(/^http:/,'ws:').replace(/^https:/,'wss:')+'/api/web/v1/events';
     const connect=async()=>{
       if(stopped)return;
-      if(!accessToken&&bootstrapRefreshToken)await bootstrapSession();
+      if(!accessToken&&(loginTicket||bootstrapRefreshToken))await bootstrapSession();
       if(!accessToken)await refreshAccess();
       if(!accessToken)return;
       socket=new WebSocket(wsUrl,['photox-v2',accessToken]);
