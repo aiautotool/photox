@@ -237,16 +237,69 @@ export class SqliteMediaCloudRepository implements MediaCloudRepository {
 }
 
 export class SqliteVideoMediaRepository implements VideoMediaRepository {
-  constructor(private readonly store: SqlitePhotoXStore) {}
-  async get(assetId: string): Promise<VideoMediaRecord | null> {
-    const row = this.store.db.prepare('SELECT record_json FROM photox_video_media WHERE asset_id=?').get(assetId) as { record_json?: string } | undefined;
+  constructor(private readonly store: SqlitePhotoXStore, private readonly workspaceId: string, private readonly legacyWorkspaceId = workspaceId) {
+    if (!workspaceId) throw new Error('VIDEO_MEDIA_WORKSPACE_REQUIRED');
+    if (!legacyWorkspaceId) throw new Error('VIDEO_MEDIA_LEGACY_WORKSPACE_REQUIRED');
+    this.ensureWorkspaceSchema();
+  }
+
+  private ensureWorkspaceSchema() {
+    const columns = this.store.db.prepare('PRAGMA table_info(photox_video_media)').all() as Array<{ name: string; pk: number }>;
+    const hasWorkspace = columns.some((column) => column.name === 'workspace_id');
+    const compositePrimaryKey = columns.some((column) => column.name === 'workspace_id' && column.pk > 0)
+      && columns.some((column) => column.name === 'asset_id' && column.pk > 0);
+    if (hasWorkspace && compositePrimaryKey) return;
+
+    const legacyRows = this.store.db.prepare('SELECT asset_id,record_json,updated_at FROM photox_video_media').all() as Array<{
+      asset_id: string; record_json: string; updated_at: string;
+    }>;
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.store.db.exec(`
+        DROP TABLE IF EXISTS photox_video_media_legacy_v1;
+        ALTER TABLE photox_video_media RENAME TO photox_video_media_legacy_v1;
+        CREATE TABLE photox_video_media (
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          record_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(workspace_id, asset_id)
+        );
+      `);
+      const insert = this.store.db.prepare('INSERT INTO photox_video_media(workspace_id,asset_id,record_json,updated_at) VALUES(?,?,?,?)');
+      for (const row of legacyRows) {
+        const parsed = JSON.parse(row.record_json) as Partial<VideoMediaRecord>;
+        const workspaceId = parsed.workspaceId || this.legacyWorkspaceId;
+        const record = { ...parsed, workspaceId, assetId: row.asset_id, updatedAt: parsed.updatedAt || row.updated_at } as VideoMediaRecord;
+        insert.run(workspaceId, row.asset_id, JSON.stringify(record), record.updatedAt);
+      }
+      this.store.db.exec(`
+        DROP TABLE photox_video_media_legacy_v1;
+        CREATE INDEX IF NOT EXISTS idx_photox_video_media_workspace_updated ON photox_video_media(workspace_id, updated_at DESC);
+      `);
+      this.store.db.exec('COMMIT');
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async get(workspaceId: string, assetId: string): Promise<VideoMediaRecord | null> {
+    if (workspaceId !== this.workspaceId) return null;
+    const row = this.store.db.prepare('SELECT record_json FROM photox_video_media WHERE workspace_id=? AND asset_id=?').get(this.workspaceId, assetId) as { record_json?: string } | undefined;
     return row?.record_json ? JSON.parse(row.record_json) as VideoMediaRecord : null;
   }
   async save(record: VideoMediaRecord): Promise<void> {
-    this.store.db.prepare(`INSERT INTO photox_video_media(asset_id,record_json,updated_at) VALUES(?,?,?)
-      ON CONFLICT(asset_id) DO UPDATE SET record_json=excluded.record_json,updated_at=excluded.updated_at`).run(record.assetId, JSON.stringify(record), record.updatedAt);
+    if (record.workspaceId !== this.workspaceId) throw new Error('VIDEO_MEDIA_WORKSPACE_MISMATCH');
+    this.store.db.prepare(`INSERT INTO photox_video_media(workspace_id,asset_id,record_json,updated_at) VALUES(?,?,?,?)
+      ON CONFLICT(workspace_id,asset_id) DO UPDATE SET record_json=excluded.record_json,updated_at=excluded.updated_at`).run(
+      this.workspaceId, record.assetId, JSON.stringify(record), record.updatedAt,
+    );
   }
-  async remove(assetId: string): Promise<void> { this.store.db.prepare('DELETE FROM photox_video_media WHERE asset_id=?').run(assetId); }
+  async remove(workspaceId: string, assetId: string): Promise<void> {
+    if (workspaceId !== this.workspaceId) return;
+    this.store.db.prepare('DELETE FROM photox_video_media WHERE workspace_id=? AND asset_id=?').run(this.workspaceId, assetId);
+  }
 }
 
 export class SqliteRefreshSessionStore implements RefreshSessionStore {
