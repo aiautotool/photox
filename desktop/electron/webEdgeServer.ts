@@ -20,6 +20,7 @@ export interface WebEdgeHandlers {
   createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
+  getWorkspaceOverview?(principal:WebPrincipal):Promise<unknown>;
   listWorkspaceDevices?(principal:WebPrincipal):Promise<unknown>;
   listWorkspaceSessions?(principal:WebPrincipal):Promise<unknown>;
   revokeWorkspaceSession?(principal:WebPrincipal,sessionId:string):Promise<unknown>;
@@ -269,6 +270,7 @@ export class PhotoXWebEdgeServer {
       const targetSession=String(b.sessionId||principal.sessionId||'');await this.handlers.revokeSession(targetSession);await this.handlers.appendAudit(principal,{action:'web.session.revoke',targetType:'session',targetId:targetSession});res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
     }
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
+    if(m==='GET'&&p==='/api/web/v1/workspace')return read(()=>this.handlers.getWorkspaceOverview?.(principal)??Promise.resolve(this.deviceApi().getWorkspaceOverview(principal)));
     if(m==='GET'&&p==='/api/web/v1/devices')return read(()=>this.handlers.listWorkspaceDevices?.(principal)??Promise.resolve(this.deviceApi().listDevices(principal)));
     if(m==='GET'&&p==='/api/web/v1/sessions')return read(()=>this.handlers.listWorkspaceSessions?.(principal)??Promise.resolve(this.deviceApi().listSessions(principal)));
     let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceSession?.(principal,id)??Promise.resolve(this.deviceApi().revokeSession(principal,id)));return this.json(res,200,value);}
