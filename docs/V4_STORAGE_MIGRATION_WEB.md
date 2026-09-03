@@ -92,7 +92,7 @@ Current Web edge behavior:
 
 Remaining migration hardening:
 
-- [ ] Stream/chunk very large Google Photos source files instead of buffering the whole item in memory.
+- [x] Stream very large Google Photos source files into Google Photos append-only upload instead of buffering the whole item in Desktop memory.
 - [ ] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
 - [ ] Add transfer speed and ETA metrics.
 - [ ] Add real-Google-account end-to-end verification outside CI with OAuth credentials/consent.
@@ -119,8 +119,8 @@ Remaining migration hardening:
 
 ## Next priorities
 
-1. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
-2. Stream large Google Photos downloads and persist Google Drive mid-file resumable checkpoints.
+1. Persist Google Drive upload-session/chunk checkpoints so a migration can resume in the middle of a large file after Desktop/process restart.
+2. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
 3. Add transfer speed/ETA and live OAuth migration verification harness.
 4. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
 5. Continue workspace/device/member/quota UX and operations visibility across Desktop/Web/Mobile.
@@ -162,5 +162,24 @@ Still pending:
 
 - browser-renderer E2E for automatic 401 refresh/retry, WebSocket reconnect and React UI behavior;
 - large Google Photos source streaming and durable Google Drive mid-file resumable checkpoint;
+- live Google OAuth migration verification;
+- signed iOS/Android release verification.
+
+## Run 13 — streamed Google Photos append-only transfer
+
+Completed:
+
+- Added a streaming upload primitive for the Google Photos append-only raw-upload endpoint using a standards-based `ReadableStream` and Node/Electron `duplex: half` request semantics.
+- Desktop Google Photos -> Google Photos migration now pipes the Picker download response body directly into the destination upload instead of calling `arrayBuffer()` for normal streamed responses.
+- Byte progress is emitted as stream chunks are consumed and `Content-Length` is forwarded when Google supplies it.
+- Preserved an `arrayBuffer()` fallback only for environments/responses without a readable body, so existing behavior remains compatible rather than introducing a mock/no-op path.
+- Added an automated test that consumes the request stream, verifies chunk order, byte progress, content length and streaming request configuration.
+- Repository CI passed tests, full TypeScript typecheck and full production build for the code batch.
+
+Still pending:
+
+- durable Google Drive upload-session/chunk checkpoint for true process-restart mid-file resume;
+- browser-renderer E2E;
+- transfer speed/ETA;
 - live Google OAuth migration verification;
 - signed iOS/Android release verification.
