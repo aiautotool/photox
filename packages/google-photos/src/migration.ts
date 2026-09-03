@@ -3,6 +3,16 @@ import type { MigrationTarget, PickedMediaItem } from './index';
 export type MigrationJobState = 'draft' | 'selecting' | 'queued' | 'running' | 'paused' | 'completed' | 'completed_with_errors' | 'cancelled' | 'failed';
 export type MigrationItemState = 'queued' | 'downloading' | 'uploading' | 'verifying' | 'completed' | 'failed' | 'cancelled';
 
+export interface MigrationTransferCheckpoint {
+  kind: 'google_drive_resumable_v1';
+  accountId: string;
+  sessionUri: string;
+  nextByte: number;
+  totalBytes: number;
+  targetId?: string;
+  updatedAt: string;
+}
+
 export interface GooglePhotosMigrationJob {
   id: string;
   workspaceId: string;
@@ -48,6 +58,8 @@ export interface GooglePhotosMigrationLedger {
   putItems(items: GooglePhotosMigrationItem[]): Promise<void>;
   listItems(jobId: string): Promise<GooglePhotosMigrationItem[]>;
   updateItem(itemId: string, patch: Partial<Omit<GooglePhotosMigrationItem, 'id' | 'jobId' | 'sourceMediaId' | 'createdAt'>>): Promise<GooglePhotosMigrationItem | null>;
+  getTransferCheckpoint(itemId: string): Promise<MigrationTransferCheckpoint | null>;
+  setTransferCheckpoint(itemId: string, checkpoint: MigrationTransferCheckpoint | null): Promise<void>;
 }
 
 export interface MigrationTransferAdapter {
@@ -57,6 +69,8 @@ export interface MigrationTransferAdapter {
     source: PickedMediaItem;
     signal?: AbortSignal;
     onBytes?: (transferredBytes: number) => void;
+    checkpoint?: MigrationTransferCheckpoint;
+    onCheckpoint?: (checkpoint: MigrationTransferCheckpoint | null) => Promise<void>;
   }): Promise<{ targetId?: string; targetUrl?: string }>;
   verify?(input: {
     job: GooglePhotosMigrationJob;
@@ -111,16 +125,20 @@ export class GooglePhotosMigrationRunner {
       let latest = (await this.ledger.updateItem(item.id, { state: 'downloading', attempts: item.attempts + 1, error: undefined, updatedAt: this.now().toISOString() })) ?? item;
       try {
         latest = (await this.ledger.updateItem(item.id, { state: 'uploading', updatedAt: this.now().toISOString() })) ?? latest;
+        const checkpoint = await this.ledger.getTransferCheckpoint(item.id) ?? undefined;
         const result = await this.adapter.transfer({
           job,
           item: latest,
           source,
           signal,
+          checkpoint,
           onBytes: bytes => { void this.ledger.updateItem(item.id, { transferredBytes: Math.max(0, Math.floor(bytes)), updatedAt: this.now().toISOString() }); },
+          onCheckpoint: async nextCheckpoint => { await this.ledger.setTransferCheckpoint(item.id, nextCheckpoint); },
         });
         latest = (await this.ledger.updateItem(item.id, { state: 'verifying', targetId: result.targetId, targetUrl: result.targetUrl, updatedAt: this.now().toISOString() })) ?? latest;
         if (this.adapter.verify) await this.adapter.verify({ job, item: latest, targetId: result.targetId, signal });
         await this.ledger.updateItem(item.id, { state: 'completed', targetId: result.targetId, targetUrl: result.targetUrl, error: undefined, updatedAt: this.now().toISOString() });
+        await this.ledger.setTransferCheckpoint(item.id, null);
       } catch (error) {
         await this.ledger.updateItem(item.id, { state: 'failed', error: error instanceof Error ? error.message : String(error), updatedAt: this.now().toISOString() });
       }

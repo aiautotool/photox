@@ -20,6 +20,7 @@ import {
   type GooglePhotosMigrationJob,
   type GooglePhotosMigrationLedger,
   type MigrationTarget,
+  type MigrationTransferCheckpoint,
   type PickedMediaItem,
 } from '@photosync/google-photos';
 
@@ -27,7 +28,7 @@ export type GooglePhotosCapability = 'picker' | 'append';
 export type GooglePhotosAccountInfo = { id: string; email: string; capabilities: GooglePhotosCapability[]; status: 'ready' | 'unavailable' };
 type SavedGooglePhotosAccount = { id: string; workspaceId: string; email: string; tokens: Credentials; capabilities: GooglePhotosCapability[]; updatedAt: string };
 export type MigrationSnapshot = { job: GooglePhotosMigrationJob; items: GooglePhotosMigrationItem[] };
-export type DriveMigrationDestination = (input: { accountId: string; source: PickedMediaItem; response: Response; signal?: AbortSignal; onBytes?: (bytes: number) => void }) => Promise<{ targetId?: string; targetUrl?: string }>;
+export type DriveMigrationDestination = (input: { accountId: string; source: PickedMediaItem; response: Response; signal?: AbortSignal; onBytes?: (bytes: number) => void; checkpoint?: MigrationTransferCheckpoint; onCheckpoint?: (checkpoint: MigrationTransferCheckpoint | null) => Promise<void> }) => Promise<{ targetId?: string; targetUrl?: string }>;
 export interface DesktopGooglePhotosMigrationOptions {
   accountsDir: string; workspaceId: string; legacyWorkspaceId?: string; oauthPort?: number; oauthClient: (redirectUri?: string) => OAuth2Client;
   openExternal: (url: string) => Promise<unknown> | unknown; ledger: GooglePhotosMigrationLedger; uploadToDrive: DriveMigrationDestination;
@@ -112,7 +113,10 @@ export class DesktopGooglePhotosMigrationService {
   async resume(jobId: string) { this.paused.delete(jobId); this.cancelled.delete(jobId); return this.run(jobId); }
   async retryFailed(jobId: string) {
     const updatedAt = new Date().toISOString();
-    for (const item of (await this.options.ledger.listItems(jobId)).filter(item => item.state === 'failed')) await this.options.ledger.updateItem(item.id, { state: 'queued', error: undefined, transferredBytes: 0, updatedAt });
+    for (const item of (await this.options.ledger.listItems(jobId)).filter(item => item.state === 'failed')) {
+      const checkpoint = await this.options.ledger.getTransferCheckpoint(item.id);
+      await this.options.ledger.updateItem(item.id, { state: 'queued', error: undefined, transferredBytes: checkpoint?.nextByte ?? 0, updatedAt });
+    }
     await this.options.ledger.updateJob(jobId, { state: 'queued', failedItems: 0, completedAt: undefined, lastError: undefined, updatedAt });
     return this.resume(jobId);
   }
@@ -126,9 +130,9 @@ export class DesktopGooglePhotosMigrationService {
     const sourceAccount = await this.requireAccount(job.sourceAccountId, 'picker'); const sourceToken = await this.accessToken(sourceAccount);
     const selected = await listAllPickedMedia(sourceToken, job.sourcePickerSessionId); const sources = new Map(selected.map(item => [item.id, item]));
     const runner = new GooglePhotosMigrationRunner(this.options.ledger, {
-      transfer: async ({ job: currentJob, source, signal, onBytes }) => {
+      transfer: async ({ job: currentJob, source, signal, onBytes, checkpoint, onCheckpoint }) => {
         const response = await downloadPickedMedia(source); const contentLength = Number(response.headers.get('content-length') || 0);
-        if (currentJob.target === 'google_drive') return this.options.uploadToDrive({ accountId: currentJob.targetAccountId, source, response, signal, onBytes });
+        if (currentJob.target === 'google_drive') return this.options.uploadToDrive({ accountId: currentJob.targetAccountId, source, response, signal, onBytes, checkpoint, onCheckpoint });
         const destinationToken = await this.accessToken(await this.requireAccount(currentJob.targetAccountId, 'append'));
         let uploadToken: string;
         if (response.body) {

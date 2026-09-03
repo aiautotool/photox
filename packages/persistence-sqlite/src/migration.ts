@@ -5,6 +5,7 @@ import type {
   MigrationItemState,
   MigrationJobState,
   MigrationTarget,
+  MigrationTransferCheckpoint,
 } from '@photosync/google-photos';
 import type { SqlitePhotoXStore } from './index';
 
@@ -45,6 +46,7 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
         transferred_bytes INTEGER NOT NULL,
         target_id TEXT,
         target_url TEXT,
+        checkpoint_json TEXT,
         error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -53,6 +55,8 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
       CREATE INDEX IF NOT EXISTS idx_photox_migration_items_job_state
         ON photox_migration_items(job_id, state, updated_at);
     `);
+    const itemColumns = new Set((this.store.db.prepare('PRAGMA table_info(photox_migration_items)').all() as Array<{ name: string }>).map(row => row.name));
+    if (!itemColumns.has('checkpoint_json')) this.store.db.exec('ALTER TABLE photox_migration_items ADD COLUMN checkpoint_json TEXT');
   }
 
   async createJob(job: GooglePhotosMigrationJob): Promise<void> {
@@ -121,6 +125,18 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
       next.targetId ?? null, next.targetUrl ?? null, next.error ?? null, next.updatedAt, itemId,
     );
     return next;
+  }
+
+
+  async getTransferCheckpoint(itemId: string): Promise<MigrationTransferCheckpoint | null> {
+    const row = this.store.db.prepare('SELECT checkpoint_json FROM photox_migration_items WHERE id=?').get(itemId) as { checkpoint_json?: string | null } | undefined;
+    return row?.checkpoint_json ? JSON.parse(row.checkpoint_json) as MigrationTransferCheckpoint : null;
+  }
+
+  async setTransferCheckpoint(itemId: string, checkpoint: MigrationTransferCheckpoint | null): Promise<void> {
+    this.store.db.prepare('UPDATE photox_migration_items SET checkpoint_json=?,updated_at=? WHERE id=?').run(
+      checkpoint ? JSON.stringify(checkpoint) : null, new Date().toISOString(), itemId,
+    );
   }
 
   private mapJob(row: Record<string, unknown>): GooglePhotosMigrationJob {

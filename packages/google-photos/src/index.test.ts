@@ -138,6 +138,31 @@ describe('Google Photos migration', () => {
     expect((await ledger.listItems(job.id))[0]?.state).toBe('queued');
   });
 
+
+  it('persists a transfer checkpoint after failure and clears it only after verified completion', async () => {
+    const ledger = new MemoryLedger();
+    const job = makeJob('job-checkpoint');
+    await ledger.createJob(job);
+    const [item] = migrationItemsFromPicker(job.id, [source('a')]);
+    await ledger.putItems([item]);
+    let first = true;
+    const checkpoint = { kind: 'google_drive_resumable_v1' as const, accountId: 'target-account', sessionUri: 'https://upload/session', nextByte: 8, totalBytes: 16, updatedAt: '2026-09-03T00:00:00.000Z' };
+    const runner = new GooglePhotosMigrationRunner(ledger, {
+      async transfer({ checkpoint: existing, onCheckpoint }) {
+        if (first) { first = false; expect(existing).toBeUndefined(); await onCheckpoint?.(checkpoint); throw new Error('network dropped'); }
+        expect(existing).toEqual(checkpoint); return { targetId: 'drive-final' };
+      },
+      async verify() {},
+    });
+    const sources = new Map([['a', source('a')]]);
+    const failed = await runner.run(job.id, sources, { shouldPause: () => false, shouldCancel: () => false });
+    expect(failed.state).toBe('completed_with_errors');
+    expect(await ledger.getTransferCheckpoint(item.id)).toEqual(checkpoint);
+    const completed = await runner.run(job.id, sources, { shouldPause: () => false, shouldCancel: () => false });
+    expect(completed.state).toBe('completed');
+    expect(await ledger.getTransferCheckpoint(item.id)).toBeNull();
+  });
+
 });
 
 function source(id: string): PickedMediaItem {
@@ -155,6 +180,7 @@ function makeJob(id: string): GooglePhotosMigrationJob {
 class MemoryLedger implements GooglePhotosMigrationLedger {
   jobs = new Map<string, GooglePhotosMigrationJob>();
   items = new Map<string, GooglePhotosMigrationItem>();
+  checkpoints = new Map<string, any>();
   async createJob(job: GooglePhotosMigrationJob) { this.jobs.set(job.id, { ...job }); }
   async getJob(jobId: string) { const job = this.jobs.get(jobId); return job ? { ...job } : null; }
   async listJobs(workspaceId: string) { return [...this.jobs.values()].filter(job => job.workspaceId === workspaceId).map(job => ({ ...job })); }
@@ -162,4 +188,6 @@ class MemoryLedger implements GooglePhotosMigrationLedger {
   async putItems(items: GooglePhotosMigrationItem[]) { for (const item of items) this.items.set(item.id, { ...item }); }
   async listItems(jobId: string) { return [...this.items.values()].filter(item => item.jobId === jobId).map(item => ({ ...item })); }
   async updateItem(itemId: string, patch: Partial<GooglePhotosMigrationItem>) { const item = this.items.get(itemId); if (!item) return null; const next = { ...item, ...patch }; this.items.set(itemId, next); return { ...next }; }
+  async getTransferCheckpoint(itemId: string) { return this.checkpoints.get(itemId) ?? null; }
+  async setTransferCheckpoint(itemId: string, checkpoint: any | null) { if (checkpoint) this.checkpoints.set(itemId, checkpoint); else this.checkpoints.delete(itemId); }
 }

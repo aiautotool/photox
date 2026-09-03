@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, replaceWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
-import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
+import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
@@ -388,16 +388,53 @@ async function removeDriveAccount(accountId:string){
 }
 
 
-async function uploadMigrationItemToDrive(input:{accountId:string;source:any;response:Response;signal?:AbortSignal;onBytes?:(bytes:number)=>void}){
+async function uploadMigrationItemToDrive(input:{accountId:string;source:any;response:Response;signal?:AbortSignal;onBytes?:(bytes:number)=>void;checkpoint?:{kind:'google_drive_resumable_v1';accountId:string;sessionUri:string;nextByte:number;totalBytes:number;targetId?:string;updatedAt:string};onCheckpoint?:(checkpoint:any|null)=>Promise<void>}){
   const account=(await runtimeDriveAccounts()).find(item=>item.id===input.accountId);if(!account)throw new Error('GOOGLE_DRIVE_DESTINATION_NOT_FOUND');
   const token=await account.client.getAccessToken();if(!token.token)throw new Error('GOOGLE_DRIVE_ACCESS_TOKEN_MISSING');
-  const bytes=Buffer.from(await input.response.arrayBuffer());if(input.signal?.aborted)throw new Error('MIGRATION_ABORTED');
   const mimeType=input.source.mediaFile?.mimeType||'application/octet-stream';const filename=safeFilename(input.source.mediaFile?.filename||`google-photo-${Date.now()}`);
-  const session=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:bytes.byteLength,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});
-  const uploaded=await net.fetch(session,{method:'PUT',headers:{'content-type':mimeType,'content-length':String(bytes.byteLength)},body:bytes});
-  if(!uploaded.ok)throw new Error(`Drive migration upload ${uploaded.status}: ${await uploaded.text()}`);input.onBytes?.(bytes.byteLength);
-  const result=await uploaded.json() as {id?:string};if(!result.id)throw new Error('GOOGLE_DRIVE_DESTINATION_ID_MISSING');
-  const verified=await getDriveFile(token.token,result.id);if(Number(verified.size||0)!==bytes.byteLength)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${bytes.byteLength}`);
+  const headerBytes=Number(input.response.headers.get('content-length')||0);
+  let checkpoint=input.checkpoint?.kind==='google_drive_resumable_v1'&&input.checkpoint.accountId===input.accountId?input.checkpoint:undefined;
+  let totalBytes=Number.isFinite(headerBytes)&&headerBytes>0?Math.floor(headerBytes):checkpoint?.totalBytes||0;
+  if(!totalBytes){
+    const bytes=Buffer.from(await input.response.arrayBuffer());if(input.signal?.aborted)throw new Error('MIGRATION_ABORTED');totalBytes=bytes.byteLength;
+    const session=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:totalBytes,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});
+    const uploaded=await uploadResumableChunk(session,{bytes,startByte:0,totalBytes,mimeType,signal:input.signal});
+    if(uploaded.state!=='completed')throw new Error('GOOGLE_DRIVE_RESUMABLE_INCOMPLETE');input.onBytes?.(totalBytes);
+    const verified=await getDriveFile(token.token,uploaded.file.id);if(Number(verified.size||0)!==totalBytes)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${totalBytes}`);
+    return {targetId:verified.id,targetUrl:verified.webViewLink};
+  }
+  if(checkpoint&&checkpoint.totalBytes!==totalBytes)checkpoint=undefined;
+  if(checkpoint?.targetId){
+    const verified=await getDriveFile(token.token,checkpoint.targetId);if(Number(verified.size||0)!==totalBytes)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${totalBytes}`);input.onBytes?.(totalBytes);return {targetId:verified.id,targetUrl:verified.webViewLink};
+  }
+  let sessionUri=checkpoint?.sessionUri||'';let nextByte=checkpoint?.nextByte||0;
+  if(sessionUri){
+    const status=await queryResumableUploadSession(sessionUri,totalBytes);
+    if(status.state==='completed'){
+      await input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte:totalBytes,totalBytes,targetId:status.file.id,updatedAt:new Date().toISOString()});
+      const verified=await getDriveFile(token.token,status.file.id);if(Number(verified.size||0)!==totalBytes)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${totalBytes}`);input.onBytes?.(totalBytes);return {targetId:verified.id,targetUrl:verified.webViewLink};
+    }
+    if(status.state==='expired'){sessionUri='';nextByte=0;await input.onCheckpoint?.(null)}else nextByte=status.committedBytes;
+  }
+  if(!sessionUri){
+    sessionUri=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:totalBytes,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});nextByte=0;
+  }
+  const persistCheckpoint=async(targetId?:string)=>input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte,totalBytes,targetId,updatedAt:new Date().toISOString()});
+  await persistCheckpoint();input.onBytes?.(nextByte);
+  const body=input.response.body;if(!body)throw new Error('GOOGLE_DRIVE_SOURCE_STREAM_MISSING');
+  const reader=body.getReader();const chunkSize=8*1024*1024;let skip=nextByte;let pending=Buffer.alloc(0);let completedId:string|undefined;
+  const send=async(bytes:Buffer)=>{
+    if(input.signal?.aborted)throw new Error('MIGRATION_ABORTED');const start=nextByte;
+    const result=await uploadResumableChunk(sessionUri,{bytes,startByte:start,totalBytes,mimeType,signal:input.signal});
+    if(result.state==='expired')throw new Error('GOOGLE_DRIVE_RESUMABLE_SESSION_EXPIRED');
+    if(result.state==='completed'){nextByte=totalBytes;completedId=result.file.id;await persistCheckpoint(completedId);input.onBytes?.(nextByte);return}
+    const expected=start+bytes.byteLength;if(result.committedBytes!==expected)throw new Error(`GOOGLE_DRIVE_RESUMABLE_OFFSET_MISMATCH:${expected}:${result.committedBytes}`);
+    nextByte=result.committedBytes;await persistCheckpoint();input.onBytes?.(nextByte);
+  };
+  while(true){const {value,done}=await reader.read();if(done)break;if(!value?.byteLength)continue;let chunk=Buffer.from(value);if(skip){const consumed=Math.min(skip,chunk.byteLength);skip-=consumed;chunk=chunk.subarray(consumed);if(!chunk.byteLength)continue}pending=pending.length?Buffer.concat([pending,chunk]):chunk;while(pending.length>=chunkSize&&!completedId){const part=pending.subarray(0,chunkSize);pending=Buffer.from(pending.subarray(chunkSize));await send(part)}}
+  if(skip)throw new Error(`GOOGLE_DRIVE_SOURCE_SHORTER_THAN_CHECKPOINT:${skip}`);if(pending.length&&!completedId)await send(pending);
+  if(!completedId){const status=await queryResumableUploadSession(sessionUri,totalBytes);if(status.state!=='completed')throw new Error('GOOGLE_DRIVE_RESUMABLE_INCOMPLETE');completedId=status.file.id;nextByte=totalBytes;await persistCheckpoint(completedId)}
+  const verified=await getDriveFile(token.token,completedId);if(Number(verified.size||0)!==totalBytes)throw new Error(`GOOGLE_DRIVE_SIZE_MISMATCH:${verified.size||0}:${totalBytes}`);
   return {targetId:verified.id,targetUrl:verified.webViewLink};
 }
 function requireMigrationService(){if(!migrationService)throw new Error('MIGRATION_SERVICE_NOT_READY');return migrationService;}
