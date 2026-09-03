@@ -9,6 +9,7 @@ import { SqliteRefreshSessionStore, type SqlitePhotoXStore, type SqliteWorkspace
 import type { WorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DeviceSessionManagementService, type DeviceSessionActor } from './deviceSessionManagement.js';
 import { WorkspaceOverviewService } from './workspaceOverview.js';
+import { WorkspaceSubscriptionService } from './workspaceSubscription.js';
 
 export type PairExchangeInput = {
   workspaceId: string;
@@ -28,6 +29,7 @@ export class DesktopWorkspaceAuth {
   private readonly authorization: AuthorizationService;
   private readonly deviceSessions: DeviceSessionManagementService;
   private readonly overview: WorkspaceOverviewService;
+  private readonly subscriptions: WorkspaceSubscriptionService;
 
   private constructor(
     secret: Uint8Array,
@@ -58,6 +60,7 @@ export class DesktopWorkspaceAuth {
     });
     this.deviceSessions = new DeviceSessionManagementService(store, workspaces);
     this.overview = new WorkspaceOverviewService(workspaces);
+    this.subscriptions = new WorkspaceSubscriptionService(store, workspaces);
   }
 
   static async create(input: {
@@ -91,6 +94,7 @@ export class DesktopWorkspaceAuth {
     if(workspaceAuthIpcRegistered)return;
     const {ipcMain}=await import('electron');
     ipcMain.handle('photosync:workspace-overview',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.getWorkspaceOverview(auth.trustedDesktopActor());});
+    ipcMain.handle('photosync:workspace-subscription',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.getWorkspaceSubscription(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-devices',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listDevices(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-sessions',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listSessions(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-session-revoke',(_event,sessionId:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.revokeSession(auth.trustedDesktopActor(),String(sessionId||''));});
@@ -143,6 +147,7 @@ export class DesktopWorkspaceAuth {
     return this.sessions.revoke(sessionId);
   }
   getWorkspaceOverview(actor: DeviceSessionActor) { return this.overview.snapshot(actor); }
+  getWorkspaceSubscription(actor: DeviceSessionActor) { return this.subscriptions.snapshot(actor); }
   listDevices(actor: DeviceSessionActor) { return this.deviceSessions.listDevices(actor); }
   listSessions(actor: DeviceSessionActor) { return this.deviceSessions.listSessions(actor); }
   revokeSession(actor: DeviceSessionActor, sessionId: string) { return this.deviceSessions.revokeSession(actor, sessionId); }
