@@ -73,7 +73,8 @@ export class TelegramStorageProvider implements StorageProvider {
 
     const result = await this.api.sendDocument(account, input);
     await this.media.add({
-      id: `${input.accountId}:${result.fileId}`,
+      id: `${this.accounts.workspaceId}:${input.accountId}:${result.fileId}`,
+      workspaceId: this.accounts.workspaceId,
       accountId: input.accountId,
       chatId: account.chatId,
       messageId: result.messageId,
