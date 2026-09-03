@@ -5,14 +5,18 @@ import type { MediaCloudHealth, MediaCloudItem, MediaCloudItemSummary, MediaClou
 export class MediaCloudCatalog {
   constructor(
     private readonly repository: MediaCloudRepository,
+    private readonly workspaceId: string,
     private readonly defaults: ReplicaRequirement = { targetReplicas: 2, requireDistinctAccounts: true, preferDistinctProviders: true },
-  ) {}
+  ) {
+    if (!workspaceId) throw new Error('MEDIA_CLOUD_WORKSPACE_REQUIRED');
+  }
 
-  async registerAsset(input: Omit<MediaCloudItem, 'replicas' | 'updatedAt' | 'targetReplicas'> & { targetReplicas?: number; replicas?: MediaCloudItem['replicas'] }): Promise<MediaCloudItem> {
-    const existing = await this.repository.get(input.assetId);
+  async registerAsset(input: Omit<MediaCloudItem, 'workspaceId' | 'replicas' | 'updatedAt' | 'targetReplicas'> & { targetReplicas?: number; replicas?: MediaCloudItem['replicas'] }): Promise<MediaCloudItem> {
+    const existing = await this.repository.get(this.workspaceId, input.assetId);
     const item: MediaCloudItem = {
       ...existing,
       ...input,
+      workspaceId: this.workspaceId,
       targetReplicas: input.targetReplicas ?? existing?.targetReplicas ?? this.defaults.targetReplicas,
       replicas: input.replicas ?? existing?.replicas ?? [],
       updatedAt: new Date().toISOString(),
@@ -45,22 +49,28 @@ export class MediaCloudCatalog {
     return next;
   }
 
+  async remove(assetId: string): Promise<void> {
+    await this.repository.remove(this.workspaceId, assetId);
+  }
+
   async get(assetId: string): Promise<MediaCloudItemSummary | null> {
-    const item = await this.repository.get(assetId);
+    const item = await this.repository.get(this.workspaceId, assetId);
     return item ? this.summarize(item) : null;
   }
 
-  async list(query: MediaCloudQuery = {}): Promise<MediaCloudItemSummary[]> {
-    const items = await this.repository.list(query);
+  async list(query: Omit<MediaCloudQuery, 'workspaceId'> = {}): Promise<MediaCloudItemSummary[]> {
+    const items = await this.repository.list({ ...query, workspaceId: this.workspaceId });
     const rows = items.map((item) => this.summarize(item));
     return query.health ? rows.filter((row) => row.health === query.health) : rows;
   }
 
   summarize(item: MediaCloudItem): MediaCloudItemSummary {
+    if (item.workspaceId !== this.workspaceId) throw new Error('MEDIA_CLOUD_WORKSPACE_MISMATCH');
     const verified = item.replicas.filter((replica) => replica.state === 'VERIFIED');
     const providers = new Set(verified.map((replica) => replica.providerId));
     const accounts = new Set(verified.map((replica) => `${replica.providerId}:${replica.accountId ?? ''}`));
     return {
+      workspaceId: item.workspaceId,
       assetId: item.assetId,
       filename: item.filename,
       targetReplicas: item.targetReplicas,
@@ -81,6 +91,7 @@ export class MediaCloudCatalog {
   }
 
   health(item: MediaCloudItem): MediaCloudHealth {
+    if (item.workspaceId !== this.workspaceId) throw new Error('MEDIA_CLOUD_WORKSPACE_MISMATCH');
     if (item.replicas.length === 0) return 'lost';
     const verified = item.replicas.filter((replica) => replica.state === 'VERIFIED');
     const failures = item.replicas.filter((replica) => replica.state === 'ERROR' || replica.state === 'BLOCKED' || replica.availability === 'offline');
@@ -94,7 +105,7 @@ export class MediaCloudCatalog {
   }
 
   private async require(assetId: string): Promise<MediaCloudItem> {
-    const item = await this.repository.get(assetId);
+    const item = await this.repository.get(this.workspaceId, assetId);
     if (!item) throw new Error(`Unknown media asset: ${assetId}`);
     return item;
   }
