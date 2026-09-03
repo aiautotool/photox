@@ -14,6 +14,7 @@ export interface MediaCloudReplica extends StorageReplica {
 }
 
 export interface MediaCloudItem {
+  workspaceId: string;
   assetId: string;
   filename: string;
   mimeType?: string;
@@ -27,6 +28,7 @@ export interface MediaCloudItem {
 }
 
 export interface MediaCloudItemSummary {
+  workspaceId: string;
   assetId: string;
   filename: string;
   targetReplicas: number;
@@ -80,6 +82,7 @@ export interface MediaCloudStats {
 }
 
 export interface MediaCloudQuery {
+  workspaceId: string;
   providerId?: string;
   accountId?: string;
   health?: MediaCloudHealth;
