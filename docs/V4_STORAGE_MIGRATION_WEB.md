@@ -70,7 +70,8 @@ The Web edge implementation now provides:
 - short-lived HMAC-signed media URLs bound to `workspaceId + variant + media key + expiry`; the HMAC signing key is process-random and separate from the user's bearer token;
 - media streaming resolves the media row inside the verified/signed workspace, preventing a signed URL for workspace A from resolving workspace B's item with the same key;
 - Google Photos OAuth account credential files are namespaced by workspace and legacy unscoped credential files are migrated into the legacy workspace; accounts belonging to another workspace are ignored by the service;
-- migration job lookup continues to require the job's stored `workspaceId` to match the service workspace.
+- migration job lookup continues to require the job's stored `workspaceId` to match the service workspace;
+- successful Web administrative/member mutations append durable audit events using identity from the verified principal, including actor user, device, session, role and workspace.
 
 ## Implementation batches
 
@@ -93,10 +94,12 @@ The Web edge implementation now provides:
 - [x] Pause/resume/cancel/retry without repeating completed items.
 - [x] Namespace Google Photos OAuth account credential persistence by workspace and migrate legacy unscoped credentials into the legacy workspace.
 - [x] Reject migration job access when stored `workspaceId` does not match the active migration service workspace.
+- [x] Add runner-level expected-workspace guard and automated test proving a cross-workspace job is rejected before transfer or ledger mutation.
+- [x] Validate append-capable Google Photos destination before Picker selection and reject source=destination migrations.
 
 Remaining migration hardening:
 
-- [ ] Add explicit cross-tenant automated tests around Google Photos credential migration/account visibility and migration job operations.
+- [ ] Add explicit filesystem-level cross-tenant tests around Google Photos credential migration/account visibility.
 - [ ] Stream/chunk very large Google Photos source files instead of buffering the entire item in memory.
 - [ ] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
 - [ ] Add transfer speed and ETA metrics.
@@ -117,15 +120,15 @@ Remaining migration hardening:
 - [x] Add workspace-bound signed browser media URLs and preserve Range streaming.
 - [x] Add basic request rate limiting and response security headers.
 - [x] Replace the transitional URL-fragment refresh credential with a one-time Web pairing/login ticket that directly establishes the cookie session.
-- [ ] Persist audit events for Web administrative actions with the authenticated actor/session.
+- [x] Persist audit events for Web administrative/member mutations with authenticated user/device/session/workspace identity.
 - [ ] Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
 - [ ] Add browser end-to-end smoke test for parity-critical routes, cookie refresh, CSRF, WebSocket and Range streaming.
 
 ## Next priorities
 
-1. Add explicit cross-tenant tests for Google Photos credential/account visibility and migration job operations.
-2. Persist Web administrative audit events using authenticated user/device/session identity.
-3. Browser E2E parity test and reverse-proxy deployment docs.
+1. Add browser E2E parity coverage for ticket login, cookie refresh, CSRF, WebSocket reconnect and signed Range streaming.
+2. Add filesystem-level cross-tenant Google Photos credential/account visibility tests.
+3. Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
 4. Large-file streaming + mid-file Google Drive migration resume.
 5. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
 
@@ -144,7 +147,6 @@ Every batch must pass repository tests, TypeScript typecheck and production buil
 
 Verification marker: one-time ticket implementation passed its integration workflow with `npm install`, `npm test`, full repository typecheck and full production build before commit.
 
-
 ## Run 10 — Web mutation audit + migration tenant defense
 
 Completed:
@@ -156,10 +158,12 @@ Completed:
 - Desktop migration always supplies its workspace ID to the runner.
 - Google Photos -> Google Photos selection validates the append-capable destination account before opening Picker and rejects source=destination to avoid accidental duplicate import into the same account.
 - Automated migration test proves cross-workspace runner execution is rejected without touching the transfer adapter or ledger state.
+- The integration validation passed install, tests, full typecheck and full production build before the code commit was pushed.
 
 Still pending:
 
 - browser-level E2E coverage for ticket login, refresh cookie, CSRF, WebSocket reconnect and Range streaming;
+- filesystem-level cross-tenant Google Photos credential/account visibility tests;
 - reverse-proxy deployment recipes (Cloudflare/Caddy/nginx);
 - streaming Google Photos downloads and resumable mid-file Drive migration checkpoints;
 - live Google OAuth migration verification with user credentials.
