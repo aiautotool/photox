@@ -7,6 +7,7 @@ import { AuthSessionService, AuthorizationService, bearerToken, type MediaApiSco
 import { JoseAccessTokenService } from '@photox/auth-jose';
 import { SqliteRefreshSessionStore, type SqlitePhotoXStore, type SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import type { WorkspacePairingChallengeManager } from './pairingChallenge.js';
+import { DeviceSessionManagementService, type DeviceSessionActor } from './deviceSessionManagement.js';
 
 export type PairExchangeInput = {
   workspaceId: string;
@@ -20,6 +21,7 @@ export class DesktopWorkspaceAuth {
   private readonly tokenService: JoseAccessTokenService;
   private readonly sessions: AuthSessionService;
   private readonly authorization: AuthorizationService;
+  private readonly deviceSessions: DeviceSessionManagementService;
 
   private constructor(
     secret: Uint8Array,
@@ -48,6 +50,7 @@ export class DesktopWorkspaceAuth {
         };
       },
     });
+    this.deviceSessions = new DeviceSessionManagementService(store, workspaces);
   }
 
   static async create(input: {
@@ -108,6 +111,9 @@ export class DesktopWorkspaceAuth {
 
   refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }
   revoke(sessionId: string) { return this.sessions.revoke(sessionId); }
+  listDevices(actor: DeviceSessionActor) { return this.deviceSessions.listDevices(actor); }
+  listSessions(actor: DeviceSessionActor) { return this.deviceSessions.listSessions(actor); }
+  revokeDevice(actor: DeviceSessionActor, deviceId: string) { return this.deviceSessions.revokeDevice(actor, deviceId); }
 
   private async validatePrincipal(token:string,required:MediaApiScope[]){
     const principal=await this.authorization.authorize(token,required,this.workspaceId);
