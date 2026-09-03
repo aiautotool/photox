@@ -25,5 +25,9 @@ export interface VideoPreviewAdapter { createPreview?(source:VideoSource, option
 export interface VideoTranscodeAdapter { transcode?(source:VideoSource, options:{container?:'mp4'; videoCodec?:'h264'; audioCodec?:'aac'; maxWidth?:number; maxHeight?:number; bitrate?:number}):Promise<VideoPreview> }
 export interface VideoPlaybackSource { uri:string; mimeType?:string; headers?:Record<string,string>; supportsRange:boolean; durationMs?:number; width?:number; height?:number }
 export interface VideoPlaybackResolver { resolve(assetId:string):Promise<VideoPlaybackSource> }
-export interface VideoMediaRecord { assetId:string; metadata:VideoMetadata; thumbnail?:VideoThumbnail; preview?:VideoPreview; updatedAt:string }
-export interface VideoMediaRepository { get(assetId:string):Promise<VideoMediaRecord|null>; save(record:VideoMediaRecord):Promise<void>; remove(assetId:string):Promise<void> }
+export interface VideoMediaRecord { workspaceId:string; assetId:string; metadata:VideoMetadata; thumbnail?:VideoThumbnail; preview?:VideoPreview; updatedAt:string }
+export interface VideoMediaRepository {
+  get(workspaceId:string, assetId:string):Promise<VideoMediaRecord|null>;
+  save(record:VideoMediaRecord):Promise<void>;
+  remove(workspaceId:string, assetId:string):Promise<void>;
+}
