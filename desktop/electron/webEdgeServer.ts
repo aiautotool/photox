@@ -19,6 +19,10 @@ export interface WebEdgeHandlers {
   createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
+  listWorkspaceDevices(principal:WebPrincipal):Promise<unknown>;
+  listWorkspaceSessions(principal:WebPrincipal):Promise<unknown>;
+  revokeWorkspaceSession(principal:WebPrincipal,sessionId:string):Promise<unknown>;
+  revokeWorkspaceDevice(principal:WebPrincipal,deviceId:string):Promise<unknown>;
   appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
@@ -262,6 +266,10 @@ export class PhotoXWebEdgeServer {
       const targetSession=String(b.sessionId||principal.sessionId||'');await this.handlers.revokeSession(targetSession);await this.handlers.appendAudit(principal,{action:'web.session.revoke',targetType:'session',targetId:targetSession});res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
     }
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
+    if(m==='GET'&&p==='/api/web/v1/devices')return read(()=>this.handlers.listWorkspaceDevices(principal));
+    if(m==='GET'&&p==='/api/web/v1/sessions')return read(()=>this.handlers.listWorkspaceSessions(principal));
+    let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return this.json(res,200,await this.handlers.revokeWorkspaceSession(principal,decodeURIComponent(match[1])));
+    match=/^\/api\/web\/v1\/devices\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return this.json(res,200,await this.handlers.revokeWorkspaceDevice(principal,decodeURIComponent(match[1])));
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
     if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);
     if(m==='GET'&&p==='/api/web/v1/library'){
@@ -273,7 +281,7 @@ export class PhotoXWebEdgeServer {
     if(m==='POST'&&p==='/api/web/v1/library/open')return mutate('admin',{action:'web.library.open',targetType:'library'},this.handlers.openLibrary);
     if(m==='POST'&&p==='/api/web/v1/google-drive/accounts/connect')return mutate('admin',{action:'web.google_drive.connect',targetType:'provider'},this.handlers.addGoogleAccount);
     if(m==='GET'&&p==='/api/web/v1/google-drive/accounts')return read(this.handlers.listGoogleAccounts);
-    let match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',{action:'web.google_drive.remove',targetType:'provider',targetId:decodeURIComponent(match![1])},()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
+    match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',{action:'web.google_drive.remove',targetType:'provider',targetId:decodeURIComponent(match![1])},()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
     if(m==='POST'&&p==='/api/web/v1/cloud/retry')return mutate('member',{action:'web.cloud.retry',targetType:'cloud_queue'},this.handlers.retryCloud);
     if(m==='GET'&&p==='/api/web/v1/google-photos/accounts')return read(this.handlers.listGooglePhotosAccounts);
     if(m==='POST'&&p==='/api/web/v1/google-photos/accounts/connect'){const b=await this.body(req);if(!['picker','append'].includes(String(b.capability))){this.json(res,400,{error:'INVALID_CAPABILITY'});return;}return mutate('admin',{action:'web.google_photos.connect',targetType:'provider',metadata:{capability:String(b.capability)}},()=>this.handlers.connectGooglePhotosAccount(b.capability));}
