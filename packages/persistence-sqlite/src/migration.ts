@@ -25,6 +25,8 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
         failed_items INTEGER NOT NULL,
         total_bytes INTEGER,
         transferred_bytes INTEGER NOT NULL,
+        transfer_rate_bps REAL,
+        eta_seconds REAL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         started_at TEXT,
@@ -55,17 +57,20 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
       CREATE INDEX IF NOT EXISTS idx_photox_migration_items_job_state
         ON photox_migration_items(job_id, state, updated_at);
     `);
+    const jobColumns = new Set((this.store.db.prepare('PRAGMA table_info(photox_migration_jobs)').all() as Array<{ name: string }>).map(row => row.name));
+    if (!jobColumns.has('transfer_rate_bps')) this.store.db.exec('ALTER TABLE photox_migration_jobs ADD COLUMN transfer_rate_bps REAL');
+    if (!jobColumns.has('eta_seconds')) this.store.db.exec('ALTER TABLE photox_migration_jobs ADD COLUMN eta_seconds REAL');
     const itemColumns = new Set((this.store.db.prepare('PRAGMA table_info(photox_migration_items)').all() as Array<{ name: string }>).map(row => row.name));
     if (!itemColumns.has('checkpoint_json')) this.store.db.exec('ALTER TABLE photox_migration_items ADD COLUMN checkpoint_json TEXT');
   }
 
   async createJob(job: GooglePhotosMigrationJob): Promise<void> {
     this.store.db.prepare(`INSERT INTO photox_migration_jobs(
-      id,workspace_id,source_account_id,source_picker_session_id,target,target_account_id,state,total_items,completed_items,failed_items,total_bytes,transferred_bytes,created_at,updated_at,started_at,completed_at,last_error
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id,workspace_id,source_account_id,source_picker_session_id,target,target_account_id,state,total_items,completed_items,failed_items,total_bytes,transferred_bytes,transfer_rate_bps,eta_seconds,created_at,updated_at,started_at,completed_at,last_error
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       job.id, job.workspaceId, job.sourceAccountId, job.sourcePickerSessionId ?? null, job.target, job.targetAccountId,
       job.state, job.totalItems, job.completedItems, job.failedItems, job.totalBytes ?? null, job.transferredBytes,
-      job.createdAt, job.updatedAt, job.startedAt ?? null, job.completedAt ?? null, job.lastError ?? null,
+      job.transferRateBps ?? null, job.etaSeconds ?? null, job.createdAt, job.updatedAt, job.startedAt ?? null, job.completedAt ?? null, job.lastError ?? null,
     );
   }
 
@@ -84,9 +89,9 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
     if (!current) return null;
     const next = { ...current, ...patch };
     this.store.db.prepare(`UPDATE photox_migration_jobs SET
-      source_account_id=?,source_picker_session_id=?,target=?,target_account_id=?,state=?,total_items=?,completed_items=?,failed_items=?,total_bytes=?,transferred_bytes=?,updated_at=?,started_at=?,completed_at=?,last_error=? WHERE id=?`).run(
+      source_account_id=?,source_picker_session_id=?,target=?,target_account_id=?,state=?,total_items=?,completed_items=?,failed_items=?,total_bytes=?,transferred_bytes=?,transfer_rate_bps=?,eta_seconds=?,updated_at=?,started_at=?,completed_at=?,last_error=? WHERE id=?`).run(
       next.sourceAccountId, next.sourcePickerSessionId ?? null, next.target, next.targetAccountId, next.state, next.totalItems,
-      next.completedItems, next.failedItems, next.totalBytes ?? null, next.transferredBytes, next.updatedAt, next.startedAt ?? null,
+      next.completedItems, next.failedItems, next.totalBytes ?? null, next.transferredBytes, next.transferRateBps ?? null, next.etaSeconds ?? null, next.updatedAt, next.startedAt ?? null,
       next.completedAt ?? null, next.lastError ?? null, jobId,
     );
     return next;
@@ -127,7 +132,6 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
     return next;
   }
 
-
   async getTransferCheckpoint(itemId: string): Promise<MigrationTransferCheckpoint | null> {
     const row = this.store.db.prepare('SELECT checkpoint_json FROM photox_migration_items WHERE id=?').get(itemId) as { checkpoint_json?: string | null } | undefined;
     return row?.checkpoint_json ? JSON.parse(row.checkpoint_json) as MigrationTransferCheckpoint : null;
@@ -146,6 +150,8 @@ export class SqliteGooglePhotosMigrationLedger implements GooglePhotosMigrationL
       target: String(row.target) as MigrationTarget, targetAccountId: String(row.target_account_id), state: String(row.state) as MigrationJobState,
       totalItems: Number(row.total_items), completedItems: Number(row.completed_items), failedItems: Number(row.failed_items),
       totalBytes: row.total_bytes === null || row.total_bytes === undefined ? undefined : Number(row.total_bytes), transferredBytes: Number(row.transferred_bytes),
+      transferRateBps: row.transfer_rate_bps === null || row.transfer_rate_bps === undefined ? undefined : Number(row.transfer_rate_bps),
+      etaSeconds: row.eta_seconds === null || row.eta_seconds === undefined ? undefined : Number(row.eta_seconds),
       createdAt: String(row.created_at), updatedAt: String(row.updated_at), startedAt: row.started_at ? String(row.started_at) : undefined,
       completedAt: row.completed_at ? String(row.completed_at) : undefined, lastError: row.last_error ? String(row.last_error) : undefined,
     };
