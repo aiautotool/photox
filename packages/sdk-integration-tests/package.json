@@ -1,1 +1,1 @@
-{"name":"@photox/sdk-integration-tests","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs"},"dependencies":{"@photox/auth-jose":"*","@photox/jobs":"*","@photox/media-delivery-node":"*","@photox/persistence-sqlite":"*"}}
+{"name":"@photox/sdk-integration-tests","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs"},"dependencies":{"@photox/auth-jose":"*","@photox/jobs":"*","@photox/media-cloud":"*","@photox/media-delivery-node":"*","@photox/persistence-sqlite":"*"}}
