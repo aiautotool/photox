@@ -34,7 +34,7 @@ Supported compliant flow:
 
 ## Desktop UX
 
-The shared Desktop/Web renderer exposes `Chuyển dữ liệu` with real account selection, Picker selection, job/item progress, pause/resume/cancel/retry and migration history backed by SQLite.
+The shared Desktop/Web renderer exposes `Chuyển dữ liệu` with real account selection, Picker selection, job/item progress, live transfer speed/ETA when byte totals are known, pause/resume/cancel/retry and migration history backed by SQLite.
 
 ## Web app parity
 
@@ -94,7 +94,7 @@ Remaining migration hardening:
 
 - [x] Stream very large Google Photos source files into Google Photos append-only upload instead of buffering the whole item in Desktop memory.
 - [x] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
-- [ ] Add transfer speed and ETA metrics.
+- [x] Add transfer speed and ETA metrics in the shared Desktop/Web migration UI from durable byte progress; ETA is shown only when total bytes are known.
 - [ ] Add real-Google-account end-to-end verification outside CI with OAuth credentials/consent.
 
 ### Batch C — Web parity/security
@@ -115,15 +115,16 @@ Remaining migration hardening:
 - [x] Durable audit events for Web administrative mutations.
 - [x] Reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx updated for the current session/cookie/CSRF model.
 - [x] Node transport integration coverage for one-time ticket replay protection, HttpOnly/CSRF cookies, mutation CSRF, refresh, authenticated WebSocket delivery and workspace-bound signed HTTP Range `206` streaming.
-- [ ] Browser-renderer end-to-end smoke test for automatic access refresh, WebSocket reconnect and UI/media behavior.
+- [x] Deterministic renderer bridge coverage for ticket-first bootstrap, automatic `401 -> refresh -> retry`, and WebSocket refresh/reconnect with the rotated access token.
+- [ ] Browser-renderer end-to-end smoke test for React UI/media behavior in a real browser engine.
 
 ## Next priorities
 
-1. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
-2. Add transfer speed/ETA metrics to durable migration progress and UI.
-3. Add live OAuth migration verification harness for real Google accounts outside CI.
-4. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
-5. Continue workspace/device/member/quota UX and operations visibility across Desktop/Web/Mobile.
+1. Add a real-browser renderer smoke test for shared Desktop/Web React UI and media behavior now that ticket/bootstrap, automatic refresh/retry, WebSocket reconnect and HTTP/WebSocket transport are covered deterministically.
+2. Add live OAuth migration verification harness for real Google accounts outside CI.
+3. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
+4. Continue workspace/device/member/quota UX and operations visibility across Desktop/Web/Mobile.
+5. Expand migration observability with historical throughput/ETA telemetry and operator-visible failure categories without exposing provider credentials.
 
 ## Validation rule
 
@@ -204,3 +205,21 @@ Still pending:
 - transfer speed/ETA;
 - live Google OAuth migration verification;
 - signed iOS/Android release verification.
+
+## Run 15 — renderer session resilience + migration throughput UX
+
+Completed:
+
+- Extended renderer bridge regression coverage beyond ticket-first bootstrap to prove a protected request that receives `401` performs exactly one refresh and retries with the rotated access token.
+- Added deterministic WebSocket coverage proving a close triggers refresh and reconnects with the newly issued access token rather than reusing the stale credential.
+- Stabilized the asynchronous reconnect assertion after the first CI attempt exposed timing sensitivity; the corrected test is part of normal Desktop/repository tests.
+- Added live migration throughput to the shared Desktop/Web React UI from successive durable `transferredBytes` snapshots, with smoothing to reduce noisy instantaneous readings.
+- Added ETA from remaining durable bytes and current throughput only when `totalBytes` is authoritative/known; PhotoX does not invent an ETA when Google does not provide source size metadata.
+- Repository CI passed tests, full TypeScript typecheck and full production build for the corrected code batch.
+
+Still pending:
+
+- real-browser React UI/media smoke coverage;
+- live Google OAuth migration verification with real accounts/consent;
+- signed iOS/Android release verification;
+- broader central SaaS control-plane extraction and operations UX.
