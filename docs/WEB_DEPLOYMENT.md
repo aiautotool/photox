@@ -1,103 +1,145 @@
-# PhotoX Web edge deployment
+# PhotoX V4 Web deployment
 
-PhotoX V4 serves the exact same React/Vite UI used by Electron through the desktop edge process. Web mode is disabled by default.
+PhotoX Web is served by the Desktop edge and reuses the exact Desktop React renderer. The edge should stay disabled unless Web access is explicitly needed.
 
-## Required configuration
-
-Use a random base64url secret of at least 32 characters for `PHOTOX_WEB_ACCESS_TOKEN`. Never reuse the mobile pair-code.
+## Required environment
 
 ```bash
 PHOTOX_WEB_ENABLED=true
 PHOTOX_WEB_HOST=127.0.0.1
 PHOTOX_WEB_PORT=43118
-PHOTOX_WEB_ACCESS_TOKEN=<random-base64url-secret-at-least-32-chars>
-PHOTOX_WEB_ROLE=owner
-PHOTOX_WORKSPACE_ID=<workspace-id>
+PHOTOX_WEB_PUBLIC_BASE_URL=https://photos.example.com
+PHOTOX_WEB_ALLOWED_ORIGINS=https://photos.example.com
+PHOTOX_WEB_RATE_LIMIT=300
+```
+
+For production Internet exposure, keep `PHOTOX_WEB_HOST=127.0.0.1` whenever the reverse proxy runs on the same machine. Do not expose port `43118` directly to the public Internet. `PHOTOX_WEB_PUBLIC_BASE_URL` must be the final HTTPS browser origin so login links and signed media URLs use the external domain and refresh cookies are marked `Secure`.
+
+The proxy must preserve normal HTTP methods, `Authorization`, `Cookie`, `Origin`, `Range`, `Content-Range`, `If-Range`, `Sec-WebSocket-*` headers, and WebSocket upgrade traffic. Do not cache `/api/web/v1/*` responses. Media byte-range responses must pass through unchanged.
+
+## Cloudflare Tunnel
+
+Bind PhotoX only to loopback, then point a named Cloudflare Tunnel hostname to the local edge.
+
+`~/.cloudflared/config.yml`:
+
+```yaml
+tunnel: YOUR_TUNNEL_ID
+credentials-file: /home/USER/.cloudflared/YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: photos.example.com
+    service: http://127.0.0.1:43118
+    originRequest:
+      httpHostHeader: photos.example.com
+  - service: http_status:404
+```
+
+Run:
+
+```bash
+cloudflared tunnel run YOUR_TUNNEL_NAME
+```
+
+Use:
+
+```bash
 PHOTOX_WEB_PUBLIC_BASE_URL=https://photos.example.com
 PHOTOX_WEB_ALLOWED_ORIGINS=https://photos.example.com
 ```
 
-For direct LAN-only access, bind to a private interface or `0.0.0.0` only when the host firewall restricts the port to trusted networks. Public Internet exposure should terminate TLS at a reverse proxy/tunnel and keep PhotoX itself bound to loopback.
-
-The first browser bootstrap can use the URL fragment so the token is not sent in the HTTP request URL:
-
-```text
-https://photos.example.com/#access_token=<token>
-```
-
-PhotoX immediately removes the fragment and retains the token only in browser `sessionStorage`. Closing the browser session removes it.
+Cloudflare Tunnel supports WebSocket upgrades automatically. Avoid Cloudflare cache rules for `/api/web/v1/*`; PhotoX authentication, signed media URLs and Range streaming are edge-authoritative.
 
 ## Caddy
 
 ```caddyfile
 photos.example.com {
-  encode zstd gzip
-  reverse_proxy 127.0.0.1:43118
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:43118 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+    }
+
+    @api path /api/web/v1/*
+    header @api Cache-Control "no-store"
 }
 ```
 
-Caddy handles HTTPS automatically when DNS points to the host. Keep `PHOTOX_WEB_ALLOWED_ORIGINS=https://photos.example.com`.
+Caddy terminates TLS automatically for normal public DNS deployments and forwards WebSocket upgrades through `reverse_proxy`.
 
 ## nginx
 
 ```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
-  listen 443 ssl http2;
-  server_name photos.example.com;
+    listen 443 ssl http2;
+    server_name photos.example.com;
 
-  ssl_certificate /etc/letsencrypt/live/photos.example.com/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/photos.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/photos.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/photos.example.com/privkey.pem;
 
-  location / {
-    proxy_pass http://127.0.0.1:43118;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_request_buffering off;
-  }
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://127.0.0.1:43118;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+
+    location /api/web/v1/ {
+        proxy_pass http://127.0.0.1:43118;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_buffering off;
+        proxy_request_buffering off;
+        add_header Cache-Control "no-store" always;
+    }
 }
 ```
 
-Do not strip `Range`, `Content-Range`, or `Accept-Ranges`; browser video playback depends on byte-range streaming.
+PhotoX media routes support byte ranges. nginx must not rewrite a `206 Partial Content` response into a full response and must not strip `Range`/`Content-Range` headers.
 
-## Cloudflare Tunnel
+## Security checklist
 
-Keep PhotoX bound to loopback and point the tunnel at the Web edge port:
+- Public Web access uses only HTTPS.
+- Keep the PhotoX edge loopback-bound behind the proxy where possible.
+- Set one exact `PHOTOX_WEB_ALLOWED_ORIGINS` entry per trusted browser origin; do not use `*` with credentialed access.
+- Generate Web login links from trusted Desktop UI only. Login tickets expire quickly and are single-use.
+- Refresh credentials stay in HttpOnly/SameSite cookies; browser JavaScript should only keep the short-lived access token.
+- Keep CSRF protection enabled and preserve cookies plus `x-csrf-token` on authenticated mutations.
+- Do not cache authentication endpoints, migration APIs, library JSON or signed media responses at a shared proxy/CDN layer.
+- Restrict firewall access to the edge port when the proxy is not loopback-local.
+- Rotate/revoke Web sessions from PhotoX when a browser/device is lost.
+- Audit logs remain the authoritative record for successful Web administrative mutations.
 
-```yaml
-tunnel: <tunnel-id>
-credentials-file: /path/to/<tunnel-id>.json
-ingress:
-  - hostname: photos.example.com
-    service: http://127.0.0.1:43118
-  - service: http_status:404
-```
+## Verification after deployment
 
-Run the tunnel with your normal cloudflared service configuration. Set `PHOTOX_WEB_PUBLIC_BASE_URL` and `PHOTOX_WEB_ALLOWED_ORIGINS` to the HTTPS hostname.
-
-## Security behavior
-
-- Web mode refuses to start with an access token shorter than 32 characters.
-- API and WebSocket access use a token separate from device pairing.
-- Administrative routes enforce `owner/admin/member/viewer` role levels server-side.
-- Cross-origin requests are rejected unless explicitly allowed.
-- Requests are rate-limited per source address.
-- Browser media uses short-lived HMAC-signed URLs rather than putting the Web admin bearer token into image/video URLs.
-- Response hardening includes CSP, frame denial, MIME sniffing prevention and no-referrer policy.
-- Web mode is an edge-admin layer. Central SaaS identity/access+refresh sessions and durable audit events are still required before multi-user Internet exposure is considered production-ready.
-
-## Operations check
-
-After enabling Web mode, verify through the reverse proxy/domain:
-
-1. UI bundle loads and visually matches Electron.
-2. Library thumbnails/photos load.
-3. Seek a video to confirm HTTP `206` Range playback.
-4. Google Drive and Google Photos account lists load.
-5. Migration page lists jobs and receives progress events.
-6. An invalid token gets HTTP `401`.
-7. An unlisted Origin gets HTTP `403`.
-8. A lower role cannot invoke owner/admin operations.
+1. Open the Desktop-generated one-time Web link on the HTTPS hostname.
+2. Confirm the URL fragment disappears after bootstrap.
+3. Reload the page and confirm the session refreshes without another login link.
+4. Open an image and a video; seek inside the video to verify Range streaming.
+5. Keep the page open long enough for access-token refresh and confirm WebSocket-driven status updates reconnect.
+6. Try a mutation without the CSRF header from a separate HTTP client and confirm it is rejected.
+7. Revoke the Web session and confirm subsequent API/WebSocket requests are rejected.
