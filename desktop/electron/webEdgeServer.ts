@@ -53,6 +53,9 @@ export interface WebEdgeConfig {
 type Bucket={minute:number;count:number};
 const ROLE_RANK:Record<WebRole,number>={viewer:0,member:1,admin:2,owner:3};
 const MEDIA_TTL_SECONDS=10*60;
+const WEB_REFRESH_COOKIE='photox_refresh';
+const WEB_CSRF_COOKIE='photox_csrf';
+const WEB_REFRESH_MAX_AGE=30*24*60*60;
 
 export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
@@ -159,9 +162,36 @@ export class PhotoXWebEdgeServer {
     return ROLE_RANK[actual]>=ROLE_RANK[role];
   }
 
+  private cookies(req:IncomingMessage){
+    const result:Record<string,string>={};
+    for(const entry of String(req.headers.cookie||'').split(';')){const at=entry.indexOf('=');if(at<=0)continue;const key=decodeURIComponent(entry.slice(0,at).trim());const value=decodeURIComponent(entry.slice(at+1).trim());result[key]=value;}
+    return result;
+  }
+
+  private secureCookie(req:IncomingMessage){
+    return Boolean(this.config.publicBaseUrl?.startsWith('https://')||String(req.headers['x-forwarded-proto']||'').split(',')[0]?.trim()==='https');
+  }
+
+  private sessionCookies(req:IncomingMessage,refreshToken:string,csrfToken:string){
+    const secure=this.secureCookie(req)?'; Secure':'';
+    return [`${WEB_REFRESH_COOKIE}=${encodeURIComponent(refreshToken)}; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`,`${WEB_CSRF_COOKIE}=${encodeURIComponent(csrfToken)}; Path=/api/web/v1; SameSite=Strict; Max-Age=${WEB_REFRESH_MAX_AGE}${secure}`];
+  }
+
+  private clearSessionCookies(req:IncomingMessage){
+    const secure=this.secureCookie(req)?'; Secure':'';
+    return [`${WEB_REFRESH_COOKIE}=; Path=/api/web/v1/auth; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,`${WEB_CSRF_COOKIE}=; Path=/api/web/v1; SameSite=Strict; Max-Age=0${secure}`];
+  }
+
+  private csrfValid(req:IncomingMessage){
+    const cookies=this.cookies(req);const cookieToken=cookies[WEB_CSRF_COOKIE]||'';const header=String(req.headers['x-csrf-token']||'');
+    if(!cookieToken||!header||cookieToken.length!==header.length)return false;
+    return crypto.timingSafeEqual(Buffer.from(cookieToken),Buffer.from(header));
+  }
+
   private cors(req:IncomingMessage,res:ServerResponse){
     const origin=String(req.headers.origin||'');if(origin&&this.originAllowed(req)){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','Origin');}
-    res.setHeader('access-control-allow-headers','authorization,content-type,range');
+    res.setHeader('access-control-allow-headers','authorization,content-type,range,x-csrf-token');
+    res.setHeader('access-control-allow-credentials','true');
     res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
     res.setHeader('x-content-type-options','nosniff');res.setHeader('referrer-policy','no-referrer');res.setHeader('x-frame-options','DENY');
   }
@@ -181,8 +211,11 @@ export class PhotoXWebEdgeServer {
     if(!this.originAllowed(req)){this.json(res,403,{error:'ORIGIN_FORBIDDEN'});return;}
     if(!this.rateAllowed(req)){res.setHeader('retry-after','60');this.json(res,429,{error:'RATE_LIMITED'});return;}
     const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname==='/api/web/v1/auth/bootstrap'&&req.method==='POST'){
+      try{const b=await this.body(req);const refreshToken=String(b.refreshToken||'');if(!refreshToken)throw new Error('REFRESH_TOKEN_REQUIRED');const next=await this.handlers.refreshSession(refreshToken);const csrfToken=crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,refreshToken,csrfToken));this.json(res,200,{...next,csrfToken});}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
+    }
     if(url.pathname==='/api/web/v1/auth/refresh'&&req.method==='POST'){
-      try{const b=await this.body(req);this.json(res,200,await this.handlers.refreshSession(String(b.refreshToken||'')));}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
+      try{if(!this.csrfValid(req))throw new Error('CSRF_REQUIRED');const refreshToken=this.cookies(req)[WEB_REFRESH_COOKIE]||'';if(!refreshToken)throw new Error('REFRESH_TOKEN_REQUIRED');const next=await this.handlers.refreshSession(refreshToken);const csrfToken=this.cookies(req)[WEB_CSRF_COOKIE]||crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,refreshToken,csrfToken));this.json(res,200,{...next,csrfToken});}catch(error){res.setHeader('set-cookie',this.clearSessionCookies(req));this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
     }
     if(url.pathname.startsWith('/api/web/v1/')){
       try{
@@ -202,9 +235,10 @@ export class PhotoXWebEdgeServer {
     const p=url.pathname,m=req.method||'GET';
     const read=async(fn:()=>Promise<unknown>)=>this.json(res,200,await fn());
     const mutate=async(role:WebRole,fn:()=>Promise<unknown>)=>{if(!this.requireRole(principal,role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}this.json(res,200,await fn());};
+    if(m!=='GET'&&m!=='HEAD'&&!this.csrfValid(req)){this.json(res,403,{error:'CSRF_REQUIRED'});return;}
     if(m==='POST'&&p==='/api/web/v1/auth/revoke'){
       const b=await this.body(req);if(principal.sessionId&&String(b.sessionId||'')!==principal.sessionId&&!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
-      await this.handlers.revokeSession(String(b.sessionId||principal.sessionId||''));res.writeHead(204);res.end();return;
+      await this.handlers.revokeSession(String(b.sessionId||principal.sessionId||''));res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
     }
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
@@ -240,7 +274,7 @@ export class PhotoXWebEdgeServer {
     try{
       let body=await fs.readFile(filePath);
       if(path.basename(filePath)==='index.html'){
-        const bootstrap=`<script>window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||new URLSearchParams(location.hash.slice(1)).get('access_token')||''),refreshToken:(sessionStorage.getItem('photox.web.refresh')||new URLSearchParams(location.hash.slice(1)).get('refresh_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken)sessionStorage.setItem('photox.web.access',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);if(window.__PHOTOSYNC_WEB_CONFIG__.refreshToken)sessionStorage.setItem('photox.web.refresh',window.__PHOTOSYNC_WEB_CONFIG__.refreshToken);if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;
+        const bootstrap=`<script>const p=new URLSearchParams(location.hash.slice(1));window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||p.get('access_token')||''),refreshToken:(p.get('refresh_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken)sessionStorage.setItem('photox.web.access',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);sessionStorage.removeItem('photox.web.refresh');if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;
         body=Buffer.from(body.toString('utf8').replace('</head>',`${bootstrap}</head>`));
       }
       const ext=path.extname(filePath);const types:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};

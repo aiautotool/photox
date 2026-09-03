@@ -55,42 +55,70 @@ function normalizeBaseUrl(value:string){return value.replace(/\/$/,'')}
 export function resolveDesktopBridge(): DesktopBridge | undefined {
   if (window.photoSyncDesktop) return window.photoSyncDesktop;
   const config=window.__PHOTOSYNC_WEB_CONFIG__;
-  if (!config?.baseUrl || (!config.accessToken&&!config.refreshToken)) return undefined;
+  if (!config?.baseUrl) return undefined;
   return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,websocketUrl:config.websocketUrl});
 }
 
 export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   const baseUrl=normalizeBaseUrl(config.baseUrl);
   let accessToken=config.accessToken||'';
-  let refreshToken=config.refreshToken||'';
+  let bootstrapRefreshToken=config.refreshToken||'';
+  let csrfToken='';
   let refreshPromise:Promise<boolean>|null=null;
+  let bootstrapPromise:Promise<boolean>|null=null;
 
-  function persistTokens(){
+  function cookie(name:string){
+    if(typeof document==='undefined')return '';
+    const prefix=`${encodeURIComponent(name)}=`;
+    return document.cookie.split(';').map(v=>v.trim()).find(v=>v.startsWith(prefix))?.slice(prefix.length)||'';
+  }
+  csrfToken=decodeURIComponent(cookie('photox_csrf')||'');
+
+  function persistAccess(){
     if(typeof sessionStorage==='undefined')return;
     if(accessToken)sessionStorage.setItem('photox.web.access',accessToken);else sessionStorage.removeItem('photox.web.access');
-    if(refreshToken)sessionStorage.setItem('photox.web.refresh',refreshToken);else sessionStorage.removeItem('photox.web.refresh');
+  }
+
+  async function bootstrapSession(){
+    if(!bootstrapRefreshToken)return false;
+    if(bootstrapPromise)return bootstrapPromise;
+    bootstrapPromise=(async()=>{
+      try{
+        const token=bootstrapRefreshToken;bootstrapRefreshToken='';
+        const response=await fetch(`${baseUrl}/api/web/v1/auth/bootstrap`,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken:token})});
+        if(!response.ok)throw new Error('WEB_BOOTSTRAP_REJECTED');
+        const next=await response.json() as {accessToken?:string;csrfToken?:string};
+        if(!next.accessToken)throw new Error('WEB_BOOTSTRAP_ACCESS_MISSING');
+        accessToken=next.accessToken;csrfToken=next.csrfToken||decodeURIComponent(cookie('photox_csrf')||'');persistAccess();return true;
+      }catch{accessToken='';persistAccess();return false;}
+      finally{bootstrapPromise=null;}
+    })();
+    return bootstrapPromise;
   }
 
   async function refreshAccess(){
-    if(!refreshToken)return false;
     if(refreshPromise)return refreshPromise;
     refreshPromise=(async()=>{
       try{
-        const response=await fetch(`${baseUrl}/api/web/v1/auth/refresh`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken})});
+        if(!csrfToken)csrfToken=decodeURIComponent(cookie('photox_csrf')||'');
+        const response=await fetch(`${baseUrl}/api/web/v1/auth/refresh`,{method:'POST',credentials:'include',headers:csrfToken?{'x-csrf-token':csrfToken}:{}});
         if(!response.ok)throw new Error('WEB_REFRESH_REJECTED');
-        const next=await response.json() as {accessToken?:string};
+        const next=await response.json() as {accessToken?:string;csrfToken?:string};
         if(!next.accessToken)throw new Error('WEB_REFRESH_TOKEN_MISSING');
-        accessToken=next.accessToken;persistTokens();return true;
-      }catch{accessToken='';refreshToken='';persistTokens();return false;}
+        accessToken=next.accessToken;csrfToken=next.csrfToken||csrfToken||decodeURIComponent(cookie('photox_csrf')||'');persistAccess();return true;
+      }catch{accessToken='';persistAccess();return false;}
       finally{refreshPromise=null;}
     })();
     return refreshPromise;
   }
 
   async function json<T>(path:string,init:RequestInit={},retry=true):Promise<T>{
-    if(!accessToken&&refreshToken)await refreshAccess();
-    const response=await fetch(`${baseUrl}${path}`,{...init,headers:{...(accessToken?{authorization:`Bearer ${accessToken}`}:{ }),...(init.body?{'content-type':'application/json'}:{}),...(init.headers||{})}});
-    if(response.status===401&&retry&&refreshToken&&await refreshAccess())return json<T>(path,init,false);
+    if(!accessToken&&bootstrapRefreshToken)await bootstrapSession();
+    if(!accessToken)await refreshAccess();
+    const method=String(init.method||'GET').toUpperCase();
+    if(!csrfToken)csrfToken=decodeURIComponent(cookie('photox_csrf')||'');
+    const response=await fetch(`${baseUrl}${path}`,{...init,credentials:'include',headers:{...(accessToken?{authorization:`Bearer ${accessToken}`}:{ }),...(method!=='GET'&&method!=='HEAD'&&csrfToken?{'x-csrf-token':csrfToken}:{}),...(init.body?{'content-type':'application/json'}:{}),...(init.headers||{})}});
+    if(response.status===401&&retry&&await refreshAccess())return json<T>(path,init,false);
     if(!response.ok)throw new Error(`PhotoX Web API ${response.status}: ${await response.text()}`);
     if(response.status===204)return undefined as T;
     return response.json() as Promise<T>;
@@ -101,7 +129,8 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     const wsUrl=config.websocketUrl||baseUrl.replace(/^http:/,'ws:').replace(/^https:/,'wss:')+'/api/web/v1/events';
     const connect=async()=>{
       if(stopped)return;
-      if(!accessToken&&refreshToken)await refreshAccess();
+      if(!accessToken&&bootstrapRefreshToken)await bootstrapSession();
+      if(!accessToken)await refreshAccess();
       if(!accessToken)return;
       socket=new WebSocket(wsUrl,['photox-v2',accessToken]);
       socket.addEventListener('message',(event:MessageEvent)=>{try{const data=JSON.parse(String(event.data));if(data?.event===eventName)callback(data.payload)}catch{}});

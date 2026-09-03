@@ -24,7 +24,7 @@ import {
 
 export type GooglePhotosCapability = 'picker' | 'append';
 export type GooglePhotosAccountInfo = { id: string; email: string; capabilities: GooglePhotosCapability[]; status: 'ready' | 'unavailable' };
-type SavedGooglePhotosAccount = { id: string; email: string; tokens: Credentials; capabilities: GooglePhotosCapability[]; updatedAt: string };
+type SavedGooglePhotosAccount = { id: string; workspaceId: string; email: string; tokens: Credentials; capabilities: GooglePhotosCapability[]; updatedAt: string };
 export type MigrationSnapshot = { job: GooglePhotosMigrationJob; items: GooglePhotosMigrationItem[] };
 export type DriveMigrationDestination = (input: { accountId: string; source: PickedMediaItem; response: Response; signal?: AbortSignal; onBytes?: (bytes: number) => void }) => Promise<{ targetId?: string; targetUrl?: string }>;
 export interface DesktopGooglePhotosMigrationOptions {
@@ -33,7 +33,7 @@ export interface DesktopGooglePhotosMigrationOptions {
   onUpdated?: (snapshot: MigrationSnapshot) => void;
 }
 function stableAccountId(email: string) { return `photos-${crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 20)}`; }
-function accountFilename(id: string) { return `${id}.json`; }
+function accountFilename(workspaceId: string, id: string) { const scope=crypto.createHash('sha256').update(workspaceId).digest('hex').slice(0,16); return `${scope}--${id}.json`; }
 
 export class DesktopGooglePhotosMigrationService {
   private readonly oauthPort: number;
@@ -69,8 +69,8 @@ export class DesktopGooglePhotosMigrationService {
           const id = stableAccountId(email); const previous = (await this.savedAccounts()).find(item => item.id === id);
           const mergedTokens: Credentials = { ...previous?.tokens, ...client.credentials, refresh_token: client.credentials.refresh_token || previous?.tokens.refresh_token };
           const capabilities = [...new Set<GooglePhotosCapability>([...(previous?.capabilities ?? []), capability])];
-          const saved: SavedGooglePhotosAccount = { id, email, tokens: mergedTokens, capabilities, updatedAt: new Date().toISOString() };
-          await fs.writeFile(path.join(this.options.accountsDir, accountFilename(id)), JSON.stringify(saved, null, 2), { encoding: 'utf8', mode: 0o600 });
+          const saved: SavedGooglePhotosAccount = { id, workspaceId: this.options.workspaceId, email, tokens: mergedTokens, capabilities, updatedAt: new Date().toISOString() };
+          await fs.writeFile(path.join(this.options.accountsDir, accountFilename(this.options.workspaceId, id)), JSON.stringify(saved, null, 2), { encoding: 'utf8', mode: 0o600 });
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<h2>PhotoX đã kết nối Google Photos.</h2><p>Bạn có thể đóng tab này và quay lại PhotoX.</p>'); server.close();
           resolve({ id, email, capabilities, status: 'ready' });
         } catch (error) { res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }); res.end(error instanceof Error ? error.message : String(error)); server.close(); reject(error); }
@@ -79,7 +79,7 @@ export class DesktopGooglePhotosMigrationService {
     });
   }
 
-  async removeAccount(accountId: string) { await fs.unlink(path.join(this.options.accountsDir, accountFilename(accountId))).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
+  async removeAccount(accountId: string) { await this.requireAnyAccount(accountId); await fs.unlink(path.join(this.options.accountsDir, accountFilename(this.options.workspaceId, accountId))).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
 
   async createSelection(input: { sourceAccountId: string; target: MigrationTarget; targetAccountId: string; maxItemCount?: number }) {
     const account = await this.requireAccount(input.sourceAccountId, 'picker'); const token = await this.accessToken(account);
@@ -141,13 +141,19 @@ export class DesktopGooglePhotosMigrationService {
   private async emit(jobId: string): Promise<MigrationSnapshot> { const snapshot = await this.getSnapshot(jobId); this.options.onUpdated?.(snapshot); return snapshot; }
   private async savedAccounts(): Promise<SavedGooglePhotosAccount[]> {
     await fs.mkdir(this.options.accountsDir, { recursive: true }); const result: SavedGooglePhotosAccount[] = [];
-    for (const file of (await fs.readdir(this.options.accountsDir)).filter(file => file.endsWith('.json'))) try { const parsed = JSON.parse(await fs.readFile(path.join(this.options.accountsDir, file), 'utf8')) as SavedGooglePhotosAccount; if (parsed.id && parsed.email && parsed.tokens) result.push(parsed); } catch {}
+    for (const file of (await fs.readdir(this.options.accountsDir)).filter(file => file.endsWith('.json'))) try {
+      const filePath=path.join(this.options.accountsDir,file);const parsed=JSON.parse(await fs.readFile(filePath,'utf8')) as Partial<SavedGooglePhotosAccount>;
+      if(!parsed.id||!parsed.email||!parsed.tokens)continue;if(parsed.workspaceId&&parsed.workspaceId!==this.options.workspaceId)continue;
+      const scoped:SavedGooglePhotosAccount={id:parsed.id,workspaceId:this.options.workspaceId,email:parsed.email,tokens:parsed.tokens,capabilities:parsed.capabilities??[],updatedAt:parsed.updatedAt??new Date().toISOString()};
+      if(!parsed.workspaceId){const target=path.join(this.options.accountsDir,accountFilename(this.options.workspaceId,scoped.id));await fs.writeFile(target,JSON.stringify(scoped,null,2),{encoding:'utf8',mode:0o600});if(target!==filePath)await fs.unlink(filePath).catch(()=>undefined);}result.push(scoped);
+    } catch {}
     return result;
   }
-  private async requireAccount(id: string, capability: GooglePhotosCapability) { const account = (await this.savedAccounts()).find(account => account.id === id); if (!account) throw new Error('GOOGLE_PHOTOS_ACCOUNT_NOT_FOUND'); if (!account.capabilities.includes(capability)) throw new Error(`GOOGLE_PHOTOS_CAPABILITY_REQUIRED:${capability}`); return account; }
+  private async requireAnyAccount(id:string){const account=(await this.savedAccounts()).find(account=>account.id===id);if(!account)throw new Error('GOOGLE_PHOTOS_ACCOUNT_NOT_FOUND');return account;}
+  private async requireAccount(id: string, capability: GooglePhotosCapability) { const account = await this.requireAnyAccount(id); if (!account.capabilities.includes(capability)) throw new Error(`GOOGLE_PHOTOS_CAPABILITY_REQUIRED:${capability}`); return account; }
   private async accessToken(account: SavedGooglePhotosAccount): Promise<string> {
     const client = this.options.oauthClient(); client.setCredentials(account.tokens); const token = await client.getAccessToken(); if (!token.token) throw new Error('GOOGLE_PHOTOS_ACCESS_TOKEN_MISSING');
-    if (JSON.stringify(client.credentials) !== JSON.stringify(account.tokens)) await fs.writeFile(path.join(this.options.accountsDir, accountFilename(account.id)), JSON.stringify({ ...account, tokens: client.credentials, updatedAt: new Date().toISOString() }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    if (JSON.stringify(client.credentials) !== JSON.stringify(account.tokens)) await fs.writeFile(path.join(this.options.accountsDir, accountFilename(this.options.workspaceId, account.id)), JSON.stringify({ ...account, workspaceId:this.options.workspaceId, tokens: client.credentials, updatedAt: new Date().toISOString() }, null, 2), { encoding: 'utf8', mode: 0o600 });
     return token.token;
   }
   private async requireJob(jobId: string) { const job = await this.options.ledger.getJob(jobId); if (!job || job.workspaceId !== this.options.workspaceId) throw new Error('MIGRATION_JOB_NOT_FOUND'); return job; }
