@@ -24,17 +24,19 @@ test('SQLite job repository survives database reopen', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'photox-sqlite-'));
   const path = join(dir, 'photox.db');
   try {
+    const workspaceId = 'workspace-runtime';
     const firstStore = new SqlitePhotoXStore({ path });
-    const firstRepo = new SqliteJobRepository(firstStore);
+    const firstRepo = new SqliteJobRepository(firstStore, workspaceId, workspaceId);
     await firstRepo.put({
-      id: 'job-1', type: 'video.thumbnail.generate', payload: { assetId: 'asset-1' }, state: 'QUEUED', priority: 10,
+      id: 'job-1', workspaceId, type: 'video.thumbnail.generate', payload: { assetId: 'asset-1' }, state: 'QUEUED', priority: 10,
       attempts: 0, maxAttempts: 5, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), checkpoint: { step: 'queued' },
     });
     firstStore.close();
 
     const secondStore = new SqlitePhotoXStore({ path });
-    const secondRepo = new SqliteJobRepository(secondStore);
-    const restored = await secondRepo.get('job-1');
+    const secondRepo = new SqliteJobRepository(secondStore, workspaceId, workspaceId);
+    const restored = await secondRepo.get(workspaceId, 'job-1');
+    assert.equal(restored?.workspaceId, workspaceId);
     assert.equal(restored?.state, 'QUEUED');
     assert.equal(restored?.type, 'video.thumbnail.generate');
     assert.deepEqual(restored?.payload, { assetId: 'asset-1' });
