@@ -5,9 +5,7 @@ import type { MediaApiScope, RefreshSessionStore, WorkspaceSessionRole } from '@
 import type { MediaCloudItem, MediaCloudQuery, MediaCloudRepository } from '@photox/media-cloud';
 import type { VideoMediaRecord, VideoMediaRepository } from '@photox/video-media';
 
-export interface SqlitePhotoXStoreOptions {
-  path: string;
-}
+export interface SqlitePhotoXStoreOptions { path: string; }
 
 export class SqlitePhotoXStore {
   readonly db: DatabaseSync;
@@ -67,28 +65,82 @@ export class SqlitePhotoXStore {
 }
 
 export class SqliteJobRepository implements JobRepository {
-  constructor(private readonly store: SqlitePhotoXStore) {}
+  constructor(private readonly store: SqlitePhotoXStore, private readonly workspaceId: string, private readonly legacyWorkspaceId = workspaceId) {
+    if (!workspaceId) throw new Error('JOB_WORKSPACE_REQUIRED');
+    if (!legacyWorkspaceId) throw new Error('JOB_LEGACY_WORKSPACE_REQUIRED');
+    this.ensureWorkspaceSchema();
+  }
+
+  private ensureWorkspaceSchema() {
+    const columns = this.store.db.prepare('PRAGMA table_info(photox_jobs)').all() as Array<{ name: string; pk: number }>;
+    const hasWorkspace = columns.some(column => column.name === 'workspace_id');
+    const compositePrimaryKey = columns.some(column => column.name === 'workspace_id' && column.pk > 0)
+      && columns.some(column => column.name === 'id' && column.pk > 0);
+    if (hasWorkspace && compositePrimaryKey) return;
+
+    const legacyRows = this.store.db.prepare('SELECT * FROM photox_jobs').all() as Record<string, unknown>[];
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.store.db.exec(`
+        DROP TABLE IF EXISTS photox_jobs_legacy_v1;
+        ALTER TABLE photox_jobs RENAME TO photox_jobs_legacy_v1;
+        CREATE TABLE photox_jobs (
+          workspace_id TEXT NOT NULL,
+          id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          state TEXT NOT NULL,
+          priority INTEGER NOT NULL,
+          attempts INTEGER NOT NULL,
+          max_attempts INTEGER NOT NULL,
+          run_after TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_error TEXT,
+          checkpoint_json TEXT,
+          PRIMARY KEY(workspace_id, id)
+        );
+      `);
+      const insert = this.store.db.prepare(`INSERT INTO photox_jobs(workspace_id,id,type,payload_json,state,priority,attempts,max_attempts,run_after,created_at,updated_at,last_error,checkpoint_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      for (const row of legacyRows) {
+        insert.run(this.legacyWorkspaceId, String(row.id), String(row.type), String(row.payload_json), String(row.state), Number(row.priority), Number(row.attempts), Number(row.max_attempts), row.run_after ?? null, String(row.created_at), String(row.updated_at), row.last_error ?? null, row.checkpoint_json ?? null);
+      }
+      this.store.db.exec(`
+        DROP TABLE photox_jobs_legacy_v1;
+        CREATE INDEX IF NOT EXISTS idx_photox_jobs_workspace_state_run_after ON photox_jobs(workspace_id, state, run_after);
+      `);
+      this.store.db.exec('COMMIT');
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async put(job: DurableJob): Promise<void> {
-    this.store.db.prepare(`INSERT INTO photox_jobs(id,type,payload_json,state,priority,attempts,max_attempts,run_after,created_at,updated_at,last_error,checkpoint_json)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET type=excluded.type,payload_json=excluded.payload_json,state=excluded.state,priority=excluded.priority,attempts=excluded.attempts,max_attempts=excluded.max_attempts,run_after=excluded.run_after,updated_at=excluded.updated_at,last_error=excluded.last_error,checkpoint_json=excluded.checkpoint_json`).run(
-      job.id, job.type, JSON.stringify(job.payload), job.state, job.priority, job.attempts, job.maxAttempts, job.runAfter ?? null,
+    if (job.workspaceId !== this.workspaceId) throw new Error('JOB_WORKSPACE_MISMATCH');
+    this.store.db.prepare(`INSERT INTO photox_jobs(workspace_id,id,type,payload_json,state,priority,attempts,max_attempts,run_after,created_at,updated_at,last_error,checkpoint_json)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(workspace_id,id) DO UPDATE SET type=excluded.type,payload_json=excluded.payload_json,state=excluded.state,priority=excluded.priority,attempts=excluded.attempts,max_attempts=excluded.max_attempts,run_after=excluded.run_after,updated_at=excluded.updated_at,last_error=excluded.last_error,checkpoint_json=excluded.checkpoint_json`).run(
+      this.workspaceId, job.id, job.type, JSON.stringify(job.payload), job.state, job.priority, job.attempts, job.maxAttempts, job.runAfter ?? null,
       job.createdAt, job.updatedAt, job.lastError ?? null, job.checkpoint ? JSON.stringify(job.checkpoint) : null,
     );
   }
-  async get(id: string): Promise<DurableJob | null> {
-    const row = this.store.db.prepare('SELECT * FROM photox_jobs WHERE id=?').get(id) as Record<string, unknown> | undefined;
+  async get(workspaceId: string, id: string): Promise<DurableJob | null> {
+    if (workspaceId !== this.workspaceId) return null;
+    const row = this.store.db.prepare('SELECT * FROM photox_jobs WHERE workspace_id=? AND id=?').get(this.workspaceId, id) as Record<string, unknown> | undefined;
     return row ? this.map(row) : null;
   }
-  async list(states?: JobState[]): Promise<DurableJob[]> {
+  async list(workspaceId: string, states?: JobState[]): Promise<DurableJob[]> {
+    if (workspaceId !== this.workspaceId) return [];
     const rows = states?.length
-      ? this.store.db.prepare(`SELECT * FROM photox_jobs WHERE state IN (${states.map(() => '?').join(',')}) ORDER BY priority DESC, created_at ASC`).all(...states)
-      : this.store.db.prepare('SELECT * FROM photox_jobs ORDER BY priority DESC, created_at ASC').all();
-    return (rows as Record<string, unknown>[]).map((row) => this.map(row));
+      ? this.store.db.prepare(`SELECT * FROM photox_jobs WHERE workspace_id=? AND state IN (${states.map(() => '?').join(',')}) ORDER BY priority DESC, created_at ASC`).all(this.workspaceId, ...states)
+      : this.store.db.prepare('SELECT * FROM photox_jobs WHERE workspace_id=? ORDER BY priority DESC, created_at ASC').all(this.workspaceId);
+    return (rows as Record<string, unknown>[]).map(row => this.map(row));
   }
   private map(row: Record<string, unknown>): DurableJob {
     return {
-      id: String(row.id), type: String(row.type), payload: JSON.parse(String(row.payload_json)), state: String(row.state) as JobState,
+      id: String(row.id), workspaceId: String(row.workspace_id), type: String(row.type), payload: JSON.parse(String(row.payload_json)), state: String(row.state) as JobState,
       priority: Number(row.priority), attempts: Number(row.attempts), maxAttempts: Number(row.max_attempts),
       runAfter: row.run_after ? String(row.run_after) : undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
       lastError: row.last_error ? String(row.last_error) : undefined,
