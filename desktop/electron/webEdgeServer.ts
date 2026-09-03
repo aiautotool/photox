@@ -3,13 +3,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
+import type { MediaApiScope } from '@photox/media-api';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
+export type WebPrincipal={subject:string;workspaceId:string;workspaceRole?:WebRole;deviceId?:string;sessionId?:string;scopes:MediaApiScope[]};
 
 type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};
 
 export interface WebEdgeHandlers {
+  authorizeAccessToken(token:string,required:MediaApiScope[]):Promise<WebPrincipal>;
+  refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
+  revokeSession(sessionId:string):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
   listLocalMedia():Promise<unknown>;
@@ -32,16 +37,13 @@ export interface WebEdgeHandlers {
   resumeMigration(jobId:string):Promise<unknown>;
   cancelMigration(jobId:string):Promise<unknown>;
   retryMigration(jobId:string):Promise<unknown>;
-  streamMedia(req:IncomingMessage,res:ServerResponse,key:string,variant:'original'|'playback'|'thumbnail'):Promise<void>;
+  streamMedia(req:IncomingMessage,res:ServerResponse,key:string,variant:'original'|'playback'|'thumbnail',workspaceId:string):Promise<void>;
 }
 
 export interface WebEdgeConfig {
   enabled:boolean;
   host:string;
   port:number;
-  accessToken:string;
-  role:WebRole;
-  workspaceId:string;
   allowedOrigins:string[];
   staticDir:string;
   publicBaseUrl?:string;
@@ -54,19 +56,12 @@ const MEDIA_TTL_SECONDS=10*60;
 
 export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
-  const accessToken=process.env.PHOTOX_WEB_ACCESS_TOKEN||'';
-  if(enabled&&accessToken.length<32)throw new Error('PHOTOX_WEB_ACCESS_TOKEN must be at least 32 characters when Web is enabled');
-  const rawRole=process.env.PHOTOX_WEB_ROLE||'owner';
-  const role=(['owner','admin','member','viewer'].includes(rawRole)?rawRole:'owner') as WebRole;
   const port=Number(process.env.PHOTOX_WEB_PORT||43118);
   if(!Number.isInteger(port)||port<1||port>65535)throw new Error('PHOTOX_WEB_PORT is invalid');
   return {
     enabled,
     host:process.env.PHOTOX_WEB_HOST||'127.0.0.1',
     port,
-    accessToken,
-    role,
-    workspaceId:process.env.PHOTOX_WORKSPACE_ID||'legacy-personal',
     allowedOrigins:(process.env.PHOTOX_WEB_ALLOWED_ORIGINS||'').split(',').map(v=>v.trim()).filter(Boolean),
     staticDir,
     publicBaseUrl:process.env.PHOTOX_WEB_PUBLIC_BASE_URL?.replace(/\/$/,''),
@@ -77,8 +72,9 @@ export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
 export class PhotoXWebEdgeServer {
   private server:http.Server|null=null;
   private ws:WebSocketServer|null=null;
-  private sockets=new Set<WebSocket>();
+  private sockets=new Map<WebSocket,WebPrincipal>();
   private buckets=new Map<string,Bucket>();
+  private readonly mediaSigningKey=crypto.randomBytes(32);
   constructor(private readonly config:WebEdgeConfig,private readonly handlers:WebEdgeHandlers){}
 
   async start(){
@@ -86,50 +82,63 @@ export class PhotoXWebEdgeServer {
     this.server=http.createServer((req,res)=>void this.handle(req,res));
     this.ws=new WebSocketServer({noServer:true});
     this.server.on('upgrade',(req,socket,head)=>{
-      const url=new URL(req.url||'/','http://localhost');
-      if(url.pathname!=='/api/web/v1/events'||!this.authorized(req)||!this.originAllowed(req)){socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();return;}
-      this.ws!.handleUpgrade(req,socket,head,client=>{this.sockets.add(client);client.on('close',()=>this.sockets.delete(client));});
+      void (async()=>{
+        const url=new URL(req.url||'/','http://localhost');
+        if(url.pathname!=='/api/web/v1/events'||!this.originAllowed(req)){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return;}
+        try{
+          const principal=await this.authorize(req,['media:read']);
+          this.ws!.handleUpgrade(req,socket,head,client=>{this.sockets.set(client,principal);client.on('close',()=>this.sockets.delete(client));});
+        }catch{socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');socket.destroy();}
+      })();
     });
     await new Promise<void>((resolve,reject)=>{this.server!.once('error',reject);this.server!.listen(this.config.port,this.config.host,()=>resolve());});
   }
 
   async stop(){
-    for(const socket of this.sockets)socket.close();this.sockets.clear();
+    for(const socket of this.sockets.keys())socket.close();this.sockets.clear();
     await new Promise<void>(resolve=>this.server?.close(()=>resolve())??resolve());
     this.ws?.close();this.ws=null;this.server=null;
   }
 
   publish(event:WebEdgeEvent,payload:unknown){
-    const message=JSON.stringify({event,payload,workspaceId:this.config.workspaceId,at:new Date().toISOString()});
-    for(const socket of this.sockets)if(socket.readyState===WebSocket.OPEN)socket.send(message);
+    const payloadWorkspace=payload&&typeof payload==='object'&&'workspaceId' in payload?String((payload as any).workspaceId||''):undefined;
+    for(const [socket,principal] of this.sockets){
+      if(socket.readyState!==WebSocket.OPEN)continue;
+      if(payloadWorkspace&&payloadWorkspace!==principal.workspaceId)continue;
+      socket.send(JSON.stringify({event,payload,workspaceId:principal.workspaceId,at:new Date().toISOString()}));
+    }
   }
 
-  private authorized(req:IncomingMessage){
+  private tokenFromRequest(req:IncomingMessage){
     const bearer=/^Bearer\s+(.+)$/i.exec(String(req.headers.authorization||''))?.[1];
     const protocols=String(req.headers['sec-websocket-protocol']||'').split(',').map(v=>v.trim());
-    const token=bearer||protocols.find(v=>v!=='photox-v1');
-    if(!token||token.length!==this.config.accessToken.length)return false;
-    return crypto.timingSafeEqual(Buffer.from(token),Buffer.from(this.config.accessToken));
+    return bearer||protocols.find(v=>v!=='photox-v2'&&v!=='photox-v1');
   }
 
-  private mediaSignature(key:string,variant:string,expires:number){
-    return crypto.createHmac('sha256',this.config.accessToken).update(`${this.config.workspaceId}\n${variant}\n${key}\n${expires}`).digest('base64url');
+  private authorize(req:IncomingMessage,required:MediaApiScope[]){
+    const token=this.tokenFromRequest(req);if(!token)throw new Error('AUTH_REQUIRED');
+    return this.handlers.authorizeAccessToken(token,required);
   }
 
-  private mediaUrl(key:string,variant:'media'|'playback'|'thumbnail'){
+  private mediaSignature(workspaceId:string,key:string,variant:string,expires:number){
+    return crypto.createHmac('sha256',this.mediaSigningKey).update(`${workspaceId}\n${variant}\n${key}\n${expires}`).digest('base64url');
+  }
+
+  private mediaUrl(principal:WebPrincipal,key:string,variant:'media'|'playback'|'thumbnail'){
     const expires=Math.floor(Date.now()/1000)+MEDIA_TTL_SECONDS;
-    const sig=this.mediaSignature(key,variant,expires);
+    const sig=this.mediaSignature(principal.workspaceId,key,variant,expires);
     const base=this.config.publicBaseUrl||'';
-    return `${base}/api/web/v1/${variant}/${encodeURIComponent(key)}?exp=${expires}&sig=${encodeURIComponent(sig)}`;
+    return `${base}/api/web/v1/${variant}/${encodeURIComponent(key)}?wid=${encodeURIComponent(principal.workspaceId)}&exp=${expires}&sig=${encodeURIComponent(sig)}`;
   }
 
-  private signedMediaAuthorized(url:URL){
-    const match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(url.pathname);if(!match)return false;
+  private signedMediaPrincipal(url:URL):WebPrincipal|undefined{
+    const match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(url.pathname);if(!match)return;
+    const workspaceId=url.searchParams.get('wid')||'';
     const expires=Number(url.searchParams.get('exp')||0);const supplied=url.searchParams.get('sig')||'';
-    if(!Number.isInteger(expires)||expires<Math.floor(Date.now()/1000)||expires>Math.floor(Date.now()/1000)+MEDIA_TTL_SECONDS+60)return false;
-    const expected=this.mediaSignature(decodeURIComponent(match[2]),match[1],expires);
-    if(supplied.length!==expected.length)return false;
-    return crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected));
+    if(!workspaceId||!Number.isInteger(expires)||expires<Math.floor(Date.now()/1000)||expires>Math.floor(Date.now()/1000)+MEDIA_TTL_SECONDS+60)return;
+    const expected=this.mediaSignature(workspaceId,decodeURIComponent(match[2]),match[1],expires);
+    if(supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return;
+    return {subject:'signed-media',workspaceId,workspaceRole:'viewer',scopes:['media:download']};
   }
 
   private originAllowed(req:IncomingMessage){
@@ -145,7 +154,10 @@ export class PhotoXWebEdgeServer {
     bucket.count+=1;return bucket.count<=this.config.rateLimitPerMinute;
   }
 
-  private requireRole(role:WebRole){return ROLE_RANK[this.config.role]>=ROLE_RANK[role];}
+  private requireRole(principal:WebPrincipal,role:WebRole){
+    const actual=principal.workspaceRole??'viewer';
+    return ROLE_RANK[actual]>=ROLE_RANK[role];
+  }
 
   private cors(req:IncomingMessage,res:ServerResponse){
     const origin=String(req.headers.origin||'');if(origin&&this.originAllowed(req)){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','Origin');}
@@ -169,22 +181,37 @@ export class PhotoXWebEdgeServer {
     if(!this.originAllowed(req)){this.json(res,403,{error:'ORIGIN_FORBIDDEN'});return;}
     if(!this.rateAllowed(req)){res.setHeader('retry-after','60');this.json(res,429,{error:'RATE_LIMITED'});return;}
     const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname==='/api/web/v1/auth/refresh'&&req.method==='POST'){
+      try{const b=await this.body(req);this.json(res,200,await this.handlers.refreshSession(String(b.refreshToken||'')));}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
+    }
     if(url.pathname.startsWith('/api/web/v1/')){
-      if(!this.authorized(req)&&!this.signedMediaAuthorized(url)){this.json(res,401,{error:'AUTH_REQUIRED'});return;}
-      try{await this.api(req,res,url);return;}catch(error){this.json(res,500,{error:error instanceof Error?error.message:String(error)});return;}
+      try{
+        const signed=this.signedMediaPrincipal(url);
+        const required:MediaApiScope[]=signed?['media:download']:url.pathname.startsWith('/api/web/v1/media/')||url.pathname.startsWith('/api/web/v1/playback/')||url.pathname.startsWith('/api/web/v1/thumbnail/')?['media:download']:['media:read'];
+        const principal=signed??await this.authorize(req,required);
+        await this.api(req,res,url,principal);return;
+      }catch(error){
+        const message=error instanceof Error?error.message:String(error);
+        this.json(res,message.includes('ROLE_FORBIDDEN')?403:message.includes('NOT_FOUND')?404:401,{error:message});return;
+      }
     }
     await this.static(req,res,url.pathname);
   }
 
-  private async api(req:IncomingMessage,res:ServerResponse,url:URL){
+  private async api(req:IncomingMessage,res:ServerResponse,url:URL,principal:WebPrincipal){
     const p=url.pathname,m=req.method||'GET';
     const read=async(fn:()=>Promise<unknown>)=>this.json(res,200,await fn());
-    const mutate=async(role:WebRole,fn:()=>Promise<unknown>)=>{if(!this.requireRole(role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}this.json(res,200,await fn());};
+    const mutate=async(role:WebRole,fn:()=>Promise<unknown>)=>{if(!this.requireRole(principal,role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}this.json(res,200,await fn());};
+    if(m==='POST'&&p==='/api/web/v1/auth/revoke'){
+      const b=await this.body(req);if(principal.sessionId&&String(b.sessionId||'')!==principal.sessionId&&!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
+      await this.handlers.revokeSession(String(b.sessionId||principal.sessionId||''));res.writeHead(204);res.end();return;
+    }
+    if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
     if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);
     if(m==='GET'&&p==='/api/web/v1/library'){
       const raw=await this.handlers.listLocalMedia();const items=Array.isArray(raw)?raw as BrowserMedia[]:[];
-      return this.json(res,200,items.map(item=>({...item,url:this.mediaUrl(item.key,'media'),thumbnailUri:this.mediaUrl(item.key,'thumbnail')})));
+      return this.json(res,200,items.map(item=>({...item,url:this.mediaUrl(principal,item.key,'media'),thumbnailUri:this.mediaUrl(principal,item.key,'thumbnail')})));
     }
     if(m==='GET'&&p==='/api/web/v1/cloud/uploads')return read(this.handlers.listCloudUploads);
     if(m==='GET'&&p==='/api/web/v1/backup/health')return read(this.handlers.getBackupHealth);
@@ -200,7 +227,7 @@ export class PhotoXWebEdgeServer {
     if(m==='POST'&&p==='/api/web/v1/migrations'){const b=await this.body(req);return mutate('member',()=>this.handlers.createMigration(b));}
     match=/^\/api\/web\/v1\/migrations\/([^/]+)$/.exec(p);if(m==='GET'&&match)return read(()=>this.handlers.getMigration(decodeURIComponent(match![1])));
     match=/^\/api\/web\/v1\/migrations\/([^/]+)\/(selection|run|pause|resume|cancel|retry)$/.exec(p);if(m==='POST'&&match){const id=decodeURIComponent(match[1]);const op=match[2];return mutate('member',()=>op==='selection'?this.handlers.materializeMigration(id):op==='run'?this.handlers.runMigration(id):op==='pause'?this.handlers.pauseMigration(id):op==='resume'?this.handlers.resumeMigration(id):op==='cancel'?this.handlers.cancelMigration(id):this.handlers.retryMigration(id));}
-    match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(p);if(m==='GET'&&match){const variant=match[1]==='media'?'original':match[1] as 'playback'|'thumbnail';await this.handlers.streamMedia(req,res,decodeURIComponent(match[2]),variant);return;}
+    match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(p);if(m==='GET'&&match){const variant=match[1]==='media'?'original':match[1] as 'playback'|'thumbnail';await this.handlers.streamMedia(req,res,decodeURIComponent(match[2]),variant,principal.workspaceId);return;}
     this.json(res,404,{error:'NOT_FOUND'});
   }
 
@@ -213,7 +240,7 @@ export class PhotoXWebEdgeServer {
     try{
       let body=await fs.readFile(filePath);
       if(path.basename(filePath)==='index.html'){
-        const bootstrap=`<script>window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.token')||new URLSearchParams(location.hash.slice(1)).get('access_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken){sessionStorage.setItem('photox.web.token',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);if(location.hash)history.replaceState(null,'',location.pathname+location.search);}</script>`;
+        const bootstrap=`<script>window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||new URLSearchParams(location.hash.slice(1)).get('access_token')||''),refreshToken:(sessionStorage.getItem('photox.web.refresh')||new URLSearchParams(location.hash.slice(1)).get('refresh_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken)sessionStorage.setItem('photox.web.access',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);if(window.__PHOTOSYNC_WEB_CONFIG__.refreshToken)sessionStorage.setItem('photox.web.refresh',window.__PHOTOSYNC_WEB_CONFIG__.refreshToken);if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;
         body=Buffer.from(body.toString('utf8').replace('</head>',`${bootstrap}</head>`));
       }
       const ext=path.extname(filePath);const types:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};
