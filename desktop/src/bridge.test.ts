@@ -158,3 +158,67 @@ test('Web bridge refreshes and reconnects WebSocket with the rotated access toke
     Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: originalWindow });
   }
 });
+
+test('Web bridge keeps retrying WebSocket reconnect when refresh temporarily fails', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const originalWindow = globalThis.window;
+  const sockets: FakeWebSocket[] = [];
+  const delays: number[] = [];
+  let refreshCalls = 0;
+
+  class FakeWebSocket {
+    listeners = new Map<string, Array<(event: Event) => void>>();
+    constructor(public readonly url: string | URL, public readonly protocols?: string | string[]) {
+      sockets.push(this);
+    }
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      const callback = typeof listener === 'function' ? listener : (event: Event) => listener.handleEvent(event);
+      this.listeners.set(type, [...(this.listeners.get(type) || []), callback]);
+    }
+    emit(type: string) {
+      for (const listener of this.listeners.get(type) || []) listener(new Event(type));
+    }
+    close() {}
+  }
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/api/web/v1/auth/refresh')) {
+      refreshCalls += 1;
+      if (refreshCalls === 1) return new Response('temporarily unavailable', { status: 503 });
+      return new Response(JSON.stringify({ accessToken: 'access-after-retry', csrfToken: 'csrf-after-retry' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeWebSocket });
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    writable: true,
+    value: {
+      setTimeout: (callback: () => void, delay: number) => { delays.push(delay); queueMicrotask(callback); return delays.length; },
+      clearTimeout: () => undefined,
+    },
+  });
+
+  try {
+    const bridge = createHttpDesktopBridge({ baseUrl: 'https://photox.example', accessToken: 'access-1' });
+    const unsubscribe = bridge.onMigrationUpdated(() => undefined);
+    await waitFor(()=>sockets.length===1,'initial WebSocket was not created');
+    sockets[0]?.emit('close');
+
+    await waitFor(()=>refreshCalls===2,'WebSocket reconnect did not retry refresh after a transient failure');
+    await waitFor(()=>sockets.length===2,'WebSocket did not reconnect after refresh recovered');
+    assert.deepEqual(sockets[1]?.protocols, ['photox-v2', 'access-after-retry']);
+    assert.deepEqual(delays.slice(0,2), [1500,3000]);
+    unsubscribe();
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket });
+    Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: originalWindow });
+  }
+});
