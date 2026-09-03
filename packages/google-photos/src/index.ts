@@ -110,6 +110,51 @@ export async function uploadPhotoBytes(
   return token;
 }
 
+/**
+ * Streams a selected Picker item directly into the Google Photos raw-upload endpoint.
+ * This avoids buffering large videos in memory in the Desktop process. Node's fetch
+ * requires duplex='half' for streaming request bodies, while the stream remains a
+ * standards-based ReadableStream for Electron/undici.
+ */
+export async function uploadPhotoStream(
+  accessToken: string,
+  stream: ReadableStream<Uint8Array>,
+  mimeType = 'application/octet-stream',
+  options: { contentLength?: number; signal?: AbortSignal; onBytes?: (transferredBytes: number) => void } = {},
+): Promise<string> {
+  let transferredBytes = 0;
+  const counted = options.onBytes
+    ? stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          transferredBytes += chunk.byteLength;
+          options.onBytes?.(transferredBytes);
+          controller.enqueue(chunk);
+        },
+      }))
+    : stream;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/octet-stream',
+    'X-Goog-Upload-Content-Type': mimeType,
+    'X-Goog-Upload-Protocol': 'raw',
+  };
+  if (options.contentLength && Number.isFinite(options.contentLength) && options.contentLength > 0) {
+    headers['Content-Length'] = String(Math.floor(options.contentLength));
+  }
+  const init: RequestInit & { duplex: 'half' } = {
+    method: 'POST',
+    headers,
+    body: counted,
+    signal: options.signal,
+    duplex: 'half',
+  };
+  const response = await fetch('https://photoslibrary.googleapis.com/v1/uploads', init);
+  if (!response.ok) throw new Error(`Google Photos upload ${response.status}: ${await response.text()}`);
+  const token = await response.text();
+  if (!token) throw new Error('GOOGLE_PHOTOS_UPLOAD_TOKEN_MISSING');
+  return token;
+}
+
 export type CreatedMediaItemResult = {
   uploadToken?: string;
   status?: { message?: string; code?: number };
