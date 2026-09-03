@@ -5,11 +5,13 @@ Telegram Bot storage provider for PhotoX. This package is a library only; it is 
 ## Design
 
 - Provider id: `telegram-bot`
-- Multiple bot/chat accounts are supported.
-- Bot tokens are stored through `SecretStore`; persisted account config stores only `botTokenSecretKey`.
-- Media storage metadata is tracked independently through `TelegramMediaRepository`.
-- `TelegramMediaStatsService` calculates media count and bytes per account and provider total.
-- `TelegramStorageProvider` implements the shared `StorageProvider` contract.
+- Multiple bot/chat accounts are supported per workspace.
+- Every `TelegramAccountService` is bound to one `workspaceId`; list/resolve/remove cannot cross that boundary.
+- Account config identity is `(workspaceId, accountId)`, so two workspaces may safely use the same account ID.
+- Bot tokens are stored through `SecretStore`; the service namespaces the physical secret key by workspace before reading/writing it, so identical logical `botTokenSecretKey` values in different workspaces do not collide.
+- Media storage metadata is tracked independently through `TelegramMediaRepository` and every row carries `workspaceId`.
+- `TelegramMediaStatsService` is workspace-bound and calculates media count and bytes only for that workspace.
+- `TelegramStorageProvider` implements the shared `StorageProvider` contract and writes media metadata using the account service workspace boundary.
 - `TelegramHttpBotApiAdapter` is a default fetch/FormData adapter for normal Bot API usage.
 - Large-file implementations can replace the API adapter without changing the provider or desktop UI contract.
 
@@ -17,6 +19,7 @@ Telegram Bot storage provider for PhotoX. This package is a library only; it is 
 
 ```ts
 {
+  workspaceId: 'workspace-personal',
   accountId: 'telegram-backup-1',
   displayName: 'Telegram Backup 1',
   chatId: '-1001234567890',
@@ -30,6 +33,7 @@ For Local Bot API Server:
 
 ```ts
 {
+  workspaceId: 'workspace-personal',
   accountId: 'telegram-large-video',
   displayName: 'Telegram Large Video',
   chatId: '-1001234567890',
@@ -43,24 +47,25 @@ For Local Bot API Server:
 ## Desktop config flow
 
 ```text
-Desktop Settings
+Desktop workspace
+  -> new TelegramAccountService(configStore, secretStore, workspaceId)
   -> TelegramAccountService.save(config, botToken)
-  -> config repository stores non-secret fields
-  -> secret store stores token
+  -> config repository stores workspace-owned non-secret fields
+  -> secret store stores the token under a workspace-namespaced physical key
   -> TelegramStorageProvider.listAccounts()
 ```
 
-Production desktop integration should implement persistent config/media repositories and an OS-backed secret store (Keychain/Credential Manager or equivalent).
+Production desktop integration should implement a durable workspace-scoped config/media repository and an OS-backed secret store (Keychain/Credential Manager or equivalent). Do not persist raw bot tokens in normal provider config, logs, audit payloads or Web API responses.
 
 ## Stats
 
 ```ts
-const stats = await telegramStats.getStats({
+const stats = await new TelegramMediaStatsService(mediaRepository, workspaceId).getStats({
   'telegram-backup-1': 'Telegram Backup 1'
 });
 ```
 
-Returns total media/bytes and per-account image/video/other counts.
+Returns total media/bytes and per-account image/video/other counts for only the bound workspace.
 
 ## Telegram Bot API limits
 
