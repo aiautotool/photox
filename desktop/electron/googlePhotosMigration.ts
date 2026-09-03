@@ -15,6 +15,7 @@ import {
   listAllPickedMedia,
   migrationItemsFromPicker,
   uploadPhotoBytes,
+  uploadPhotoStream,
   type GooglePhotosMigrationItem,
   type GooglePhotosMigrationJob,
   type GooglePhotosMigrationLedger,
@@ -129,8 +130,13 @@ export class DesktopGooglePhotosMigrationService {
         const response = await downloadPickedMedia(source); const contentLength = Number(response.headers.get('content-length') || 0);
         if (currentJob.target === 'google_drive') return this.options.uploadToDrive({ accountId: currentJob.targetAccountId, source, response, signal, onBytes });
         const destinationToken = await this.accessToken(await this.requireAccount(currentJob.targetAccountId, 'append'));
-        const bytes = await response.arrayBuffer(); if (signal?.aborted) throw new Error('MIGRATION_ABORTED'); onBytes?.(contentLength || bytes.byteLength);
-        const uploadToken = await uploadPhotoBytes(destinationToken, bytes, source.mediaFile?.mimeType);
+        let uploadToken: string;
+        if (response.body) {
+          uploadToken = await uploadPhotoStream(destinationToken, response.body, source.mediaFile?.mimeType, { contentLength, signal, onBytes });
+        } else {
+          const bytes = await response.arrayBuffer(); if (signal?.aborted) throw new Error('MIGRATION_ABORTED'); onBytes?.(contentLength || bytes.byteLength);
+          uploadToken = await uploadPhotoBytes(destinationToken, bytes, source.mediaFile?.mimeType);
+        }
         const [created] = await createMediaItems(destinationToken, [{ uploadToken, filename: source.mediaFile?.filename }]);
         if (created?.status?.code && created.status.code !== 0) throw new Error(created.status.message || `GOOGLE_PHOTOS_CREATE_${created.status.code}`);
         const targetId = created?.mediaItem?.id; if (!targetId) throw new Error('GOOGLE_PHOTOS_DESTINATION_ID_MISSING'); return { targetId, targetUrl: created.mediaItem?.productUrl };
