@@ -26,6 +26,8 @@ export interface GooglePhotosMigrationJob {
   failedItems: number;
   totalBytes?: number;
   transferredBytes: number;
+  transferRateBps?: number;
+  etaSeconds?: number;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -101,8 +103,29 @@ export class GooglePhotosMigrationRunner {
     if (job.state === 'completed' || job.state === 'cancelled') return job;
 
     const startedAt = job.startedAt ?? this.now().toISOString();
-    job = (await this.ledger.updateJob(jobId, { state: 'running', startedAt, lastError: undefined, updatedAt: this.now().toISOString() })) ?? job;
+    job = (await this.ledger.updateJob(jobId, { state: 'running', startedAt, lastError: undefined, transferRateBps: undefined, etaSeconds: undefined, updatedAt: this.now().toISOString() })) ?? job;
     const items = await this.ledger.listItems(jobId);
+    let progressBytes = items.reduce((sum, item) => sum + item.transferredBytes, 0);
+    let progressAt = this.now().getTime();
+    let smoothedRate = job.transferRateBps ?? 0;
+
+    const updateTelemetry = (nextTotalBytes: number) => {
+      const nowMs = this.now().getTime();
+      const elapsedSeconds = (nowMs - progressAt) / 1000;
+      const deltaBytes = Math.max(0, nextTotalBytes - progressBytes);
+      if (elapsedSeconds < 0.25 || deltaBytes <= 0) return;
+      const instantRate = deltaBytes / elapsedSeconds;
+      smoothedRate = smoothedRate > 0 ? smoothedRate * 0.6 + instantRate * 0.4 : instantRate;
+      progressBytes = nextTotalBytes;
+      progressAt = nowMs;
+      const etaSeconds = job?.totalBytes != null && smoothedRate > 0 ? Math.max(0, (job.totalBytes - nextTotalBytes) / smoothedRate) : undefined;
+      void this.ledger.updateJob(jobId, {
+        transferredBytes: nextTotalBytes,
+        transferRateBps: smoothedRate,
+        etaSeconds,
+        updatedAt: this.now().toISOString(),
+      });
+    };
 
     for (const item of items) {
       if (signal?.aborted || control.shouldCancel()) {
@@ -110,10 +133,10 @@ export class GooglePhotosMigrationRunner {
         for (const remaining of items.filter(candidate => candidate.state === 'queued' || candidate.state === 'failed')) {
           await this.ledger.updateItem(remaining.id, { state: 'cancelled', updatedAt });
         }
-        return (await this.ledger.updateJob(jobId, { state: 'cancelled', updatedAt, completedAt: updatedAt })) ?? job;
+        return (await this.ledger.updateJob(jobId, { state: 'cancelled', transferRateBps: undefined, etaSeconds: undefined, updatedAt, completedAt: updatedAt })) ?? job;
       }
       if (control.shouldPause()) {
-        return (await this.ledger.updateJob(jobId, { state: 'paused', updatedAt: this.now().toISOString() })) ?? job;
+        return (await this.ledger.updateJob(jobId, { state: 'paused', transferRateBps: undefined, etaSeconds: undefined, updatedAt: this.now().toISOString() })) ?? job;
       }
       if (item.state === 'completed' || item.state === 'cancelled') continue;
       const source = sources.get(item.sourceMediaId);
@@ -123,6 +146,7 @@ export class GooglePhotosMigrationRunner {
       }
 
       let latest = (await this.ledger.updateItem(item.id, { state: 'downloading', attempts: item.attempts + 1, error: undefined, updatedAt: this.now().toISOString() })) ?? item;
+      const otherBytes = items.reduce((sum, candidate) => sum + (candidate.id === item.id ? 0 : candidate.transferredBytes), 0);
       try {
         latest = (await this.ledger.updateItem(item.id, { state: 'uploading', updatedAt: this.now().toISOString() })) ?? latest;
         const checkpoint = await this.ledger.getTransferCheckpoint(item.id) ?? undefined;
@@ -132,7 +156,11 @@ export class GooglePhotosMigrationRunner {
           source,
           signal,
           checkpoint,
-          onBytes: bytes => { void this.ledger.updateItem(item.id, { transferredBytes: Math.max(0, Math.floor(bytes)), updatedAt: this.now().toISOString() }); },
+          onBytes: bytes => {
+            const normalized = Math.max(0, Math.floor(bytes));
+            void this.ledger.updateItem(item.id, { transferredBytes: normalized, updatedAt: this.now().toISOString() });
+            updateTelemetry(otherBytes + normalized);
+          },
           onCheckpoint: async nextCheckpoint => { await this.ledger.setTransferCheckpoint(item.id, nextCheckpoint); },
         });
         latest = (await this.ledger.updateItem(item.id, { state: 'verifying', targetId: result.targetId, targetUrl: result.targetUrl, updatedAt: this.now().toISOString() })) ?? latest;
@@ -150,7 +178,7 @@ export class GooglePhotosMigrationRunner {
     const transferredBytes = finalItems.reduce((sum, item) => sum + item.transferredBytes, 0);
     const state: MigrationJobState = failedItems ? 'completed_with_errors' : 'completed';
     const completedAt = this.now().toISOString();
-    return (await this.ledger.updateJob(jobId, { state, completedItems, failedItems, transferredBytes, completedAt, updatedAt: completedAt })) ?? job;
+    return (await this.ledger.updateJob(jobId, { state, completedItems, failedItems, transferredBytes, transferRateBps: undefined, etaSeconds: 0, completedAt, updatedAt: completedAt })) ?? job;
   }
 }
 
