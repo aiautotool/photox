@@ -13,6 +13,7 @@
   },
   "include": [
     "src/bridge.ts",
-    "src/bridge.test.ts"
+    "src/bridge.test.ts",
+    "src/workspaceBridge.test.ts"
   ]
 }
