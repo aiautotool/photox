@@ -4,6 +4,7 @@ import {
   migrationItemsFromPicker,
   pickedMediaDownloadUrl,
   transferPickedItems,
+  uploadPhotoStream,
   type GooglePhotosMigrationItem,
   type GooglePhotosMigrationJob,
   type GooglePhotosMigrationLedger,
@@ -16,6 +17,33 @@ describe('Google Photos migration', () => {
   it('uses the Picker download form for photos and videos', () => {
     expect(pickedMediaDownloadUrl({ id: 'p', mediaFile: { baseUrl: 'https://example/photo', mimeType: 'image/jpeg' } })).toBe('https://example/photo=d');
     expect(pickedMediaDownloadUrl({ id: 'v', mediaFile: { baseUrl: 'https://example/video', mimeType: 'video/mp4' } })).toBe('https://example/video=dv');
+  });
+
+  it('streams upload bodies without buffering and reports byte progress', async () => {
+    const progress: number[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async (_url, init) => {
+      const body = init?.body as ReadableStream<Uint8Array>;
+      const reader = body.getReader();
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      expect(chunks.map(chunk => [...chunk])).toEqual([[1, 2], [3, 4, 5]]);
+      expect((init as RequestInit & { duplex?: string }).duplex).toBe('half');
+      expect(new Headers(init?.headers).get('content-length')).toBe('5');
+      return new Response('upload-token', { status: 200 });
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3, 4, 5]));
+        controller.close();
+      },
+    });
+    await expect(uploadPhotoStream('access-token', stream, 'video/mp4', { contentLength: 5, onBytes: bytes => progress.push(bytes) })).resolves.toBe('upload-token');
+    expect(progress).toEqual([2, 5]);
   });
 
   it('continues a batch when one selected item fails', async () => {
