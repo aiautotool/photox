@@ -1,0 +1,140 @@
+name: V4 Web One-Time Ticket Integration
+on:
+  push:
+    branches: [v4]
+    paths: ['.github/workflows/v4-web-one-time-ticket.yml']
+permissions:
+  contents: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Patch one-time Web login ticket flow
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p=Path(path); s=p.read_text()
+              if old not in s:
+                  raise SystemExit(f'marker not found in {path}: {old[:100]!r}')
+              p.write_text(s.replace(old,new,1))
+
+          core=Path('packages/core/src/index.ts')
+          s=core.read_text()
+          marker='export class OneTimeTicketStore<T>'
+          if marker not in s:
+              s += '''\n\nexport class OneTimeTicketStore<T> {\n  private readonly entries = new Map<string,{value:T;expiresAt:number}>();\n  put(token:string,value:T,expiresAt:number){\n    if(!token)throw new Error('TICKET_REQUIRED');\n    this.entries.set(token,{value,expiresAt});\n  }\n  consume(token:string,now=Date.now()):T|undefined{\n    const entry=this.entries.get(token);\n    if(!entry)return undefined;\n    this.entries.delete(token);\n    if(entry.expiresAt<=now)return undefined;\n    return entry.value;\n  }\n  prune(now=Date.now()){for(const [token,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(token);}\n  get size(){return this.entries.size;}\n}\n'''
+              core.write_text(s)
+
+          test=Path('packages/core/src/index.test.ts')
+          s=test.read_text()
+          if 'OneTimeTicketStore' not in s:
+              s=s.replace('  safeAvailable,','  safeAvailable,\n  OneTimeTicketStore,',1)
+              s += '''\n\ndescribe('one-time ticket store',()=>{\n  it('consumes a valid ticket exactly once',()=>{\n    const store=new OneTimeTicketStore<{id:string}>();\n    store.put('ticket',{id:'session'},2000);\n    expect(store.consume('ticket',1000)).toEqual({id:'session'});\n    expect(store.consume('ticket',1000)).toBeUndefined();\n  });\n  it('rejects and removes expired tickets',()=>{\n    const store=new OneTimeTicketStore<string>();\n    store.put('expired','secret',1000);\n    expect(store.consume('expired',1000)).toBeUndefined();\n    expect(store.size).toBe(0);\n  });\n});\n'''
+              test.write_text(s)
+
+          replace('desktop/electron/workspaceAuth.ts',
+          "  refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }",
+          "  async createTrustedWebSession(input:{deviceId:string;deviceName?:string}) {\n    const pairing=this.pairing.issue();\n    return this.exchange({workspaceId:this.workspaceId,pairingChallenge:pairing.challenge,deviceId:input.deviceId,deviceName:input.deviceName||'PhotoX Web',platform:'web'});\n  }\n\n  refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }")
+
+          replace('desktop/electron/webEdgeServer.ts',
+          "import type { MediaApiScope } from '@photox/media-api';",
+          "import type { MediaApiScope } from '@photox/media-api';\nimport { OneTimeTicketStore } from '@photosync/core';")
+          replace('desktop/electron/webEdgeServer.ts',
+          "type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};",
+          "type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};\ntype WebSession={accessToken:string;refreshToken:string;accessExpiresAt:number;sessionId:string};")
+          replace('desktop/electron/webEdgeServer.ts',
+          "  authorizeAccessToken(token:string,required:MediaApiScope[]):Promise<WebPrincipal>;\n  refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;",
+          "  authorizeAccessToken(token:string,required:MediaApiScope[]):Promise<WebPrincipal>;\n  createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;\n  refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;")
+          replace('desktop/electron/webEdgeServer.ts',
+          "const WEB_REFRESH_MAX_AGE=30*24*60*60;",
+          "const WEB_REFRESH_MAX_AGE=30*24*60*60;\nconst WEB_LOGIN_TTL_MS=2*60_000;")
+          replace('desktop/electron/webEdgeServer.ts',
+          "  private readonly mediaSigningKey=crypto.randomBytes(32);\n  constructor(private readonly config:WebEdgeConfig,private readonly handlers:WebEdgeHandlers){}",
+          "  private readonly mediaSigningKey=crypto.randomBytes(32);\n  private readonly loginTickets=new OneTimeTicketStore<WebSession>();\n  constructor(private readonly config:WebEdgeConfig,private readonly handlers:WebEdgeHandlers){}\n\n  async issueLoginTicket(){\n    this.loginTickets.prune();\n    const ticket=crypto.randomBytes(32).toString('base64url');\n    const session=await this.handlers.createWebSession({deviceId:`web_${crypto.randomBytes(16).toString('hex')}`,deviceName:'PhotoX Web'});\n    const expiresAt=Date.now()+WEB_LOGIN_TTL_MS;\n    this.loginTickets.put(ticket,session,expiresAt);\n    const localHost=['0.0.0.0','::','::0'].includes(this.config.host)?'127.0.0.1':this.config.host;\n    const base=this.config.publicBaseUrl||`http://${localHost}:${this.config.port}`;\n    return {url:`${base}/#ticket=${encodeURIComponent(ticket)}`,expiresAt};\n  }")
+          replace('desktop/electron/webEdgeServer.ts',
+          "    if(url.pathname==='/api/web/v1/auth/bootstrap'&&req.method==='POST'){",
+          "    if(url.pathname==='/api/web/v1/auth/ticket'&&req.method==='POST'){\n      try{const b=await this.body(req);const ticket=String(b.ticket||'');if(!ticket)throw new Error('LOGIN_TICKET_REQUIRED');const session=this.loginTickets.consume(ticket);if(!session)throw new Error('LOGIN_TICKET_INVALID_OR_EXPIRED');const csrfToken=crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,session.refreshToken,csrfToken));this.json(res,200,{accessToken:session.accessToken,accessExpiresAt:session.accessExpiresAt,sessionId:session.sessionId,csrfToken});}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;\n    }\n    if(url.pathname==='/api/web/v1/auth/bootstrap'&&req.method==='POST'){")
+          replace('desktop/electron/webEdgeServer.ts',
+          "const bootstrap=`<script>const p=new URLSearchParams(location.hash.slice(1));window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||p.get('access_token')||''),refreshToken:(p.get('refresh_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken)sessionStorage.setItem('photox.web.access',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);sessionStorage.removeItem('photox.web.refresh');if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;",
+          "const bootstrap=`<script>const p=new URLSearchParams(location.hash.slice(1));window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||''),loginTicket:(p.get('ticket')||'')};if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;")
+
+          replace('desktop/electron/main.ts',
+          "    authorizeAccessToken:async(token,required)=>{const principal=await requireWorkspaceAuth().authorizeToken(token,required);return {subject:principal.subject,workspaceId:principal.workspaceId!,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes};},\n    refreshSession:refreshToken=>requireWorkspaceAuth().refresh(refreshToken),",
+          "    authorizeAccessToken:async(token,required)=>{const principal=await requireWorkspaceAuth().authorizeToken(token,required);return {subject:principal.subject,workspaceId:principal.workspaceId!,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes};},\n    createWebSession:input=>requireWorkspaceAuth().createTrustedWebSession(input),\n    refreshSession:refreshToken=>requireWorkspaceAuth().refresh(refreshToken),")
+          replace('desktop/electron/main.ts',
+          "ipcMain.handle('photosync:retry-cloud',async()=>{await retryQueuedCloud();return desktopStatus()});",
+          "ipcMain.handle('photosync:retry-cloud',async()=>{await retryQueuedCloud();return desktopStatus()});\nipcMain.handle('photosync:web-login-link',async()=>{if(!webEdgeServer)throw new Error('PHOTOX_WEB_DISABLED');return webEdgeServer.issueLoginTicket();});")
+
+          replace('desktop/electron/preload.cts',
+          "  retryCloud: () => ipcRenderer.invoke('photosync:retry-cloud'),",
+          "  retryCloud: () => ipcRenderer.invoke('photosync:retry-cloud'),\n  createWebLoginLink: () => ipcRenderer.invoke('photosync:web-login-link'),")
+
+          replace('desktop/src/bridge.ts',
+          "  retryCloud():Promise<DesktopStatus>;",
+          "  retryCloud():Promise<DesktopStatus>;\n  createWebLoginLink():Promise<{url:string;expiresAt:number}>;")
+          replace('desktop/src/bridge.ts',
+          "  refreshToken?: string;\n  websocketUrl?: string;",
+          "  refreshToken?: string;\n  loginTicket?: string;\n  websocketUrl?: string;")
+          replace('desktop/src/bridge.ts',
+          "return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,websocketUrl:config.websocketUrl});",
+          "return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,loginTicket:config.loginTicket,websocketUrl:config.websocketUrl});")
+          replace('desktop/src/bridge.ts',
+          "  let bootstrapRefreshToken=config.refreshToken||'';\n  let csrfToken='';",
+          "  let bootstrapRefreshToken=config.refreshToken||'';\n  let loginTicket=config.loginTicket||'';\n  let csrfToken='';")
+          replace('desktop/src/bridge.ts',
+          "  async function bootstrapSession(){\n    if(!bootstrapRefreshToken)return false;",
+          "  async function bootstrapSession(){\n    if(!loginTicket&&!bootstrapRefreshToken)return false;")
+          replace('desktop/src/bridge.ts',
+          "        const token=bootstrapRefreshToken;bootstrapRefreshToken='';\n        const response=await fetch(`${baseUrl}/api/web/v1/auth/bootstrap`,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken:token})});",
+          "        const ticket=loginTicket;loginTicket='';\n        const token=bootstrapRefreshToken;bootstrapRefreshToken='';\n        const response=await fetch(`${baseUrl}${ticket?'/api/web/v1/auth/ticket':'/api/web/v1/auth/bootstrap'}`,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(ticket?{ticket}:{refreshToken:token})});")
+          replace('desktop/src/bridge.ts',
+          "    retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),",
+          "    retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),\n    createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},")
+
+          app=Path('desktop/src/App.tsx')
+          s=app.read_text()
+          if 'webLoginLink' not in s:
+              s=s.replace("  const [health,setHealth]=useState<BackupHealthSnapshot>({total:0,safe:0,atRisk:0,critical:0,unknown:0,photos:0,videos:0,totalBytes:0,problems:[]});",
+                          "  const [health,setHealth]=useState<BackupHealthSnapshot>({total:0,safe:0,atRisk:0,critical:0,unknown:0,photos:0,videos:0,totalBytes:0,problems:[]});\n  const [webLoginLink,setWebLoginLink]=useState<{url:string;expiresAt:number}|null>(null);")
+              s=s.replace("  async function removeGoogle(account:DriveAccount){if(!window.confirm(`Ngắt kết nối ${account.email}? Ảnh đã lưu trong Google Drive vẫn được giữ nguyên.`))return;setRemovingAccount(account.id);try{await bridge?.removeGoogleAccount(account.id);await refresh()}finally{setRemovingAccount(null)}}",
+                          "  async function removeGoogle(account:DriveAccount){if(!window.confirm(`Ngắt kết nối ${account.email}? Ảnh đã lưu trong Google Drive vẫn được giữ nguyên.`))return;setRemovingAccount(account.id);try{await bridge?.removeGoogleAccount(account.id);await refresh()}finally{setRemovingAccount(null)}}\n  async function createWebLoginLink(){const b=bridge;if(!b||b.platform==='web')return;try{const link=await b.createWebLoginLink();setWebLoginLink(link);await navigator.clipboard?.writeText(link.url)}catch(e){setStatus(s=>({...s,state:'error',message:e instanceof Error?e.message:String(e)}))}}")
+              old="<div className=\"setting-row\"><div><b>Làm mới trạng thái</b><small>Cập nhật ảnh, kết nối và tài khoản lưu trữ.</small></div><button onClick={()=>void refresh()}>Làm mới</button></div></div></section>;"
+              new="<div className=\"setting-row\"><div><b>Làm mới trạng thái</b><small>Cập nhật ảnh, kết nối và tài khoản lưu trữ.</small></div><button onClick={()=>void refresh()}>Làm mới</button></div></div>{bridge?.platform!=='web'&&<div className=\"panel\"><h3>Web</h3><div className=\"setting-row\"><div><b>Liên kết đăng nhập Web một lần</b><small>{webLoginLink?`Đã sao chép. Hết hạn ${new Date(webLoginLink.expiresAt).toLocaleTimeString('vi-VN')}`:'Tạo link ngắn hạn để mở đúng giao diện Desktop trên trình duyệt. Refresh token không đi qua JavaScript.'}</small></div><button onClick={()=>void createWebLoginLink()}>Tạo & sao chép</button></div>{webLoginLink&&<div className=\"setting-row\"><div><b>Link Web</b><small style={{wordBreak:'break-all'}}>{webLoginLink.url}</small></div></div>}</div>}</section>;"
+              if old not in s: raise SystemExit('App settings marker not found')
+              s=s.replace(old,new,1)
+              app.write_text(s)
+
+          doc=Path('docs/V4_STORAGE_MIGRATION_WEB.md')
+          s=doc.read_text()
+          note='''\n\n## Web one-time login ticket hardening\n\n- Desktop can issue a cryptographically random Web login ticket with a 2-minute TTL.\n- The ticket is single-use and held only in process memory; a successful or expired consume removes it.\n- Browser bootstrap accepts `#ticket=...`, removes the fragment immediately, redeems it at `/api/web/v1/auth/ticket`, and receives only the short-lived access token + CSRF token.\n- The reusable refresh token is written directly to the existing HttpOnly/SameSite cookie by the edge server and is never returned to browser JavaScript in the normal Web login flow.\n- Desktop Settings exposes a real `Create & copy` Web link action; the Web transport itself cannot mint login links.\n- The legacy `/auth/bootstrap` refresh-token endpoint remains temporarily for compatibility with older V4 deployments, but generated Web links no longer use it.\n'''
+          if 'Web one-time login ticket hardening' not in s:
+              doc.write_text(s+note)
+          PY
+      - name: Install
+        run: npm install
+      - name: Unit and integration tests
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Commit verified integration and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/v4-web-one-time-ticket.yml
+          git add packages/core/src/index.ts packages/core/src/index.test.ts desktop/electron/workspaceAuth.ts desktop/electron/webEdgeServer.ts desktop/electron/main.ts desktop/electron/preload.cts desktop/src/bridge.ts desktop/src/App.tsx docs/V4_STORAGE_MIGRATION_WEB.md
+          git commit -m "add one-time Web login tickets"
+          git push origin HEAD:v4
