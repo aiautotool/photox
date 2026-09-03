@@ -18,6 +18,7 @@ export type PairExchangeInput = {
 };
 
 let activeDesktopWorkspaceAuth:DesktopWorkspaceAuth|null=null;
+let workspaceAuthIpcRegistered=false;
 export function requireActiveDesktopWorkspaceAuth(){if(!activeDesktopWorkspaceAuth)throw new Error('WORKSPACE_AUTH_NOT_READY');return activeDesktopWorkspaceAuth;}
 
 export class DesktopWorkspaceAuth {
@@ -73,7 +74,24 @@ export class DesktopWorkspaceAuth {
     if (secret.byteLength < 32) throw new Error('PHOTOX_AUTH_SECRET_INVALID');
     const auth=new DesktopWorkspaceAuth(new Uint8Array(secret), input.store, input.workspaces, input.pairing, input.workspaceId, input.ownerUserId);
     activeDesktopWorkspaceAuth=auth;
+    if(process.versions.electron)await auth.registerElectronIpc();
     return auth;
+  }
+
+  private trustedDesktopActor():DeviceSessionActor{
+    const membership=this.workspaces.getMembership(this.workspaceId,this.ownerUserId);
+    if(!membership||membership.status!=='active')throw new Error('MEMBERSHIP_INACTIVE');
+    return {subject:this.ownerUserId,workspaceId:this.workspaceId,workspaceRole:membership.role};
+  }
+
+  private async registerElectronIpc(){
+    if(workspaceAuthIpcRegistered)return;
+    const {ipcMain}=await import('electron');
+    ipcMain.handle('photosync:workspace-devices',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listDevices(auth.trustedDesktopActor());});
+    ipcMain.handle('photosync:workspace-sessions',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listSessions(auth.trustedDesktopActor());});
+    ipcMain.handle('photosync:workspace-session-revoke',(_event,sessionId:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.revokeSession(auth.trustedDesktopActor(),String(sessionId||''));});
+    ipcMain.handle('photosync:workspace-device-revoke',(_event,deviceId:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.revokeDevice(auth.trustedDesktopActor(),String(deviceId||''));});
+    workspaceAuthIpcRegistered=true;
   }
 
   async exchange(input: PairExchangeInput) {
