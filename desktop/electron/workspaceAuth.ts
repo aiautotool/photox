@@ -17,6 +17,9 @@ export type PairExchangeInput = {
   platform?: 'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';
 };
 
+let activeDesktopWorkspaceAuth:DesktopWorkspaceAuth|null=null;
+export function requireActiveDesktopWorkspaceAuth(){if(!activeDesktopWorkspaceAuth)throw new Error('WORKSPACE_AUTH_NOT_READY');return activeDesktopWorkspaceAuth;}
+
 export class DesktopWorkspaceAuth {
   private readonly tokenService: JoseAccessTokenService;
   private readonly sessions: AuthSessionService;
@@ -68,7 +71,9 @@ export class DesktopWorkspaceAuth {
       await fs.writeFile(input.secretFile, secret, { mode: 0o600 });
     }
     if (secret.byteLength < 32) throw new Error('PHOTOX_AUTH_SECRET_INVALID');
-    return new DesktopWorkspaceAuth(new Uint8Array(secret), input.store, input.workspaces, input.pairing, input.workspaceId, input.ownerUserId);
+    const auth=new DesktopWorkspaceAuth(new Uint8Array(secret), input.store, input.workspaces, input.pairing, input.workspaceId, input.ownerUserId);
+    activeDesktopWorkspaceAuth=auth;
+    return auth;
   }
 
   async exchange(input: PairExchangeInput) {
