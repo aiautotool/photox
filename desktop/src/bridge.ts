@@ -129,16 +129,25 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   }
 
   function subscribe(eventName:string,callback:(payload:any)=>void){
-    let socket:WebSocket|undefined;let stopped=false;let retryTimer:number|undefined;
+    let socket:WebSocket|undefined;let stopped=false;let retryTimer:number|undefined;let retryAttempt=0;
     const wsUrl=config.websocketUrl||baseUrl.replace(/^http:/,'ws:').replace(/^https:/,'wss:')+'/api/web/v1/events';
-    const connect=async()=>{
+    const scheduleReconnect=(refreshBeforeConnect:boolean)=>{
       if(stopped)return;
+      if(retryTimer!==undefined)window.clearTimeout(retryTimer);
+      const delay=Math.min(30000,1500*(2**Math.min(retryAttempt,4)));
+      retryAttempt+=1;
+      retryTimer=window.setTimeout(()=>{retryTimer=undefined;void connect(refreshBeforeConnect)},delay);
+    };
+    const connect=async(refreshBeforeConnect=false)=>{
+      if(stopped)return;
+      if(refreshBeforeConnect&&!(await refreshAccess())){scheduleReconnect(true);return;}
       if(!accessToken&&(loginTicket||bootstrapRefreshToken))await bootstrapSession();
-      if(!accessToken)await refreshAccess();
-      if(!accessToken)return;
+      if(!accessToken&&!(await refreshAccess())){scheduleReconnect(false);return;}
+      if(stopped||!accessToken)return;
       socket=new WebSocket(wsUrl,['photox-v2',accessToken]);
+      socket.addEventListener('open',()=>{retryAttempt=0;});
       socket.addEventListener('message',(event:MessageEvent)=>{try{const data=JSON.parse(String(event.data));if(data?.event===eventName)callback(data.payload)}catch{}});
-      socket.addEventListener('close',()=>{if(!stopped)retryTimer=window.setTimeout(()=>void refreshAccess().then(()=>connect()),1500);});
+      socket.addEventListener('close',()=>{socket=undefined;scheduleReconnect(true);});
     };
     void connect();
     return()=>{stopped=true;if(retryTimer!==undefined)window.clearTimeout(retryTimer);socket?.close();};
