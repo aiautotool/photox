@@ -3,10 +3,16 @@ import { MediaCloudCatalog } from './MediaCloudCatalog';
 import type { MediaCloudAccountStats, MediaCloudProviderStats, MediaCloudStats } from './types';
 
 export class MediaCloudStatsService {
-  constructor(private readonly repository: MediaCloudRepository, private readonly catalog: MediaCloudCatalog) {}
+  constructor(
+    private readonly repository: MediaCloudRepository,
+    private readonly catalog: MediaCloudCatalog,
+    private readonly workspaceId: string,
+  ) {
+    if (!workspaceId) throw new Error('MEDIA_CLOUD_WORKSPACE_REQUIRED');
+  }
 
   async snapshot(): Promise<MediaCloudStats> {
-    const items = await this.repository.list();
+    const items = await this.repository.list({ workspaceId: this.workspaceId });
     const providers = new Map<string, MediaCloudProviderStats>();
     const accounts = new Map<string, MediaCloudAccountStats>();
     let protectedMediaCount = 0;
