@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   removeGoogleAccount: (accountId: string) => ipcRenderer.invoke('photosync:remove-google-account', accountId),
   retryCloud: () => ipcRenderer.invoke('photosync:retry-cloud'),
   createWebLoginLink: () => ipcRenderer.invoke('photosync:web-login-link'),
+  getWorkspaceOverview: () => ipcRenderer.invoke('photosync:workspace-overview'),
   listWorkspaceDevices: () => ipcRenderer.invoke('photosync:workspace-devices'),
   listWorkspaceSessions: () => ipcRenderer.invoke('photosync:workspace-sessions'),
   revokeWorkspaceSession: (sessionId: string) => ipcRenderer.invoke('photosync:workspace-session-revoke', sessionId),
