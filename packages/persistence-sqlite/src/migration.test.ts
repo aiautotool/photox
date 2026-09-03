@@ -21,4 +21,19 @@ describe('migration resumable checkpoint persistence', () => {
     expect(JSON.stringify(await ledger.listItems('job'))).not.toContain('secret-session');
     await ledger.setTransferCheckpoint('item',null);expect(await ledger.getTransferCheckpoint('item')).toBeNull();store.close();
   });
+
+  it('persists transfer rate and ETA across store reopen', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'photox-migration-telemetry-')); cleanup.push(dir); const dbPath = path.join(dir, 'migration.sqlite');
+    const now='2026-09-03T00:00:00.000Z';
+    let store = new SqlitePhotoXStore({ path: dbPath }); let ledger = new SqliteGooglePhotosMigrationLedger(store);
+    await ledger.createJob({ id:'job-telemetry',workspaceId:'ws',sourceAccountId:'src',target:'google_drive',targetAccountId:'drive',state:'running',totalItems:2,completedItems:0,failedItems:0,totalBytes:1000,transferredBytes:250,transferRateBps:125,etaSeconds:6,createdAt:now,updatedAt:now });
+    store.close();
+    store=new SqlitePhotoXStore({ path: dbPath });ledger=new SqliteGooglePhotosMigrationLedger(store);
+    const job=await ledger.getJob('job-telemetry');
+    expect(job?.transferRateBps).toBe(125);
+    expect(job?.etaSeconds).toBe(6);
+    await ledger.updateJob('job-telemetry',{transferRateBps:200,etaSeconds:3,updatedAt:'2026-09-03T00:00:01.000Z'});
+    expect((await ledger.getJob('job-telemetry'))?.transferRateBps).toBe(200);
+    store.close();
+  });
 });
