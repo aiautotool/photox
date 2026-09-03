@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { DesktopBridge, WorkspaceDevice, WorkspaceSessionSummary } from './bridge';
+import type { DesktopBridge, WorkspaceDevice, WorkspaceOverviewSnapshot, WorkspaceQuotaDimension, WorkspaceSessionSummary } from './bridge';
 import './DevicesPage.css';
 
 type Props={bridge:DesktopBridge|undefined;pairingCard:ReactNode;connectionReady:boolean;lastRunAt?:string};
 
 const platformLabel:Record<WorkspaceDevice['platform'],string>={ios:'iPhone / iPad',android:'Android',windows:'Windows',macos:'macOS',linux:'Linux',web:'Web',unknown:'Không rõ'};
 const kindLabel:Record<WorkspaceDevice['kind'],string>={desktop:'Desktop',mobile:'Mobile',web:'Web',service:'Service'};
+const roleLabel:Record<WorkspaceOverviewSnapshot['membership']['role'],string>={owner:'Chủ sở hữu',admin:'Quản trị viên',member:'Thành viên',viewer:'Chỉ xem'};
 
 function formatTime(value?:number|string){
   if(value==null)return 'Chưa có dữ liệu';
@@ -14,8 +15,31 @@ function formatTime(value?:number|string){
 }
 
 function compactId(value:string){return value.length>18?`${value.slice(0,8)}…${value.slice(-6)}`:value}
+function formatBytes(bytes:number){
+  if(!Number.isFinite(bytes)||bytes<=0)return '0 B';
+  if(bytes>=1024**4)return `${(bytes/1024**4).toFixed(1)} TB`;
+  if(bytes>=1024**3)return `${(bytes/1024**3).toFixed(1)} GB`;
+  if(bytes>=1024**2)return `${(bytes/1024**2).toFixed(1)} MB`;
+  if(bytes>=1024)return `${(bytes/1024).toFixed(1)} KB`;
+  return `${Math.round(bytes)} B`;
+}
+
+export function formatQuotaValue(quota:WorkspaceQuotaDimension,unit:'bytes'|'count'){
+  const current=unit==='bytes'?formatBytes(quota.current):String(quota.current);
+  if(quota.limit==null)return `${current} / Không giới hạn`;
+  const limit=unit==='bytes'?formatBytes(quota.limit):String(quota.limit);
+  return `${current} / ${limit}`;
+}
+
+function quotaTone(quota:WorkspaceQuotaDimension){
+  if(quota.percent==null)return 'normal';
+  if(quota.percent>=90)return 'critical';
+  if(quota.percent>=75)return 'warning';
+  return 'normal';
+}
 
 export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props){
+  const [overview,setOverview]=useState<WorkspaceOverviewSnapshot|null>(null);
   const [devices,setDevices]=useState<WorkspaceDevice[]>([]);
   const [sessions,setSessions]=useState<WorkspaceSessionSummary[]>([]);
   const [loading,setLoading]=useState(true);
@@ -27,8 +51,8 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
     if(!bridge){setLoading(false);setError('DesktopBridge chưa sẵn sàng.');return}
     setLoading(true);setError('');setSessionNotice('');
     try{
-      const nextDevices=await bridge.listWorkspaceDevices();
-      setDevices(nextDevices);
+      const [nextOverview,nextDevices]=await Promise.all([bridge.getWorkspaceOverview(),bridge.listWorkspaceDevices()]);
+      setOverview(nextOverview);setDevices(nextDevices);
       try{setSessions(await bridge.listWorkspaceSessions())}
       catch(err){setSessions([]);setSessionNotice(err instanceof Error?err.message:'Bạn không có quyền xem phiên đăng nhập của workspace này.')}
     }catch(err){
@@ -47,6 +71,14 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
     }
     return map;
   },[sessions]);
+  const quotaCards=useMemo(()=>overview?[
+    {key:'managed-storage',label:'Dung lượng quản lý',quota:overview.quota.managedStorage,unit:'bytes' as const},
+    {key:'monthly-ingress',label:'Dữ liệu nhận tháng này',quota:overview.quota.monthlyIngress,unit:'bytes' as const},
+    {key:'members',label:'Thành viên',quota:overview.quota.members,unit:'count' as const},
+    {key:'devices',label:'Thiết bị',quota:overview.quota.devices,unit:'count' as const},
+    {key:'providers',label:'Nơi lưu trữ',quota:overview.quota.storageProviders,unit:'count' as const},
+    {key:'shares',label:'Chia sẻ công khai',quota:overview.quota.publicShares,unit:'count' as const},
+  ]:[],[overview]);
 
   async function revokeSession(session:WorkspaceSessionSummary){
     if(!bridge||!window.confirm('Đăng xuất phiên này? Thiết bị sẽ cần đăng nhập hoặc ghép lại nếu không còn phiên hợp lệ.'))return;
@@ -65,6 +97,26 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
   }
 
   return <section className="page-section devices-page">
+    {overview&&<div className="panel workspace-overview-panel">
+      <div className="workspace-overview-head">
+        <div><span className="workspace-kicker">WORKSPACE</span><h2>{overview.workspace.name}</h2><p>{roleLabel[overview.membership.role]} · {overview.workspace.status}</p></div>
+        <div className="workspace-plan"><span>Gói hiện tại</span><b>{overview.workspace.plan}</b><small>Quyền hạn được đọc trực tiếp từ entitlement hiện tại.</small></div>
+      </div>
+      <div className="workspace-quota-grid">{quotaCards.map(item=>{
+        const tone=quotaTone(item.quota);const width=item.quota.percent==null?0:Math.max(0,Math.min(100,item.quota.percent));
+        return <article className={`workspace-quota quota-${tone}`} key={item.key}>
+          <div><span>{item.label}</span><b>{formatQuotaValue(item.quota,item.unit)}</b></div>
+          {item.quota.percent==null?<small>Không đặt giới hạn kỹ thuật</small>:<><div className="workspace-quota-track"><i style={{width:`${width}%`}}/></div><small>{Math.round(item.quota.percent)}% đã dùng{item.quota.remaining!=null?` · còn ${item.unit==='bytes'?formatBytes(item.quota.remaining):item.quota.remaining}`:''}</small></>}
+        </article>})}</div>
+      <div className="workspace-capabilities">
+        <span className={overview.entitlements.remoteAccess?'enabled':'disabled'}>Remote access</span>
+        <span className={overview.entitlements.publicSharing?'enabled':'disabled'}>Public sharing</span>
+        <span className={overview.entitlements.semanticSearch?'enabled':'disabled'}>Semantic search</span>
+        <span className={overview.entitlements.priorityVideoProcessing?'enabled':'disabled'}>Priority video</span>
+        <span className="enabled">{overview.entitlements.targetOriginalReplicas} original replicas</span>
+      </div>
+    </div>}
+
     <div className="device-overview">
       <div>{pairingCard}</div>
       <div className="panel details-panel">
