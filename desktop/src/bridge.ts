@@ -5,6 +5,10 @@ export type DesktopStatus = { state:'idle'|'receiving'|'uploading'|'error'; rece
 export type TunnelState = { connected:boolean; relayUrl:string; desktopId:string; pairingPayload:string; lastError?:string };
 export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
 export type GooglePhotosAccount={id:string;email:string;capabilities:('picker'|'append')[];status:'ready'|'unavailable'};
+export type WorkspaceDevice={id:string;workspaceId:string;userId:string;name:string;platform:'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';kind:'desktop'|'mobile'|'web'|'service';createdAt:number;lastSeenAt?:number;revokedAt?:number};
+export type WorkspaceSessionSummary={sessionId:string;subject:string;deviceId?:string;scopes:string[];expiresAt:number;createdAt:number;lastUsedAt?:number};
+export type WorkspaceSessionRevokeResult={sessionId:string;revoked:true};
+export type WorkspaceDeviceRevokeResult={deviceId:string;sessionsRevoked:number;activeDevices:number};
 export type MigrationJob={id:string;workspaceId:string;sourceAccountId:string;sourcePickerSessionId?:string;target:'google_photos'|'google_drive';targetAccountId:string;state:string;totalItems:number;completedItems:number;failedItems:number;totalBytes?:number;transferredBytes:number;createdAt:string;updatedAt:string;startedAt?:string;completedAt?:string;lastError?:string};
 export type MigrationItem={id:string;jobId:string;sourceMediaId:string;filename:string;mimeType?:string;sizeBytes?:number;state:string;attempts:number;transferredBytes:number;targetId?:string;targetUrl?:string;error?:string;createdAt:string;updatedAt:string};
 export type MigrationSnapshot={job:MigrationJob;items:MigrationItem[]};
@@ -24,6 +28,10 @@ export interface DesktopBridge {
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
   createWebLoginLink():Promise<{url:string;expiresAt:number}>;
+  listWorkspaceDevices():Promise<WorkspaceDevice[]>;
+  listWorkspaceSessions():Promise<WorkspaceSessionSummary[]>;
+  revokeWorkspaceSession(sessionId:string):Promise<WorkspaceSessionRevokeResult>;
+  revokeWorkspaceDevice(deviceId:string):Promise<WorkspaceDeviceRevokeResult>;
   listGooglePhotosAccounts():Promise<GooglePhotosAccount[]>;
   connectGooglePhotosAccount(capability:'picker'|'append'):Promise<GooglePhotosAccount>;
   removeGooglePhotosAccount(accountId:string):Promise<void>;
@@ -167,6 +175,10 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
     createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},
+    listWorkspaceDevices:()=>json('/api/web/v1/devices'),
+    listWorkspaceSessions:()=>json('/api/web/v1/sessions'),
+    revokeWorkspaceSession:(sessionId)=>json(`/api/web/v1/sessions/${encodeURIComponent(sessionId)}`,{method:'DELETE'}),
+    revokeWorkspaceDevice:(deviceId)=>json(`/api/web/v1/devices/${encodeURIComponent(deviceId)}`,{method:'DELETE'}),
     listGooglePhotosAccounts:()=>json('/api/web/v1/google-photos/accounts'),
     connectGooglePhotosAccount:(capability)=>json('/api/web/v1/google-photos/accounts/connect',{method:'POST',body:JSON.stringify({capability})}),
     removeGooglePhotosAccount:async(accountId)=>{await json(`/api/web/v1/google-photos/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'});},
