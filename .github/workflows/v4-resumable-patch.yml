@@ -12,22 +12,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v4
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Recover and run patch payload
         shell: bash
         run: |
-          git show HEAD^:.github/workflows/v4-resumable-patch.yml > /tmp/payload.yml
+          git show HEAD^^:.github/workflows/v4-resumable-patch.yml > /tmp/payload.yml
           python3 - <<'PY'
           from pathlib import Path
           text=Path('/tmp/payload.yml').read_text()
           start=text.index("          python3 <<'PY'\n")+len("          python3 <<'PY'\n")
           end=text.index("\n          PY\n      - run: npm install",start)
-          lines=text[start:end].splitlines()
-          script='\n'.join(line[10:] if line.startswith('          ') else line for line in lines)+'\n'
-          Path('/tmp/patch.py').write_text(script)
+          out=[]; triple=None
+          for line in text[start:end].splitlines():
+              if triple:
+                  out.append(line)
+                  if triple in line: triple=None
+                  continue
+              normalized=line[10:] if line.startswith('          ') else line
+              out.append(normalized)
+              for token in ("'''", '\"\"\"'):
+                  if token in normalized and normalized.count(token)%2==1:
+                      triple=token; break
+          Path('/tmp/patch.py').write_text('\n'.join(out)+'\n')
           PY
           python3 /tmp/patch.py
       - run: npm install
