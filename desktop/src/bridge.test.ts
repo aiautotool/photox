@@ -43,3 +43,114 @@ test('ticket-only Web bridge bootstraps the session before calling protected API
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Web bridge refreshes once after a 401 and retries with the new access token', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; authorization?: string }> = [];
+  let statusCalls = 0;
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    calls.push({ url, authorization: headers.get('authorization') || undefined });
+    if (url.endsWith('/api/web/v1/status')) {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        assert.equal(headers.get('authorization'), 'Bearer access-expired');
+        return new Response('expired', { status: 401 });
+      }
+      assert.equal(headers.get('authorization'), 'Bearer access-refreshed');
+      return new Response(JSON.stringify({ state: 'idle', received: 0, duplicates: 0, cloudUploaded: 0, cloudBlocked: 0 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.endsWith('/api/web/v1/auth/refresh')) {
+      return new Response(JSON.stringify({ accessToken: 'access-refreshed', csrfToken: 'csrf-refreshed' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const bridge = createHttpDesktopBridge({ baseUrl: 'https://photox.example', accessToken: 'access-expired' });
+    const status = await bridge.getStatus();
+    assert.equal(status.state, 'idle');
+    assert.deepEqual(calls.map(call => call.url), [
+      'https://photox.example/api/web/v1/status',
+      'https://photox.example/api/web/v1/auth/refresh',
+      'https://photox.example/api/web/v1/status',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Web bridge refreshes and reconnects WebSocket with the rotated access token', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const originalWindow = globalThis.window;
+  const sockets: FakeWebSocket[] = [];
+  let refreshCalls = 0;
+
+  class FakeWebSocket {
+    listeners = new Map<string, Array<(event: Event) => void>>();
+    constructor(public readonly url: string | URL, public readonly protocols?: string | string[]) {
+      sockets.push(this);
+    }
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      const callback = typeof listener === 'function' ? listener : (event: Event) => listener.handleEvent(event);
+      this.listeners.set(type, [...(this.listeners.get(type) || []), callback]);
+    }
+    emit(type: string) {
+      for (const listener of this.listeners.get(type) || []) listener(new Event(type));
+    }
+    close() {}
+  }
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/api/web/v1/auth/refresh')) {
+      refreshCalls += 1;
+      return new Response(JSON.stringify({ accessToken: 'access-2', csrfToken: 'csrf-2' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeWebSocket });
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    writable: true,
+    value: {
+      setTimeout: (callback: () => void) => { callback(); return 1; },
+      clearTimeout: () => undefined,
+    },
+  });
+
+  try {
+    const bridge = createHttpDesktopBridge({ baseUrl: 'https://photox.example', accessToken: 'access-1' });
+    const unsubscribe = bridge.onMigrationUpdated(() => undefined);
+    await Promise.resolve();
+    assert.equal(sockets.length, 1);
+    assert.deepEqual(sockets[0]?.protocols, ['photox-v2', 'access-1']);
+
+    sockets[0]?.emit('close');
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(refreshCalls, 1);
+    assert.equal(sockets.length, 2);
+    assert.deepEqual(sockets[1]?.protocols, ['photox-v2', 'access-2']);
+    unsubscribe();
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket });
+    Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: originalWindow });
+  }
+});
