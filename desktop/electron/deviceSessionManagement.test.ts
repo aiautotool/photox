@@ -48,6 +48,34 @@ test('device revocation is workspace-scoped and invalidates all device refresh s
   store.close();
 });
 
+test('individual session revocation cannot cross workspace or admin-to-owner boundary', async () => {
+  const store = new SqlitePhotoXStore({ path: ':memory:' });
+  const workspaces = new SqliteWorkspaceRepository(store);
+  const refresh = new SqliteRefreshSessionStore(store);
+  setupWorkspace(workspaces, 'workspace-a', 'owner-a');
+  setupWorkspace(workspaces, 'workspace-b', 'owner-b');
+  const now = Date.now();
+  workspaces.putMembership({ workspaceId: 'workspace-a', userId: 'admin-a', role: 'admin', status: 'active', joinedAt: now });
+  workspaces.putMembership({ workspaceId: 'workspace-a', userId: 'member-a', role: 'member', status: 'active', joinedAt: now });
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const ownerSession = await refresh.create({ subject: 'owner-a', deviceId: 'owner-device', workspaceId: 'workspace-a', workspaceRole: 'owner', scopes: ['media:read'], expiresAt });
+  const memberSession = await refresh.create({ subject: 'member-a', deviceId: 'member-device', workspaceId: 'workspace-a', workspaceRole: 'member', scopes: ['media:read'], expiresAt });
+  const foreignSession = await refresh.create({ subject: 'owner-b', deviceId: 'foreign-device', workspaceId: 'workspace-b', workspaceRole: 'owner', scopes: ['media:read'], expiresAt });
+  const service = new DeviceSessionManagementService(store, workspaces);
+
+  assert.throws(() => service.revokeSession({ subject: 'owner-a', workspaceId: 'workspace-a', workspaceRole: 'owner' }, foreignSession.sessionId), /SESSION_NOT_FOUND/);
+  assert.throws(() => service.revokeSession({ subject: 'admin-a', workspaceId: 'workspace-a', workspaceRole: 'admin' }, ownerSession.sessionId), /ROLE_FORBIDDEN/);
+  assert.throws(() => service.revokeSession({ subject: 'member-a', workspaceId: 'workspace-a', workspaceRole: 'member' }, ownerSession.sessionId), /ROLE_FORBIDDEN/);
+  assert.deepEqual(service.revokeSession({ subject: 'admin-a', workspaceId: 'workspace-a', workspaceRole: 'admin', deviceId: 'desktop-a' }, memberSession.sessionId), { sessionId: memberSession.sessionId, revoked: true });
+  assert.equal(await refresh.consume(memberSession.refreshToken), null);
+  assert.ok(await refresh.consume(ownerSession.refreshToken));
+  assert.ok(await refresh.consume(foreignSession.refreshToken));
+  const audit = workspaces.listAudit('workspace-a');
+  assert.equal(audit[0]?.action, 'session.revoke');
+  assert.equal(audit[0]?.targetId, memberSession.sessionId);
+  store.close();
+});
+
 test('device session management enforces membership and owner/admin authorization', async () => {
   const store = new SqlitePhotoXStore({ path: ':memory:' });
   const workspaces = new SqliteWorkspaceRepository(store);
