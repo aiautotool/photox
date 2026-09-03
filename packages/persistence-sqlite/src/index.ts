@@ -104,7 +104,21 @@ export class SqliteJobRepository implements JobRepository {
       const insert = this.store.db.prepare(`INSERT INTO photox_jobs(workspace_id,id,type,payload_json,state,priority,attempts,max_attempts,run_after,created_at,updated_at,last_error,checkpoint_json)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const row of legacyRows) {
-        insert.run(this.legacyWorkspaceId, String(row.id), String(row.type), String(row.payload_json), String(row.state), Number(row.priority), Number(row.attempts), Number(row.max_attempts), row.run_after ?? null, String(row.created_at), String(row.updated_at), row.last_error ?? null, row.checkpoint_json ?? null);
+        insert.run(
+          this.legacyWorkspaceId,
+          String(row.id),
+          String(row.type),
+          String(row.payload_json),
+          String(row.state),
+          Number(row.priority),
+          Number(row.attempts),
+          Number(row.max_attempts),
+          row.run_after == null ? null : String(row.run_after),
+          String(row.created_at),
+          String(row.updated_at),
+          row.last_error == null ? null : String(row.last_error),
+          row.checkpoint_json == null ? null : String(row.checkpoint_json),
+        );
       }
       this.store.db.exec(`
         DROP TABLE photox_jobs_legacy_v1;
