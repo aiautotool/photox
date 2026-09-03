@@ -98,13 +98,59 @@ export class SqliteJobRepository implements JobRepository {
 }
 
 export class SqliteMediaCloudRepository implements MediaCloudRepository {
-  constructor(private readonly store: SqlitePhotoXStore) {}
-  async get(assetId: string): Promise<MediaCloudItem | null> {
-    const row = this.store.db.prepare('SELECT item_json FROM photox_media_cloud WHERE asset_id=?').get(assetId) as { item_json?: string } | undefined;
+  constructor(private readonly store: SqlitePhotoXStore, private readonly legacyWorkspaceId: string) {
+    if (!legacyWorkspaceId) throw new Error('MEDIA_CLOUD_LEGACY_WORKSPACE_REQUIRED');
+    this.ensureWorkspaceSchema();
+  }
+
+  private ensureWorkspaceSchema() {
+    const columns = this.store.db.prepare('PRAGMA table_info(photox_media_cloud)').all() as Array<{ name: string; pk: number }>;
+    const hasWorkspace = columns.some((column) => column.name === 'workspace_id');
+    const compositePrimaryKey = columns.some((column) => column.name === 'workspace_id' && column.pk > 0)
+      && columns.some((column) => column.name === 'asset_id' && column.pk > 0);
+    if (hasWorkspace && compositePrimaryKey) return;
+
+    const legacyRows = this.store.db.prepare('SELECT asset_id,filename,item_json,updated_at FROM photox_media_cloud').all() as Array<{
+      asset_id: string; filename: string; item_json: string; updated_at: string;
+    }>;
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.store.db.exec(`
+        DROP TABLE IF EXISTS photox_media_cloud_legacy_v1;
+        ALTER TABLE photox_media_cloud RENAME TO photox_media_cloud_legacy_v1;
+        CREATE TABLE photox_media_cloud (
+          workspace_id TEXT NOT NULL,
+          asset_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          item_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(workspace_id, asset_id)
+        );
+      `);
+      const insert = this.store.db.prepare('INSERT INTO photox_media_cloud(workspace_id,asset_id,filename,item_json,updated_at) VALUES(?,?,?,?,?)');
+      for (const row of legacyRows) {
+        const parsed = JSON.parse(row.item_json) as Partial<MediaCloudItem>;
+        const workspaceId = parsed.workspaceId || this.legacyWorkspaceId;
+        const item = { ...parsed, workspaceId } as MediaCloudItem;
+        insert.run(workspaceId, row.asset_id, row.filename, JSON.stringify(item), row.updated_at);
+      }
+      this.store.db.exec(`
+        DROP TABLE photox_media_cloud_legacy_v1;
+        CREATE INDEX IF NOT EXISTS idx_photox_media_cloud_workspace_updated ON photox_media_cloud(workspace_id, updated_at DESC);
+      `);
+      this.store.db.exec('COMMIT');
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async get(workspaceId: string, assetId: string): Promise<MediaCloudItem | null> {
+    const row = this.store.db.prepare('SELECT item_json FROM photox_media_cloud WHERE workspace_id=? AND asset_id=?').get(workspaceId, assetId) as { item_json?: string } | undefined;
     return row?.item_json ? JSON.parse(row.item_json) as MediaCloudItem : null;
   }
-  async list(query: MediaCloudQuery = {}): Promise<MediaCloudItem[]> {
-    const rows = this.store.db.prepare('SELECT item_json FROM photox_media_cloud ORDER BY updated_at DESC').all() as Array<{ item_json: string }>;
+  async list(query: MediaCloudQuery): Promise<MediaCloudItem[]> {
+    const rows = this.store.db.prepare('SELECT item_json FROM photox_media_cloud WHERE workspace_id=? ORDER BY updated_at DESC').all(query.workspaceId) as Array<{ item_json: string }>;
     let items = rows.map((row) => JSON.parse(row.item_json) as MediaCloudItem);
     if (query.providerId) items = items.filter((item) => item.replicas.some((r) => r.providerId === query.providerId));
     if (query.accountId) items = items.filter((item) => item.replicas.some((r) => r.accountId === query.accountId));
@@ -113,12 +159,15 @@ export class SqliteMediaCloudRepository implements MediaCloudRepository {
     return items.slice(offset, offset + limit);
   }
   async upsert(item: MediaCloudItem): Promise<void> {
-    this.store.db.prepare(`INSERT INTO photox_media_cloud(asset_id,filename,item_json,updated_at) VALUES(?,?,?,?)
-      ON CONFLICT(asset_id) DO UPDATE SET filename=excluded.filename,item_json=excluded.item_json,updated_at=excluded.updated_at`).run(
-      item.assetId, item.filename, JSON.stringify(item), item.updatedAt,
+    if (!item.workspaceId) throw new Error('MEDIA_CLOUD_WORKSPACE_REQUIRED');
+    this.store.db.prepare(`INSERT INTO photox_media_cloud(workspace_id,asset_id,filename,item_json,updated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(workspace_id,asset_id) DO UPDATE SET filename=excluded.filename,item_json=excluded.item_json,updated_at=excluded.updated_at`).run(
+      item.workspaceId, item.assetId, item.filename, JSON.stringify(item), item.updatedAt,
     );
   }
-  async remove(assetId: string): Promise<void> { this.store.db.prepare('DELETE FROM photox_media_cloud WHERE asset_id=?').run(assetId); }
+  async remove(workspaceId: string, assetId: string): Promise<void> {
+    this.store.db.prepare('DELETE FROM photox_media_cloud WHERE workspace_id=? AND asset_id=?').run(workspaceId, assetId);
+  }
 }
 
 export class SqliteVideoMediaRepository implements VideoMediaRepository {
