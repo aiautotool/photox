@@ -15,9 +15,12 @@ export class VideoMediaService {
     private readonly probe: VideoProbeAdapter,
     private readonly thumbnail: VideoThumbnailAdapter,
     private readonly repository: VideoMediaRepository,
+    private readonly workspaceId: string,
     private readonly preview?: VideoPreviewAdapter,
     private readonly transcode?: VideoTranscodeAdapter,
-  ) {}
+  ) {
+    if (!workspaceId) throw new Error('VIDEO_MEDIA_WORKSPACE_REQUIRED');
+  }
 
   async process(assetId:string, source:VideoSource, options:ProcessVideoOptions = {}):Promise<VideoMediaRecord> {
     const metadata = await this.probe.probe(source);
@@ -41,12 +44,13 @@ export class VideoMediaService {
       preview = await this.transcode.transcode(source, { container:'mp4', videoCodec:'h264', audioCodec:'aac', maxWidth:1920 });
     }
 
-    const record:VideoMediaRecord = { assetId, metadata, thumbnail, preview, updatedAt:new Date().toISOString() };
+    const record:VideoMediaRecord = { workspaceId:this.workspaceId, assetId, metadata, thumbnail, preview, updatedAt:new Date().toISOString() };
     await this.repository.save(record);
     return record;
   }
 
-  async get(assetId:string){ return this.repository.get(assetId); }
+  async get(assetId:string){ return this.repository.get(this.workspaceId, assetId); }
+  async remove(assetId:string){ await this.repository.remove(this.workspaceId, assetId); }
 
   isWidelyPlayable(metadata:VideoMediaRecord['metadata']):boolean {
     const videoOk = metadata.videoCodec === 'h264' || metadata.videoCodec === 'hevc';
