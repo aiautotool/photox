@@ -44,7 +44,7 @@ async function nextMessage(socket: WebSocket): Promise<any> {
   });
 }
 
-test('Web edge authenticates one-time ticket, CSRF, device/session APIs, WebSocket and signed Range streaming', async () => {
+test('Web edge authenticates one-time ticket, workspace overview, CSRF, device/session APIs, WebSocket and signed Range streaming', async () => {
   const staticDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-web-edge-'));
   await fs.writeFile(path.join(staticDir, 'index.html'), '<!doctype html><html><head></head><body>PhotoX</body></html>');
   const port = await freePort();
@@ -70,6 +70,17 @@ test('Web edge authenticates one-time ticket, CSRF, device/session APIs, WebSock
       return { accessToken: 'access-token', accessExpiresAt: Date.now() + 60_000, sessionId: 'session-a' };
     },
     revokeSession: async () => undefined,
+    getWorkspaceOverview: async (actor) => {
+      assert.equal(actor.workspaceId, 'workspace-a');
+      assert.equal(actor.subject, 'user-a');
+      return {
+        workspace: { id: actor.workspaceId, name: 'Workspace A', ownerUserId: 'owner-a', plan: 'personal', status: 'active' },
+        membership: { userId: actor.subject, role: 'admin', status: 'active', joinedAt: 1 },
+        usage: { managedStorageBytes: 10, monthlyIngressBytes: 5, members: 2, devices: 3, storageProviders: 1, publicShares: 0 },
+        entitlements: { maxManagedStorageBytes: 100, maxMonthlyIngressBytes: 100, maxMembers: 5, maxDevices: 10, maxStorageProviders: 6, maxPublicShares: 20, targetOriginalReplicas: 2, publicSharing: true, remoteAccess: true, semanticSearch: false, priorityVideoProcessing: false },
+        quota: { managedStorage: { current: 10, limit: 100, remaining: 90, percent: 10 } },
+      };
+    },
     listWorkspaceDevices: async (actor) => {
       assert.equal(actor.workspaceId, 'workspace-a');
       assert.equal(actor.subject, 'user-a');
@@ -164,6 +175,14 @@ test('Web edge authenticates one-time ticket, CSRF, device/session APIs, WebSock
       body: JSON.stringify({ ticket: decodeURIComponent(ticket) }),
     });
     assert.equal(replay.status, 401);
+
+    const workspace = await fetch(`${origin}/api/web/v1/workspace`, { headers: { origin, authorization: 'Bearer access-token' } });
+    assert.equal(workspace.status, 200);
+    const workspaceSnapshot = await workspace.json() as { workspace: { id: string; plan: string }; membership: { role: string }; quota: { managedStorage: { percent: number } } };
+    assert.equal(workspaceSnapshot.workspace.id, 'workspace-a');
+    assert.equal(workspaceSnapshot.workspace.plan, 'personal');
+    assert.equal(workspaceSnapshot.membership.role, 'admin');
+    assert.equal(workspaceSnapshot.quota.managedStorage.percent, 10);
 
     const devices = await fetch(`${origin}/api/web/v1/devices`, { headers: { origin, authorization: 'Bearer access-token' } });
     assert.equal(devices.status, 200);
