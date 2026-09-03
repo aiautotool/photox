@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHttpDesktopBridge } from './bridge.js';
 
+async function waitFor(predicate:()=>boolean,message:string){
+  for(let attempt=0;attempt<50;attempt+=1){
+    if(predicate())return;
+    await new Promise<void>(resolve=>setTimeout(resolve,0));
+  }
+  assert.fail(message);
+}
+
 test('ticket-only Web bridge bootstraps the session before calling protected APIs', async () => {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; authorization?: string }> = [];
@@ -135,17 +143,13 @@ test('Web bridge refreshes and reconnects WebSocket with the rotated access toke
   try {
     const bridge = createHttpDesktopBridge({ baseUrl: 'https://photox.example', accessToken: 'access-1' });
     const unsubscribe = bridge.onMigrationUpdated(() => undefined);
-    await Promise.resolve();
-    assert.equal(sockets.length, 1);
+    await waitFor(()=>sockets.length===1,'initial WebSocket was not created');
     assert.deepEqual(sockets[0]?.protocols, ['photox-v2', 'access-1']);
 
     sockets[0]?.emit('close');
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await waitFor(()=>refreshCalls===1,'WebSocket close did not refresh the access token');
+    await waitFor(()=>sockets.length===2,'WebSocket did not reconnect after refreshing');
 
-    assert.equal(refreshCalls, 1);
-    assert.equal(sockets.length, 2);
     assert.deepEqual(sockets[1]?.protocols, ['photox-v2', 'access-2']);
     unsubscribe();
   } finally {
