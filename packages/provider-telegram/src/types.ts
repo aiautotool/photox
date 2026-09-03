@@ -3,6 +3,7 @@ import type { StorageDownloadResult, StorageObject, StorageUploadInput } from '@
 export type TelegramApiMode = 'cloud' | 'local-bot-api';
 
 export interface TelegramAccountConfig {
+  workspaceId: string;
   accountId: string;
   displayName: string;
   chatId: string;
@@ -28,6 +29,7 @@ export interface TelegramBotIdentity {
 
 export interface TelegramStoredMedia {
   id: string;
+  workspaceId: string;
   accountId: string;
   chatId: string;
   messageId: number;
@@ -43,6 +45,7 @@ export interface TelegramStoredMedia {
 }
 
 export interface TelegramAccountStats {
+  workspaceId: string;
   accountId: string;
   displayName?: string;
   mediaCount: number;
@@ -55,6 +58,7 @@ export interface TelegramAccountStats {
 
 export interface TelegramProviderStats {
   providerId: 'telegram-bot';
+  workspaceId: string;
   accounts: TelegramAccountStats[];
   totalMedia: number;
   totalBytes: number;
@@ -81,14 +85,14 @@ export interface SecretStore {
 }
 
 export interface TelegramConfigStore {
-  list(): Promise<TelegramAccountConfig[]>;
-  get(accountId: string): Promise<TelegramAccountConfig | undefined>;
+  list(workspaceId: string): Promise<TelegramAccountConfig[]>;
+  get(workspaceId: string, accountId: string): Promise<TelegramAccountConfig | undefined>;
   save(config: TelegramAccountConfig): Promise<void>;
-  remove(accountId: string): Promise<void>;
+  remove(workspaceId: string, accountId: string): Promise<void>;
 }
 
 export interface TelegramMediaRepository {
   add(record: TelegramStoredMedia): Promise<void>;
-  list(accountId?: string): Promise<TelegramStoredMedia[]>;
-  removeByFileId(accountId: string, fileId: string): Promise<void>;
+  list(workspaceId: string, accountId?: string): Promise<TelegramStoredMedia[]>;
+  removeByFileId(workspaceId: string, accountId: string, fileId: string): Promise<void>;
 }
