@@ -11,6 +11,8 @@
     "types": ["node"]
   },
   "include": [
+    "electron/deviceSessionManagement.ts",
+    "electron/deviceSessionManagement.test.ts",
     "electron/googlePhotosMigration.ts",
     "electron/googlePhotosMigration.test.ts",
     "electron/webEdgeServer.ts",
