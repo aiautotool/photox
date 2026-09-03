@@ -12,14 +12,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: v4
-          fetch-depth: 3
+          fetch-depth: 4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Recover and run patch payload
         shell: bash
         run: |
-          git show HEAD^^:.github/workflows/v4-resumable-patch.yml > /tmp/payload.yml
+          git show b9c899a5daea3da3bb6809b13de728d8fb40d6c0:.github/workflows/v4-resumable-patch.yml > /tmp/payload.yml
           python3 - <<'PY'
           from pathlib import Path
           text=Path('/tmp/payload.yml').read_text()
@@ -39,6 +39,19 @@ jobs:
           Path('/tmp/patch.py').write_text('\n'.join(out)+'\n')
           PY
           python3 /tmp/patch.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/google-drive/src/index.test.ts'); s=p.read_text()
+          s=s.replace("from './index';", "from './index.js';")
+          s=s.replace("const request=vi.fn(async()=>new Response", "const request=vi.fn(async(_url:string,_init?:RequestInit)=>new Response")
+          p.write_text(s)
+          p=Path('packages/google-drive/src/index.ts'); s=p.read_text()
+          s=s.replace('    body: input.bytes,', '    body: input.bytes as unknown as BodyInit,')
+          p.write_text(s)
+          p=Path('packages/persistence-sqlite/src/migration.ts'); s=p.read_text()
+          s=s.replace("SET checkpoint_json=?,updated_at=COALESCE(updated_at,?) WHERE id=?", "SET checkpoint_json=?,updated_at=? WHERE id=?")
+          p.write_text(s)
+          PY
       - run: npm install
       - run: npm test
       - run: npm run typecheck
