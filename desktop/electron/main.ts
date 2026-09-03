@@ -586,8 +586,8 @@ async function startReceiver(){
   }catch(e){console.error(e);res.writeHead(500);res.end(e instanceof Error?e.message:String(e))}}); receiver.listen(RECEIVER_PORT,'0.0.0.0');
 }
 
-async function streamWebMedia(req:IncomingMessage,res:ServerResponse,key:string,variant:'original'|'playback'|'thumbnail'){
-  const row=(await readIndex()).find(item=>item.key===key);if(!row){res.writeHead(404);res.end('Not found');return;}
+async function streamWebMedia(req:IncomingMessage,res:ServerResponse,key:string,variant:'original'|'playback'|'thumbnail',workspaceId:string){
+  const row=(await readIndex(workspaceId)).find(item=>item.key===key);if(!row){res.writeHead(404);res.end('Not found');return;}
   if(variant==='thumbnail'){
     if(!row.thumbnailPath){res.writeHead(404);res.end('Thumbnail unavailable');return;}
     try{await streamNodeFile(req,res,row.thumbnailPath,'image/jpeg');return}catch{res.writeHead(404);res.end('Thumbnail unavailable');return;}
@@ -606,6 +606,9 @@ async function startWebEdge(){
   if(!config.enabled)return;
   const migrations=()=>requireMigrationService();
   webEdgeServer=new PhotoXWebEdgeServer(config,{
+    authorizeAccessToken:async(token,required)=>{const principal=await requireWorkspaceAuth().authorizeToken(token,required);return {subject:principal.subject,workspaceId:principal.workspaceId!,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes};},
+    refreshSession:refreshToken=>requireWorkspaceAuth().refresh(refreshToken),
+    revokeSession:sessionId=>requireWorkspaceAuth().revoke(sessionId),
     getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
     listLocalMedia,listCloudUploads,getBackupHealth:backupHealthSnapshot,openLibrary:()=>shell.openPath(libraryDir()),addGoogleAccount:connectGoogle,listGoogleAccounts:listDriveAccounts,removeGoogleAccount:removeDriveAccount,
     retryCloud:async()=>{await retryQueuedCloud();return desktopStatus();},listGooglePhotosAccounts:()=>migrations().listAccounts(),connectGooglePhotosAccount:capability=>migrations().connectAccount(capability),removeGooglePhotosAccount:accountId=>migrations().removeAccount(accountId),
