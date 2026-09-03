@@ -92,6 +92,24 @@ describe('Google Photos migration', () => {
     expect(transferred).toEqual(['b']);
     expect((await ledger.listItems(job.id)).find(item => item.sourceMediaId === 'b')?.attempts).toBe(2);
   });
+
+  it('refuses to run a migration job owned by another workspace', async () => {
+    const ledger = new MemoryLedger();
+    const job = makeJob('job-cross-tenant');
+    await ledger.createJob(job);
+    await ledger.putItems(migrationItemsFromPicker(job.id, [source('a')]));
+    const transferred: string[] = [];
+    const runner = new GooglePhotosMigrationRunner(ledger, {
+      async transfer({ item }) { transferred.push(item.sourceMediaId); return { targetId: 'should-not-run' }; },
+    });
+    await expect(runner.run(job.id, new Map([['a', source('a')]]), {
+      workspaceId: 'workspace-2', shouldPause: () => false, shouldCancel: () => false,
+    })).rejects.toThrow('MIGRATION_WORKSPACE_MISMATCH');
+    expect(transferred).toEqual([]);
+    expect((await ledger.getJob(job.id))?.state).toBe('queued');
+    expect((await ledger.listItems(job.id))[0]?.state).toBe('queued');
+  });
+
 });
 
 function source(id: string): PickedMediaItem {

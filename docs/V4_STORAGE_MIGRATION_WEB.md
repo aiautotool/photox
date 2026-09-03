@@ -143,3 +143,23 @@ Every batch must pass repository tests, TypeScript typecheck and production buil
 - `OneTimeTicketStore` has automated tests proving one-time consumption and expiry behavior.
 
 Verification marker: one-time ticket implementation passed its integration workflow with `npm install`, `npm test`, full repository typecheck and full production build before commit.
+
+
+## Run 10 — Web mutation audit + migration tenant defense
+
+Completed:
+
+- Web administrative/member mutations now append durable workspace audit events after successful execution.
+- Audit actor identity is taken from the verified JOSE principal (`subject`, `deviceId`, `sessionId`, workspace role), never from request JSON.
+- Google Drive/Google Photos provider mutations, cloud retry, migration lifecycle actions, local-library open and session revoke are audited with target metadata where available.
+- `GooglePhotosMigrationRunner` now accepts an expected workspace boundary and refuses a ledger job from another workspace before changing job/item state or invoking a transfer adapter.
+- Desktop migration always supplies its workspace ID to the runner.
+- Google Photos -> Google Photos selection validates the append-capable destination account before opening Picker and rejects source=destination to avoid accidental duplicate import into the same account.
+- Automated migration test proves cross-workspace runner execution is rejected without touching the transfer adapter or ledger state.
+
+Still pending:
+
+- browser-level E2E coverage for ticket login, refresh cookie, CSRF, WebSocket reconnect and Range streaming;
+- reverse-proxy deployment recipes (Cloudflare/Caddy/nginx);
+- streaming Google Photos downloads and resumable mid-file Drive migration checkpoints;
+- live Google OAuth migration verification with user credentials.

@@ -9,6 +9,7 @@ import { OneTimeTicketStore } from '@photosync/core';
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
 export type WebPrincipal={subject:string;workspaceId:string;workspaceRole?:WebRole;deviceId?:string;sessionId?:string;scopes:MediaApiScope[]};
+export type WebAuditInput={action:string;targetType?:string;targetId?:string;metadata?:Record<string,unknown>};
 
 type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};
 type WebSession={accessToken:string;refreshToken:string;accessExpiresAt:number;sessionId:string};
@@ -18,6 +19,7 @@ export interface WebEdgeHandlers {
   createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
+  appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
   listLocalMedia():Promise<unknown>;
@@ -253,11 +255,11 @@ export class PhotoXWebEdgeServer {
   private async api(req:IncomingMessage,res:ServerResponse,url:URL,principal:WebPrincipal){
     const p=url.pathname,m=req.method||'GET';
     const read=async(fn:()=>Promise<unknown>)=>this.json(res,200,await fn());
-    const mutate=async(role:WebRole,fn:()=>Promise<unknown>)=>{if(!this.requireRole(principal,role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}this.json(res,200,await fn());};
+    const mutate=async(role:WebRole,audit:WebAuditInput,fn:()=>Promise<unknown>)=>{if(!this.requireRole(principal,role)){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}const value=await fn();await this.handlers.appendAudit(principal,audit);this.json(res,200,value);};
     if(m!=='GET'&&m!=='HEAD'&&!this.csrfValid(req)){this.json(res,403,{error:'CSRF_REQUIRED'});return;}
     if(m==='POST'&&p==='/api/web/v1/auth/revoke'){
       const b=await this.body(req);if(principal.sessionId&&String(b.sessionId||'')!==principal.sessionId&&!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
-      await this.handlers.revokeSession(String(b.sessionId||principal.sessionId||''));res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
+      const targetSession=String(b.sessionId||principal.sessionId||'');await this.handlers.revokeSession(targetSession);await this.handlers.appendAudit(principal,{action:'web.session.revoke',targetType:'session',targetId:targetSession});res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
     }
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
@@ -268,18 +270,18 @@ export class PhotoXWebEdgeServer {
     }
     if(m==='GET'&&p==='/api/web/v1/cloud/uploads')return read(this.handlers.listCloudUploads);
     if(m==='GET'&&p==='/api/web/v1/backup/health')return read(this.handlers.getBackupHealth);
-    if(m==='POST'&&p==='/api/web/v1/library/open')return mutate('admin',this.handlers.openLibrary);
-    if(m==='POST'&&p==='/api/web/v1/google-drive/accounts/connect')return mutate('admin',this.handlers.addGoogleAccount);
+    if(m==='POST'&&p==='/api/web/v1/library/open')return mutate('admin',{action:'web.library.open',targetType:'library'},this.handlers.openLibrary);
+    if(m==='POST'&&p==='/api/web/v1/google-drive/accounts/connect')return mutate('admin',{action:'web.google_drive.connect',targetType:'provider'},this.handlers.addGoogleAccount);
     if(m==='GET'&&p==='/api/web/v1/google-drive/accounts')return read(this.handlers.listGoogleAccounts);
-    let match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
-    if(m==='POST'&&p==='/api/web/v1/cloud/retry')return mutate('member',this.handlers.retryCloud);
+    let match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',{action:'web.google_drive.remove',targetType:'provider',targetId:decodeURIComponent(match![1])},()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
+    if(m==='POST'&&p==='/api/web/v1/cloud/retry')return mutate('member',{action:'web.cloud.retry',targetType:'cloud_queue'},this.handlers.retryCloud);
     if(m==='GET'&&p==='/api/web/v1/google-photos/accounts')return read(this.handlers.listGooglePhotosAccounts);
-    if(m==='POST'&&p==='/api/web/v1/google-photos/accounts/connect'){const b=await this.body(req);if(!['picker','append'].includes(String(b.capability))){this.json(res,400,{error:'INVALID_CAPABILITY'});return;}return mutate('admin',()=>this.handlers.connectGooglePhotosAccount(b.capability));}
-    match=/^\/api\/web\/v1\/google-photos\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',()=>this.handlers.removeGooglePhotosAccount(decodeURIComponent(match![1])));
+    if(m==='POST'&&p==='/api/web/v1/google-photos/accounts/connect'){const b=await this.body(req);if(!['picker','append'].includes(String(b.capability))){this.json(res,400,{error:'INVALID_CAPABILITY'});return;}return mutate('admin',{action:'web.google_photos.connect',targetType:'provider',metadata:{capability:String(b.capability)}},()=>this.handlers.connectGooglePhotosAccount(b.capability));}
+    match=/^\/api\/web\/v1\/google-photos\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',{action:'web.google_photos.remove',targetType:'provider',targetId:decodeURIComponent(match![1])},()=>this.handlers.removeGooglePhotosAccount(decodeURIComponent(match![1])));
     if(m==='GET'&&p==='/api/web/v1/migrations')return read(this.handlers.listMigrations);
-    if(m==='POST'&&p==='/api/web/v1/migrations'){const b=await this.body(req);return mutate('member',()=>this.handlers.createMigration(b));}
+    if(m==='POST'&&p==='/api/web/v1/migrations'){const b=await this.body(req);return mutate('member',{action:'web.migration.create',targetType:'migration',metadata:{sourceAccountId:b.sourceAccountId,target:b.target,targetAccountId:b.targetAccountId}},()=>this.handlers.createMigration(b));}
     match=/^\/api\/web\/v1\/migrations\/([^/]+)$/.exec(p);if(m==='GET'&&match)return read(()=>this.handlers.getMigration(decodeURIComponent(match![1])));
-    match=/^\/api\/web\/v1\/migrations\/([^/]+)\/(selection|run|pause|resume|cancel|retry)$/.exec(p);if(m==='POST'&&match){const id=decodeURIComponent(match[1]);const op=match[2];return mutate('member',()=>op==='selection'?this.handlers.materializeMigration(id):op==='run'?this.handlers.runMigration(id):op==='pause'?this.handlers.pauseMigration(id):op==='resume'?this.handlers.resumeMigration(id):op==='cancel'?this.handlers.cancelMigration(id):this.handlers.retryMigration(id));}
+    match=/^\/api\/web\/v1\/migrations\/([^/]+)\/(selection|run|pause|resume|cancel|retry)$/.exec(p);if(m==='POST'&&match){const id=decodeURIComponent(match[1]);const op=match[2];return mutate('member',{action:`web.migration.${op}`,targetType:'migration',targetId:id},()=>op==='selection'?this.handlers.materializeMigration(id):op==='run'?this.handlers.runMigration(id):op==='pause'?this.handlers.pauseMigration(id):op==='resume'?this.handlers.resumeMigration(id):op==='cancel'?this.handlers.cancelMigration(id):this.handlers.retryMigration(id));}
     match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(p);if(m==='GET'&&match){const variant=match[1]==='media'?'original':match[1] as 'playback'|'thumbnail';await this.handlers.streamMedia(req,res,decodeURIComponent(match[2]),variant,principal.workspaceId);return;}
     this.json(res,404,{error:'NOT_FOUND'});
   }

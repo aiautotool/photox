@@ -610,6 +610,7 @@ async function startWebEdge(){
     createWebSession:input=>requireWorkspaceAuth().createTrustedWebSession(input),
     refreshSession:refreshToken=>requireWorkspaceAuth().refresh(refreshToken),
     revokeSession:sessionId=>requireWorkspaceAuth().revoke(sessionId),
+    appendAudit:async(principal,event)=>{requireWorkspaceRepository().appendAudit({workspaceId:principal.workspaceId,actorUserId:principal.subject,actorDeviceId:principal.deviceId,action:event.action,targetType:event.targetType,targetId:event.targetId,metadata:{...(event.metadata||{}),sessionId:principal.sessionId,role:principal.workspaceRole,source:'web'}});},
     getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
     listLocalMedia,listCloudUploads,getBackupHealth:backupHealthSnapshot,openLibrary:()=>shell.openPath(libraryDir()),addGoogleAccount:connectGoogle,listGoogleAccounts:listDriveAccounts,removeGoogleAccount:removeDriveAccount,
     retryCloud:async()=>{await retryQueuedCloud();return desktopStatus();},listGooglePhotosAccounts:()=>migrations().listAccounts(),connectGooglePhotosAccount:capability=>migrations().connectAccount(capability),removeGooglePhotosAccount:accountId=>migrations().removeAccount(accountId),

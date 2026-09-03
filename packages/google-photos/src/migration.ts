@@ -69,6 +69,8 @@ export interface MigrationTransferAdapter {
 export interface MigrationRunControl {
   shouldPause(): boolean;
   shouldCancel(): boolean;
+  /** Optional defense-in-depth tenant boundary supplied by the caller. */
+  workspaceId?: string;
 }
 
 export class GooglePhotosMigrationRunner {
@@ -81,6 +83,7 @@ export class GooglePhotosMigrationRunner {
   async run(jobId: string, sources: Map<string, PickedMediaItem>, control: MigrationRunControl, signal?: AbortSignal) {
     let job = await this.ledger.getJob(jobId);
     if (!job) throw new Error('MIGRATION_JOB_NOT_FOUND');
+    if (control.workspaceId && job.workspaceId !== control.workspaceId) throw new Error('MIGRATION_WORKSPACE_MISMATCH');
     if (job.state === 'completed' || job.state === 'cancelled') return job;
 
     const startedAt = job.startedAt ?? this.now().toISOString();

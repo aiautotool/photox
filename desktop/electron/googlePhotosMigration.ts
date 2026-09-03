@@ -82,6 +82,10 @@ export class DesktopGooglePhotosMigrationService {
   async removeAccount(accountId: string) { await this.requireAnyAccount(accountId); await fs.unlink(path.join(this.options.accountsDir, accountFilename(this.options.workspaceId, accountId))).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }
 
   async createSelection(input: { sourceAccountId: string; target: MigrationTarget; targetAccountId: string; maxItemCount?: number }) {
+    if (input.target === 'google_photos') {
+      if (input.sourceAccountId === input.targetAccountId) throw new Error('GOOGLE_PHOTOS_SOURCE_TARGET_SAME_ACCOUNT');
+      await this.requireAccount(input.targetAccountId, 'append');
+    }
     const account = await this.requireAccount(input.sourceAccountId, 'picker'); const token = await this.accessToken(account);
     const session = await createPickingSession(token, input.maxItemCount ?? 2000); if (!session.id || !session.pickerUri) throw new Error('GOOGLE_PHOTOS_PICKER_SESSION_INVALID');
     const now = new Date().toISOString();
@@ -133,7 +137,7 @@ export class DesktopGooglePhotosMigrationService {
       },
       verify: async ({ job: currentJob, targetId }) => { if (!targetId) throw new Error('MIGRATION_DESTINATION_NOT_VERIFIED'); if (currentJob.target === 'google_photos') return; },
     });
-    const result = await runner.run(jobId, sources, { shouldPause: () => this.paused.has(jobId), shouldCancel: () => this.cancelled.has(jobId) }); await this.emit(jobId);
+    const result = await runner.run(jobId, sources, { workspaceId: this.options.workspaceId, shouldPause: () => this.paused.has(jobId), shouldCancel: () => this.cancelled.has(jobId) }); await this.emit(jobId);
     if (['completed', 'completed_with_errors', 'cancelled'].includes(result.state)) await deletePickingSession(sourceToken, job.sourcePickerSessionId).catch(() => undefined);
     return result;
   }
