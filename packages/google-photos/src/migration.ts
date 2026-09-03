@@ -105,18 +105,19 @@ export class GooglePhotosMigrationRunner {
     const startedAt = job.startedAt ?? this.now().toISOString();
     job = (await this.ledger.updateJob(jobId, { state: 'running', startedAt, lastError: undefined, transferRateBps: undefined, etaSeconds: undefined, updatedAt: this.now().toISOString() })) ?? job;
     const items = await this.ledger.listItems(jobId);
-    let progressBytes = items.reduce((sum, item) => sum + item.transferredBytes, 0);
+    let observedTotalBytes = items.reduce((sum, item) => sum + item.transferredBytes, 0);
+    let sampledTotalBytes = observedTotalBytes;
     let progressAt = this.now().getTime();
     let smoothedRate = job.transferRateBps ?? 0;
 
     const updateTelemetry = (nextTotalBytes: number) => {
       const nowMs = this.now().getTime();
       const elapsedSeconds = (nowMs - progressAt) / 1000;
-      const deltaBytes = Math.max(0, nextTotalBytes - progressBytes);
+      const deltaBytes = Math.max(0, nextTotalBytes - sampledTotalBytes);
       if (elapsedSeconds < 0.25 || deltaBytes <= 0) return;
       const instantRate = deltaBytes / elapsedSeconds;
       smoothedRate = smoothedRate > 0 ? smoothedRate * 0.6 + instantRate * 0.4 : instantRate;
-      progressBytes = nextTotalBytes;
+      sampledTotalBytes = nextTotalBytes;
       progressAt = nowMs;
       const etaSeconds = job?.totalBytes != null && smoothedRate > 0 ? Math.max(0, (job.totalBytes - nextTotalBytes) / smoothedRate) : undefined;
       void this.ledger.updateJob(jobId, {
@@ -146,7 +147,7 @@ export class GooglePhotosMigrationRunner {
       }
 
       let latest = (await this.ledger.updateItem(item.id, { state: 'downloading', attempts: item.attempts + 1, error: undefined, updatedAt: this.now().toISOString() })) ?? item;
-      const otherBytes = items.reduce((sum, candidate) => sum + (candidate.id === item.id ? 0 : candidate.transferredBytes), 0);
+      let itemReportedBytes = item.transferredBytes;
       try {
         latest = (await this.ledger.updateItem(item.id, { state: 'uploading', updatedAt: this.now().toISOString() })) ?? latest;
         const checkpoint = await this.ledger.getTransferCheckpoint(item.id) ?? undefined;
@@ -158,8 +159,11 @@ export class GooglePhotosMigrationRunner {
           checkpoint,
           onBytes: bytes => {
             const normalized = Math.max(0, Math.floor(bytes));
+            const delta = Math.max(0, normalized - itemReportedBytes);
+            itemReportedBytes = normalized;
+            observedTotalBytes += delta;
             void this.ledger.updateItem(item.id, { transferredBytes: normalized, updatedAt: this.now().toISOString() });
-            updateTelemetry(otherBytes + normalized);
+            updateTelemetry(observedTotalBytes);
           },
           onCheckpoint: async nextCheckpoint => { await this.ledger.setTransferCheckpoint(item.id, nextCheckpoint); },
         });
