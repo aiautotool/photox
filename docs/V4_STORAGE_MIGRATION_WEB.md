@@ -93,7 +93,7 @@ Current Web edge behavior:
 Remaining migration hardening:
 
 - [x] Stream very large Google Photos source files into Google Photos append-only upload instead of buffering the whole item in Desktop memory.
-- [ ] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
+- [x] Persist Drive upload-session/chunk checkpoint for true mid-file resume after process restart.
 - [ ] Add transfer speed and ETA metrics.
 - [ ] Add real-Google-account end-to-end verification outside CI with OAuth credentials/consent.
 
@@ -119,9 +119,9 @@ Remaining migration hardening:
 
 ## Next priorities
 
-1. Persist Google Drive upload-session/chunk checkpoints so a migration can resume in the middle of a large file after Desktop/process restart.
-2. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
-3. Add transfer speed/ETA and live OAuth migration verification harness.
+1. Add browser-renderer E2E coverage for automatic access refresh, WebSocket reconnect and shared Desktop/Web UI behavior on top of the now-covered HTTP/WebSocket transport.
+2. Add transfer speed/ETA metrics to durable migration progress and UI.
+3. Add live OAuth migration verification harness for real Google accounts outside CI.
 4. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
 5. Continue workspace/device/member/quota UX and operations visibility across Desktop/Web/Mobile.
 
@@ -180,6 +180,27 @@ Still pending:
 
 - durable Google Drive upload-session/chunk checkpoint for true process-restart mid-file resume;
 - browser-renderer E2E;
+- transfer speed/ETA;
+- live Google OAuth migration verification;
+- signed iOS/Android release verification.
+
+## Run 14 — durable Google Drive mid-file resume
+
+Completed:
+
+- Added Google Drive resumable-session status queries and exact `Content-Range` chunk uploads, with explicit handling for active, completed and expired upload sessions.
+- Google Photos -> Google Drive migration now streams known-length Picker responses in 8 MiB chunks instead of buffering the whole file in memory.
+- Added a durable per-item `google_drive_resumable_v1` checkpoint containing destination account, resumable session URI, committed byte offset, total bytes and final target ID when available.
+- The checkpoint is stored in a private SQLite `checkpoint_json` column and is intentionally excluded from normal migration item snapshots so the resumable session URI is not exposed to Desktop/Web UI payloads.
+- On restart/retry, Desktop queries Google Drive for the authoritative committed offset, skips the already committed source prefix, and resumes from that byte instead of re-uploading the file from zero.
+- If the process stops after Drive accepted the final chunk but before ledger completion, the persisted target ID/session state is verified and reused rather than creating a duplicate destination object.
+- Expired resumable sessions are detected and safely replaced with a new session; retry progress is restored from the durable checkpoint rather than reset to zero.
+- Added protocol tests for Drive status/range handling, runner tests proving checkpoints survive a failed attempt and clear only after verified completion, and a SQLite close/reopen test proving the checkpoint survives process restart without leaking its session URI through item snapshots.
+- The implementation batch passed `npm install`, repository tests, full TypeScript typecheck and full production build before the code commit was pushed.
+
+Still pending:
+
+- browser-renderer E2E for automatic 401 refresh/retry, WebSocket reconnect and React UI/media behavior;
 - transfer speed/ETA;
 - live Google OAuth migration verification;
 - signed iOS/Android release verification.
