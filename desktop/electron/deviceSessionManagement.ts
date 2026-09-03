@@ -81,6 +81,34 @@ export class DeviceSessionManagementService {
     return { devices: this.listDevices(actor), sessions: this.listSessions(actor) };
   }
 
+  revokeSession(actor: DeviceSessionActor, sessionId: string, revokedAt = Date.now()) {
+    const membership = this.requireActiveMembership(actor);
+    const row = this.store.db.prepare(`SELECT session_id,subject,device_id
+      FROM photox_refresh_sessions
+      WHERE workspace_id=? AND session_id=? AND revoked_at IS NULL`).get(actor.workspaceId, sessionId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error('SESSION_NOT_FOUND');
+    const targetSubject = String(row.subject);
+    if (targetSubject !== actor.subject && !ADMIN_ROLES.has(membership.role)) throw new Error('ROLE_FORBIDDEN');
+    if (membership.role === 'admin' && targetSubject !== actor.subject) {
+      const targetMembership = this.workspaces.getMembership(actor.workspaceId, targetSubject);
+      if (targetMembership?.role === 'owner') throw new Error('ROLE_FORBIDDEN');
+    }
+    const result = this.store.db.prepare(`UPDATE photox_refresh_sessions SET revoked_at=?
+      WHERE workspace_id=? AND session_id=? AND revoked_at IS NULL`).run(Math.floor(revokedAt / 1000), actor.workspaceId, sessionId);
+    if (!result.changes) throw new Error('SESSION_NOT_FOUND');
+    this.workspaces.appendAudit({
+      workspaceId: actor.workspaceId,
+      actorUserId: actor.subject,
+      actorDeviceId: actor.deviceId,
+      action: 'session.revoke',
+      targetType: 'session',
+      targetId: sessionId,
+      metadata: { targetSubject, targetDeviceId: row.device_id ? String(row.device_id) : undefined },
+      createdAt: revokedAt,
+    });
+    return { sessionId, revoked: true };
+  }
+
   revokeDevice(actor: DeviceSessionActor, deviceId: string, revokedAt = Date.now()) {
     const actorMembership = this.requireAdmin(actor);
     const target = this.workspaces.listDevices(actor.workspaceId).find(device => device.id === deviceId && !device.revokedAt);
