@@ -49,17 +49,22 @@ The Web edge implementation now provides:
 - the same Vite production bundle served by the desktop edge process;
 - configurable `PHOTOX_WEB_HOST`, `PHOTOX_WEB_PORT`, `PHOTOX_WEB_PUBLIC_BASE_URL` and `PHOTOX_WEB_ALLOWED_ORIGINS`;
 - Web disabled by default and loopback bind by default;
-- a dedicated `PHOTOX_WEB_ACCESS_TOKEN` with minimum 32 characters; pair-code is never reused as Web admin auth;
-- owner/admin/member/viewer route enforcement;
+- JOSE access tokens and durable refresh sessions issued by the same workspace session service used by Mobile; the old static `PHOTOX_WEB_ACCESS_TOKEN`, env-bound role and env-bound Web authorization path are removed;
+- workspace ID, role, device ID and session ID taken from a verified access-token principal rather than client configuration;
+- membership and device revocation checks on every authenticated Web/API/WebSocket request;
+- refresh endpoint (`POST /api/web/v1/auth/refresh`), session introspection (`GET /api/web/v1/session`) and revoke endpoint (`POST /api/web/v1/auth/revoke`);
+- browser HTTP adapter automatically refreshes an expired access token once and retries the failed API call;
+- browser WebSocket reconnect uses the refreshed access token and the server authenticates the socket before upgrade;
+- owner/admin/member/viewer route enforcement based on the verified workspace role;
 - status, library, backup health, cloud upload, Drive account, Google Photos account and migration APIs;
-- authenticated WebSocket events for migration/storage/file/tunnel updates;
 - per-IP request rate limiting and explicit CORS origin checks;
 - CSP, frame denial, no-sniff and no-referrer response hardening;
 - original/playback/thumbnail routes with existing byte Range streaming;
-- short-lived HMAC-signed media URLs so `<img>` and `<video>` can load without exposing the Web admin bearer token in media URLs;
-- browser bootstrap token read from URL fragment and retained only in `sessionStorage`, so the fragment is removed before normal navigation/logging.
+- short-lived HMAC-signed media URLs bound to `workspaceId + variant + media key + expiry`; the HMAC signing key is process-random and separate from the user's bearer token;
+- media streaming resolves the media row inside the verified/signed workspace, preventing a signed URL for workspace A from resolving workspace B's item with the same key;
+- access and refresh credentials may be provisioned through the URL fragment for the current transitional Web handoff and are immediately copied to `sessionStorage` before the fragment is stripped from browser history.
 
-This is an edge-admin authentication layer, not yet the final SaaS identity provider. Workspace ID is bound to the edge config and role enforcement is server-side, but production SaaS user login, durable access/refresh sessions and centrally issued workspace claims remain P0 work.
+The edge no longer treats a long-lived static string as administrator identity. Remaining production hardening is to replace the transitional fragment/sessionStorage credential handoff with a first-class browser pairing/login UX and preferably an HttpOnly refresh-cookie flow, then move issuance to the central SaaS control plane when that service is deployed.
 
 ## Implementation batches
 
@@ -95,21 +100,25 @@ Remaining migration hardening:
 - [x] Expose desktop status/library/accounts/health/migration operations through edge APIs.
 - [x] Serve the same Vite production bundle from the edge process.
 - [x] Add configurable bind host/port/public base URL/CORS origins.
-- [x] Add dedicated bearer authentication, server-side role enforcement and WebSocket authentication.
-- [x] Add signed browser media URLs and preserve Range streaming.
+- [x] Replace static Web admin token/role/workspace config with verified JOSE workspace sessions.
+- [x] Add automatic browser access-token refresh and session revoke API.
+- [x] Add server-side workspace-role enforcement and authenticated WebSocket upgrade.
+- [x] Add workspace-bound signed browser media URLs and preserve Range streaming.
 - [x] Add basic request rate limiting and response security headers.
-- [ ] Replace edge bootstrap token with central SaaS login + access/refresh workspace session.
-- [ ] Persist audit events for Web administrative actions.
+- [ ] Add first-class browser pairing/login UX and HttpOnly refresh-cookie handoff.
+- [ ] Persist audit events for Web administrative actions with the authenticated actor/session.
+- [ ] Namespace Google Photos OAuth account persistence and every migration operation by workspace principal rather than the current single-edge workspace service instance.
 - [ ] Add reverse-proxy deployment examples for Cloudflare Tunnel, Caddy and nginx.
 - [ ] Add browser end-to-end smoke test for parity-critical routes.
 
 ## Next priorities
 
-1. Central SaaS workspace identity/session issuance and tenant-scoped edge authorization.
-2. Durable workspace/membership/device/usage persistence and migration from legacy personal installs.
-3. Audit log for Web/desktop administrative mutations.
+1. First-class Web pairing/login handoff and HttpOnly refresh cookie; remove fragment/sessionStorage refresh-token dependency.
+2. Scope Google Photos OAuth accounts + migration job service by authenticated workspace and add cross-tenant tests.
+3. Persist Web administrative audit events using authenticated user/device/session identity.
 4. Browser E2E parity test and reverse-proxy deployment docs.
 5. Large-file streaming + mid-file Google Drive migration resume.
+6. Continue central control-plane extraction for multi-edge workspace routing, subscription state and SaaS-issued sessions.
 
 ## Validation rule
 
