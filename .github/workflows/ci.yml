@@ -11,4 +11,4 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run typecheck
-      - run: npm --workspace desktop run build
+      - run: npm run build
