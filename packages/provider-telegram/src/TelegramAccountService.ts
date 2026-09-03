@@ -36,7 +36,7 @@ export class TelegramAccountService {
   constructor(
     private readonly configs: TelegramConfigStore,
     private readonly secrets: SecretStore,
-    private readonly workspaceId: string,
+    public readonly workspaceId: string,
   ) {
     if (!workspaceId.trim()) throw new Error('Telegram workspaceId is required');
   }
