@@ -4,30 +4,36 @@ export class MemoryTelegramMediaRepository implements TelegramMediaRepository {
   private readonly records: TelegramStoredMedia[] = [];
 
   async add(record: TelegramStoredMedia): Promise<void> {
-    const index = this.records.findIndex((item) => item.accountId === record.accountId && item.fileId === record.fileId);
+    const index = this.records.findIndex((item) => item.workspaceId === record.workspaceId && item.accountId === record.accountId && item.fileId === record.fileId);
     if (index >= 0) this.records[index] = { ...record };
     else this.records.push({ ...record });
   }
 
-  async list(accountId?: string): Promise<TelegramStoredMedia[]> {
-    return this.records.filter((record) => !accountId || record.accountId === accountId).map((record) => ({ ...record }));
+  async list(workspaceId: string, accountId?: string): Promise<TelegramStoredMedia[]> {
+    return this.records
+      .filter((record) => record.workspaceId === workspaceId && (!accountId || record.accountId === accountId))
+      .map((record) => ({ ...record }));
   }
 
-  async removeByFileId(accountId: string, fileId: string): Promise<void> {
-    const index = this.records.findIndex((record) => record.accountId === accountId && record.fileId === fileId);
+  async removeByFileId(workspaceId: string, accountId: string, fileId: string): Promise<void> {
+    const index = this.records.findIndex((record) => record.workspaceId === workspaceId && record.accountId === accountId && record.fileId === fileId);
     if (index >= 0) this.records.splice(index, 1);
   }
 }
 
 export class TelegramMediaStatsService {
-  constructor(private readonly media: TelegramMediaRepository) {}
+  constructor(private readonly media: TelegramMediaRepository, private readonly workspaceId: string) {
+    if (!workspaceId.trim()) throw new Error('Telegram workspaceId is required');
+  }
 
   async getStats(displayNames: Record<string, string> = {}): Promise<TelegramProviderStats> {
-    const records = await this.media.list();
+    const records = await this.media.list(this.workspaceId);
     const byAccount = new Map<string, TelegramAccountStats>();
 
     for (const record of records) {
+      if (record.workspaceId !== this.workspaceId) throw new Error('TELEGRAM_WORKSPACE_MISMATCH');
       const current = byAccount.get(record.accountId) ?? {
+        workspaceId: this.workspaceId,
         accountId: record.accountId,
         displayName: displayNames[record.accountId],
         mediaCount: 0,
@@ -48,6 +54,7 @@ export class TelegramMediaStatsService {
     const accounts = [...byAccount.values()].sort((a, b) => a.accountId.localeCompare(b.accountId));
     return {
       providerId: 'telegram-bot',
+      workspaceId: this.workspaceId,
       accounts,
       totalMedia: accounts.reduce((sum, account) => sum + account.mediaCount, 0),
       totalBytes: accounts.reduce((sum, account) => sum + account.totalBytes, 0),
