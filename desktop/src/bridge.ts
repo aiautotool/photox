@@ -9,6 +9,10 @@ export type WorkspaceDevice={id:string;workspaceId:string;userId:string;name:str
 export type WorkspaceSessionSummary={sessionId:string;subject:string;deviceId?:string;scopes:string[];expiresAt:number;createdAt:number;lastUsedAt?:number};
 export type WorkspaceSessionRevokeResult={sessionId:string;revoked:true};
 export type WorkspaceDeviceRevokeResult={deviceId:string;sessionsRevoked:number;activeDevices:number};
+export type WorkspaceEntitlements={maxManagedStorageBytes:number|null;maxMonthlyIngressBytes:number|null;maxMembers:number|null;maxDevices:number|null;maxStorageProviders:number|null;maxPublicShares:number|null;targetOriginalReplicas:number;publicSharing:boolean;remoteAccess:boolean;semanticSearch:boolean;priorityVideoProcessing:boolean};
+export type WorkspaceUsage={managedStorageBytes:number;monthlyIngressBytes:number;members:number;devices:number;storageProviders:number;publicShares:number};
+export type WorkspaceQuotaDimension={current:number;limit:number|null;remaining:number|null;percent:number|null};
+export type WorkspaceOverviewSnapshot={workspace:{id:string;name:string;ownerUserId:string;plan:string;status:string};membership:{userId:string;role:'owner'|'admin'|'member'|'viewer';status:string;joinedAt:number};usage:WorkspaceUsage;entitlements:WorkspaceEntitlements;quota:{managedStorage:WorkspaceQuotaDimension;monthlyIngress:WorkspaceQuotaDimension;members:WorkspaceQuotaDimension;devices:WorkspaceQuotaDimension;storageProviders:WorkspaceQuotaDimension;publicShares:WorkspaceQuotaDimension}};
 export type MigrationJob={id:string;workspaceId:string;sourceAccountId:string;sourcePickerSessionId?:string;target:'google_photos'|'google_drive';targetAccountId:string;state:string;totalItems:number;completedItems:number;failedItems:number;totalBytes?:number;transferredBytes:number;createdAt:string;updatedAt:string;startedAt?:string;completedAt?:string;lastError?:string};
 export type MigrationItem={id:string;jobId:string;sourceMediaId:string;filename:string;mimeType?:string;sizeBytes?:number;state:string;attempts:number;transferredBytes:number;targetId?:string;targetUrl?:string;error?:string;createdAt:string;updatedAt:string};
 export type MigrationSnapshot={job:MigrationJob;items:MigrationItem[]};
@@ -28,6 +32,7 @@ export interface DesktopBridge {
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
   createWebLoginLink():Promise<{url:string;expiresAt:number}>;
+  getWorkspaceOverview():Promise<WorkspaceOverviewSnapshot>;
   listWorkspaceDevices():Promise<WorkspaceDevice[]>;
   listWorkspaceSessions():Promise<WorkspaceSessionSummary[]>;
   revokeWorkspaceSession(sessionId:string):Promise<WorkspaceSessionRevokeResult>;
@@ -175,6 +180,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
     createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},
+    getWorkspaceOverview:()=>json('/api/web/v1/workspace'),
     listWorkspaceDevices:()=>json('/api/web/v1/devices'),
     listWorkspaceSessions:()=>json('/api/web/v1/sessions'),
     revokeWorkspaceSession:(sessionId)=>json(`/api/web/v1/sessions/${encodeURIComponent(sessionId)}`,{method:'DELETE'}),
