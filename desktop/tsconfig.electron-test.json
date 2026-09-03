@@ -12,8 +12,6 @@
   },
   "include": [
     "electron/googlePhotosMigration.ts",
-    "electron/googlePhotosMigration.test.ts",
-    "electron/webEdgeServer.ts",
-    "electron/webEdgeServer.test.ts"
+    "electron/googlePhotosMigration.test.ts"
   ]
 }
