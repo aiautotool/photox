@@ -132,3 +132,13 @@ Remaining migration hardening:
 ## Validation rule
 
 Every batch must pass repository tests, TypeScript typecheck and production build before being marked complete. Live Google OAuth transfer remains explicitly NOT VERIFIED in CI because user OAuth credentials/consent are not available there.
+
+
+## Web one-time login ticket hardening
+
+- Desktop can issue a cryptographically random Web login ticket with a 2-minute TTL.
+- The ticket is single-use and held only in process memory; a successful or expired consume removes it.
+- Browser bootstrap accepts `#ticket=...`, removes the fragment immediately, redeems it at `/api/web/v1/auth/ticket`, and receives only the short-lived access token + CSRF token.
+- The reusable refresh token is written directly to the existing HttpOnly/SameSite cookie by the edge server and is never returned to browser JavaScript in the normal Web login flow.
+- Desktop Settings exposes a real `Create & copy` Web link action; the Web transport itself cannot mint login links.
+- The legacy `/auth/bootstrap` refresh-token endpoint remains temporarily for compatibility with older V4 deployments, but generated Web links no longer use it.

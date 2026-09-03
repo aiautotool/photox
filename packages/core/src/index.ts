@@ -127,3 +127,21 @@ export function formatGiB(bytes: number): string {
 
 export * from './saas.js';
 export * from './tenant.js';
+
+
+export class OneTimeTicketStore<T> {
+  private readonly entries = new Map<string,{value:T;expiresAt:number}>();
+  put(token:string,value:T,expiresAt:number){
+    if(!token)throw new Error('TICKET_REQUIRED');
+    this.entries.set(token,{value,expiresAt});
+  }
+  consume(token:string,now=Date.now()):T|undefined{
+    const entry=this.entries.get(token);
+    if(!entry)return undefined;
+    this.entries.delete(token);
+    if(entry.expiresAt<=now)return undefined;
+    return entry.value;
+  }
+  prune(now=Date.now()){for(const [token,entry] of this.entries)if(entry.expiresAt<=now)this.entries.delete(token);}
+  get size(){return this.entries.size;}
+}

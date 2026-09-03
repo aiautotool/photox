@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   listGoogleAccounts: () => ipcRenderer.invoke('photosync:list-google-accounts'),
   removeGoogleAccount: (accountId: string) => ipcRenderer.invoke('photosync:remove-google-account', accountId),
   retryCloud: () => ipcRenderer.invoke('photosync:retry-cloud'),
+  createWebLoginLink: () => ipcRenderer.invoke('photosync:web-login-link'),
   listGooglePhotosAccounts: () => ipcRenderer.invoke('photosync:google-photos-accounts'),
   connectGooglePhotosAccount: (capability: 'picker'|'append') => ipcRenderer.invoke('photosync:google-photos-connect', capability),
   removeGooglePhotosAccount: (accountId: string) => ipcRenderer.invoke('photosync:google-photos-remove', accountId),

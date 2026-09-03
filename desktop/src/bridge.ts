@@ -23,6 +23,7 @@ export interface DesktopBridge {
   listGoogleAccounts():Promise<DriveAccount[]>;
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
+  createWebLoginLink():Promise<{url:string;expiresAt:number}>;
   listGooglePhotosAccounts():Promise<GooglePhotosAccount[]>;
   connectGooglePhotosAccount(capability:'picker'|'append'):Promise<GooglePhotosAccount>;
   removeGooglePhotosAccount(accountId:string):Promise<void>;
@@ -47,6 +48,7 @@ export interface WebBridgeConfig {
   baseUrl: string;
   accessToken?: string;
   refreshToken?: string;
+  loginTicket?: string;
   websocketUrl?: string;
 }
 
@@ -56,13 +58,14 @@ export function resolveDesktopBridge(): DesktopBridge | undefined {
   if (window.photoSyncDesktop) return window.photoSyncDesktop;
   const config=window.__PHOTOSYNC_WEB_CONFIG__;
   if (!config?.baseUrl) return undefined;
-  return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,websocketUrl:config.websocketUrl});
+  return createHttpDesktopBridge({baseUrl:config.baseUrl,accessToken:config.accessToken,refreshToken:config.refreshToken,loginTicket:config.loginTicket,websocketUrl:config.websocketUrl});
 }
 
 export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   const baseUrl=normalizeBaseUrl(config.baseUrl);
   let accessToken=config.accessToken||'';
   let bootstrapRefreshToken=config.refreshToken||'';
+  let loginTicket=config.loginTicket||'';
   let csrfToken='';
   let refreshPromise:Promise<boolean>|null=null;
   let bootstrapPromise:Promise<boolean>|null=null;
@@ -80,12 +83,13 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
   }
 
   async function bootstrapSession(){
-    if(!bootstrapRefreshToken)return false;
+    if(!loginTicket&&!bootstrapRefreshToken)return false;
     if(bootstrapPromise)return bootstrapPromise;
     bootstrapPromise=(async()=>{
       try{
+        const ticket=loginTicket;loginTicket='';
         const token=bootstrapRefreshToken;bootstrapRefreshToken='';
-        const response=await fetch(`${baseUrl}/api/web/v1/auth/bootstrap`,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify({refreshToken:token})});
+        const response=await fetch(`${baseUrl}${ticket?'/api/web/v1/auth/ticket':'/api/web/v1/auth/bootstrap'}`,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(ticket?{ticket}:{refreshToken:token})});
         if(!response.ok)throw new Error('WEB_BOOTSTRAP_REJECTED');
         const next=await response.json() as {accessToken?:string;csrfToken?:string};
         if(!next.accessToken)throw new Error('WEB_BOOTSTRAP_ACCESS_MISSING');
@@ -153,6 +157,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     listGoogleAccounts:()=>json('/api/web/v1/google-drive/accounts'),
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
+    createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},
     listGooglePhotosAccounts:()=>json('/api/web/v1/google-photos/accounts'),
     connectGooglePhotosAccount:(capability)=>json('/api/web/v1/google-photos/accounts/connect',{method:'POST',body:JSON.stringify({capability})}),
     removeGooglePhotosAccount:async(accountId)=>{await json(`/api/web/v1/google-photos/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'});},

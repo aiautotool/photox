@@ -8,6 +8,7 @@ import {
   chooseAccount,
   evaluateBackupHealth,
   safeAvailable,
+  OneTimeTicketStore,
   type MediaReplica,
   type StorageAccount,
 } from './index';
@@ -87,5 +88,21 @@ describe('backup policy', () => {
 
   it('returns unknown when no copy can currently be verified', () => {
     expect(evaluateBackupHealth([{ ...drive, status: 'unknown' }], DEFAULT_PHOTO_POLICY).health).toBe('unknown');
+  });
+});
+
+
+describe('one-time ticket store',()=>{
+  it('consumes a valid ticket exactly once',()=>{
+    const store=new OneTimeTicketStore<{id:string}>();
+    store.put('ticket',{id:'session'},2000);
+    expect(store.consume('ticket',1000)).toEqual({id:'session'});
+    expect(store.consume('ticket',1000)).toBeUndefined();
+  });
+  it('rejects and removes expired tickets',()=>{
+    const store=new OneTimeTicketStore<string>();
+    store.put('expired','secret',1000);
+    expect(store.consume('expired',1000)).toBeUndefined();
+    expect(store.size).toBe(0);
   });
 });

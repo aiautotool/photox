@@ -607,6 +607,7 @@ async function startWebEdge(){
   const migrations=()=>requireMigrationService();
   webEdgeServer=new PhotoXWebEdgeServer(config,{
     authorizeAccessToken:async(token,required)=>{const principal=await requireWorkspaceAuth().authorizeToken(token,required);return {subject:principal.subject,workspaceId:principal.workspaceId!,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes};},
+    createWebSession:input=>requireWorkspaceAuth().createTrustedWebSession(input),
     refreshSession:refreshToken=>requireWorkspaceAuth().refresh(refreshToken),
     revokeSession:sessionId=>requireWorkspaceAuth().revoke(sessionId),
     getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
@@ -634,6 +635,7 @@ ipcMain.handle('photosync:add-google',()=>connectGoogle());
 ipcMain.handle('photosync:list-google-accounts',()=>listDriveAccounts());
 ipcMain.handle('photosync:remove-google-account',(_event,accountId:string)=>removeDriveAccount(accountId));
 ipcMain.handle('photosync:retry-cloud',async()=>{await retryQueuedCloud();return desktopStatus()});
+ipcMain.handle('photosync:web-login-link',async()=>{if(!webEdgeServer)throw new Error('PHOTOX_WEB_DISABLED');return webEdgeServer.issueLoginTicket();});
 
 ipcMain.handle('photosync:google-photos-accounts',()=>requireMigrationService().listAccounts());
 ipcMain.handle('photosync:google-photos-connect',(_event,capability:'picker'|'append')=>requireMigrationService().connectAccount(capability));

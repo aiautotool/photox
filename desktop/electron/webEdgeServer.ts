@@ -4,15 +4,18 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { MediaApiScope } from '@photox/media-api';
+import { OneTimeTicketStore } from '@photosync/core';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
 export type WebPrincipal={subject:string;workspaceId:string;workspaceRole?:WebRole;deviceId?:string;sessionId?:string;scopes:MediaApiScope[]};
 
 type BrowserMedia={key:string;url?:string;thumbnailUri?:string;[key:string]:unknown};
+type WebSession={accessToken:string;refreshToken:string;accessExpiresAt:number;sessionId:string};
 
 export interface WebEdgeHandlers {
   authorizeAccessToken(token:string,required:MediaApiScope[]):Promise<WebPrincipal>;
+  createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
   getStatus():Promise<unknown>;
@@ -56,6 +59,7 @@ const MEDIA_TTL_SECONDS=10*60;
 const WEB_REFRESH_COOKIE='photox_refresh';
 const WEB_CSRF_COOKIE='photox_csrf';
 const WEB_REFRESH_MAX_AGE=30*24*60*60;
+const WEB_LOGIN_TTL_MS=2*60_000;
 
 export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
@@ -78,7 +82,19 @@ export class PhotoXWebEdgeServer {
   private sockets=new Map<WebSocket,WebPrincipal>();
   private buckets=new Map<string,Bucket>();
   private readonly mediaSigningKey=crypto.randomBytes(32);
+  private readonly loginTickets=new OneTimeTicketStore<WebSession>();
   constructor(private readonly config:WebEdgeConfig,private readonly handlers:WebEdgeHandlers){}
+
+  async issueLoginTicket(){
+    this.loginTickets.prune();
+    const ticket=crypto.randomBytes(32).toString('base64url');
+    const session=await this.handlers.createWebSession({deviceId:`web_${crypto.randomBytes(16).toString('hex')}`,deviceName:'PhotoX Web'});
+    const expiresAt=Date.now()+WEB_LOGIN_TTL_MS;
+    this.loginTickets.put(ticket,session,expiresAt);
+    const localHost=['0.0.0.0','::','::0'].includes(this.config.host)?'127.0.0.1':this.config.host;
+    const base=this.config.publicBaseUrl||`http://${localHost}:${this.config.port}`;
+    return {url:`${base}/#ticket=${encodeURIComponent(ticket)}`,expiresAt};
+  }
 
   async start(){
     if(!this.config.enabled||this.server)return;
@@ -211,6 +227,9 @@ export class PhotoXWebEdgeServer {
     if(!this.originAllowed(req)){this.json(res,403,{error:'ORIGIN_FORBIDDEN'});return;}
     if(!this.rateAllowed(req)){res.setHeader('retry-after','60');this.json(res,429,{error:'RATE_LIMITED'});return;}
     const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname==='/api/web/v1/auth/ticket'&&req.method==='POST'){
+      try{const b=await this.body(req);const ticket=String(b.ticket||'');if(!ticket)throw new Error('LOGIN_TICKET_REQUIRED');const session=this.loginTickets.consume(ticket);if(!session)throw new Error('LOGIN_TICKET_INVALID_OR_EXPIRED');const csrfToken=crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,session.refreshToken,csrfToken));this.json(res,200,{accessToken:session.accessToken,accessExpiresAt:session.accessExpiresAt,sessionId:session.sessionId,csrfToken});}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
+    }
     if(url.pathname==='/api/web/v1/auth/bootstrap'&&req.method==='POST'){
       try{const b=await this.body(req);const refreshToken=String(b.refreshToken||'');if(!refreshToken)throw new Error('REFRESH_TOKEN_REQUIRED');const next=await this.handlers.refreshSession(refreshToken);const csrfToken=crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,refreshToken,csrfToken));this.json(res,200,{...next,csrfToken});}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
     }
@@ -274,7 +293,7 @@ export class PhotoXWebEdgeServer {
     try{
       let body=await fs.readFile(filePath);
       if(path.basename(filePath)==='index.html'){
-        const bootstrap=`<script>const p=new URLSearchParams(location.hash.slice(1));window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||p.get('access_token')||''),refreshToken:(p.get('refresh_token')||'')};if(window.__PHOTOSYNC_WEB_CONFIG__.accessToken)sessionStorage.setItem('photox.web.access',window.__PHOTOSYNC_WEB_CONFIG__.accessToken);sessionStorage.removeItem('photox.web.refresh');if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;
+        const bootstrap=`<script>const p=new URLSearchParams(location.hash.slice(1));window.__PHOTOSYNC_WEB_CONFIG__={baseUrl:location.origin,accessToken:(sessionStorage.getItem('photox.web.access')||''),loginTicket:(p.get('ticket')||'')};if(location.hash)history.replaceState(null,'',location.pathname+location.search);</script>`;
         body=Buffer.from(body.toString('utf8').replace('</head>',`${bootstrap}</head>`));
       }
       const ext=path.extname(filePath);const types:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};

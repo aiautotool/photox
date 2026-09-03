@@ -101,6 +101,11 @@ export class DesktopWorkspaceAuth {
     return result;
   }
 
+  async createTrustedWebSession(input:{deviceId:string;deviceName?:string}) {
+    const pairing=this.pairing.issue();
+    return this.exchange({workspaceId:this.workspaceId,pairingChallenge:pairing.challenge,deviceId:input.deviceId,deviceName:input.deviceName||'PhotoX Web',platform:'web'});
+  }
+
   refresh(refreshToken: string) { return this.sessions.refresh(refreshToken); }
   revoke(sessionId: string) { return this.sessions.revoke(sessionId); }
 
