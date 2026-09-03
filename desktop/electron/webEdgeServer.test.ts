@@ -44,7 +44,7 @@ async function nextMessage(socket: WebSocket): Promise<any> {
   });
 }
 
-test('Web edge authenticates one-time ticket, CSRF, WebSocket and signed Range streaming', async () => {
+test('Web edge authenticates one-time ticket, CSRF, device/session APIs, WebSocket and signed Range streaming', async () => {
   const staticDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-web-edge-'));
   await fs.writeFile(path.join(staticDir, 'index.html'), '<!doctype html><html><head></head><body>PhotoX</body></html>');
   const port = await freePort();
@@ -57,6 +57,8 @@ test('Web edge authenticates one-time ticket, CSRF, WebSocket and signed Range s
   let auditCount = 0;
   let retryCount = 0;
   let rangeWorkspace = '';
+  let revokedDevice = '';
+  let revokedSession = '';
   const handlers: WebEdgeHandlers = {
     authorizeAccessToken: async (token) => {
       assert.equal(token, 'access-token');
@@ -68,6 +70,25 @@ test('Web edge authenticates one-time ticket, CSRF, WebSocket and signed Range s
       return { accessToken: 'access-token', accessExpiresAt: Date.now() + 60_000, sessionId: 'session-a' };
     },
     revokeSession: async () => undefined,
+    listWorkspaceDevices: async (actor) => {
+      assert.equal(actor.workspaceId, 'workspace-a');
+      assert.equal(actor.subject, 'user-a');
+      return [{ id: 'device-a', workspaceId: actor.workspaceId, userId: actor.subject, name: 'Phone', platform: 'ios', kind: 'mobile', createdAt: 1, lastSeenAt: 2 }];
+    },
+    listWorkspaceSessions: async (actor) => {
+      assert.equal(actor.workspaceRole, 'admin');
+      return [{ sessionId: 'session-a', subject: actor.subject, deviceId: actor.deviceId, scopes: ['media:read'], expiresAt: 20, createdAt: 10 }];
+    },
+    revokeWorkspaceSession: async (actor, sessionId) => {
+      assert.equal(actor.workspaceId, 'workspace-a');
+      revokedSession = sessionId;
+      return { sessionId, revoked: true };
+    },
+    revokeWorkspaceDevice: async (actor, deviceId) => {
+      assert.equal(actor.workspaceId, 'workspace-a');
+      revokedDevice = deviceId;
+      return { deviceId, sessionsRevoked: 2, activeDevices: 1 };
+    },
     appendAudit: async () => { auditCount += 1; },
     getStatus: async () => ({ ok: true }),
     getTunnelStatus: async () => ({ state: 'idle' }),
@@ -144,6 +165,18 @@ test('Web edge authenticates one-time ticket, CSRF, WebSocket and signed Range s
     });
     assert.equal(replay.status, 401);
 
+    const devices = await fetch(`${origin}/api/web/v1/devices`, { headers: { origin, authorization: 'Bearer access-token' } });
+    assert.equal(devices.status, 200);
+    assert.deepEqual((await devices.json() as Array<{id:string}>).map(item=>item.id), ['device-a']);
+
+    const sessions = await fetch(`${origin}/api/web/v1/sessions`, { headers: { origin, authorization: 'Bearer access-token' } });
+    assert.equal(sessions.status, 200);
+    assert.deepEqual((await sessions.json() as Array<{sessionId:string}>).map(item=>item.sessionId), ['session-a']);
+
+    const noCsrfRevoke = await fetch(`${origin}/api/web/v1/devices/device-a`, { method: 'DELETE', headers: { origin, authorization: 'Bearer access-token' } });
+    assert.equal(noCsrfRevoke.status, 403);
+    assert.equal(revokedDevice, '');
+
     const withoutCsrf = await fetch(`${origin}/api/web/v1/cloud/retry`, {
       method: 'POST', headers: { origin, authorization: 'Bearer access-token' },
     });
@@ -151,6 +184,18 @@ test('Web edge authenticates one-time ticket, CSRF, WebSocket and signed Range s
     assert.equal(retryCount, 0);
 
     const cookieHeader = `photox_refresh=${encodeURIComponent(refreshCookie)}; photox_csrf=${encodeURIComponent(csrfCookie)}`;
+    const revokeDevice = await fetch(`${origin}/api/web/v1/devices/device-a`, {
+      method: 'DELETE', headers: { origin, authorization: 'Bearer access-token', cookie: cookieHeader, 'x-csrf-token': redeemed.csrfToken },
+    });
+    assert.equal(revokeDevice.status, 200);
+    assert.equal(revokedDevice, 'device-a');
+
+    const revokeSession = await fetch(`${origin}/api/web/v1/sessions/session-other`, {
+      method: 'DELETE', headers: { origin, authorization: 'Bearer access-token', cookie: cookieHeader, 'x-csrf-token': redeemed.csrfToken },
+    });
+    assert.equal(revokeSession.status, 200);
+    assert.equal(revokedSession, 'session-other');
+
     const withCsrf = await fetch(`${origin}/api/web/v1/cloud/retry`, {
       method: 'POST',
       headers: { origin, authorization: 'Bearer access-token', cookie: cookieHeader, 'x-csrf-token': redeemed.csrfToken },
