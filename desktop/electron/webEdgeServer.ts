@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { MediaApiScope } from '@photox/media-api';
 import { OneTimeTicketStore } from '@photosync/core';
+import { requireActiveDesktopWorkspaceAuth } from './workspaceAuth.js';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
@@ -19,10 +20,10 @@ export interface WebEdgeHandlers {
   createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
-  listWorkspaceDevices(principal:WebPrincipal):Promise<unknown>;
-  listWorkspaceSessions(principal:WebPrincipal):Promise<unknown>;
-  revokeWorkspaceSession(principal:WebPrincipal,sessionId:string):Promise<unknown>;
-  revokeWorkspaceDevice(principal:WebPrincipal,deviceId:string):Promise<unknown>;
+  listWorkspaceDevices?(principal:WebPrincipal):Promise<unknown>;
+  listWorkspaceSessions?(principal:WebPrincipal):Promise<unknown>;
+  revokeWorkspaceSession?(principal:WebPrincipal,sessionId:string):Promise<unknown>;
+  revokeWorkspaceDevice?(principal:WebPrincipal,deviceId:string):Promise<unknown>;
   appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
@@ -227,6 +228,8 @@ export class PhotoXWebEdgeServer {
 
   private json(res:ServerResponse,status:number,value:unknown){res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(value));}
 
+  private deviceApi(){return requireActiveDesktopWorkspaceAuth();}
+
   private async handle(req:IncomingMessage,res:ServerResponse){
     this.cors(req,res);
     if(req.method==='OPTIONS'){res.writeHead(this.originAllowed(req)?204:403);res.end();return;}
@@ -266,10 +269,10 @@ export class PhotoXWebEdgeServer {
       const targetSession=String(b.sessionId||principal.sessionId||'');await this.handlers.revokeSession(targetSession);await this.handlers.appendAudit(principal,{action:'web.session.revoke',targetType:'session',targetId:targetSession});res.setHeader('set-cookie',this.clearSessionCookies(req));res.writeHead(204);res.end();return;
     }
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
-    if(m==='GET'&&p==='/api/web/v1/devices')return read(()=>this.handlers.listWorkspaceDevices(principal));
-    if(m==='GET'&&p==='/api/web/v1/sessions')return read(()=>this.handlers.listWorkspaceSessions(principal));
-    let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return this.json(res,200,await this.handlers.revokeWorkspaceSession(principal,decodeURIComponent(match[1])));
-    match=/^\/api\/web\/v1\/devices\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return this.json(res,200,await this.handlers.revokeWorkspaceDevice(principal,decodeURIComponent(match[1])));
+    if(m==='GET'&&p==='/api/web/v1/devices')return read(()=>this.handlers.listWorkspaceDevices?.(principal)??Promise.resolve(this.deviceApi().listDevices(principal)));
+    if(m==='GET'&&p==='/api/web/v1/sessions')return read(()=>this.handlers.listWorkspaceSessions?.(principal)??Promise.resolve(this.deviceApi().listSessions(principal)));
+    let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceSession?.(principal,id)??Promise.resolve(this.deviceApi().revokeSession(principal,id)));return this.json(res,200,value);}
+    match=/^\/api\/web\/v1\/devices\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceDevice?.(principal,id)??Promise.resolve(this.deviceApi().revokeDevice(principal,id)));return this.json(res,200,value);}
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
     if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);
     if(m==='GET'&&p==='/api/web/v1/library'){
