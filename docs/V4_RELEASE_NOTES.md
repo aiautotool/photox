@@ -8,6 +8,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Google Drive PhotoX allocation no longer assumes a fixed 10 GB cap.
 - Default allocation is 2/3 of the provider-authoritative account total quota, constrained by real remaining provider bytes and a safety reserve.
 - Allocation ratio can be configured per account.
+- The core allocation contract now also supports a per-account safety reserve. The default remains 100 MB for legacy/unconfigured accounts, while invalid ratio/reserve inputs are clamped safely and the allocation snapshot exposes authoritative total/free/used, ratio-derived limit, reserve and actually available PhotoX bytes for future transport/UI use.
 - Media-cloud replica catalog and provider/account statistics are workspace isolated.
 - Local, Google Drive and Telegram provider work is structured around workspace ownership and replica policy.
 
