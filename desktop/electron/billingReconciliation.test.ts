@@ -84,3 +84,45 @@ test('billing reconciliation enforces owner/admin authorization before provider 
     store.close();
   }
 });
+
+test('scheduled billing reconciliation keeps exact tenant binding and audits as system actor', async () => {
+  const { store, workspaces, subscriptions, reconciliation } = setup();
+  const adapter: BillingProviderReadAdapter = {
+    provider: 'stripe',
+    async read(id) {
+      assert.equal(id, 'sub-a');
+      return {
+        workspaceId: 'ws-a', provider: 'stripe', providerSubscriptionId: 'sub-a', plan: 'family', status: 'active',
+        currentPeriodStart: 1_000, currentPeriodEnd: 20_000, sourceUpdatedAt: 4_000,
+      };
+    },
+  };
+  try {
+    assert.deepEqual(await reconciliation.reconcileSystem({
+      workspaceId: 'ws-a', provider: 'stripe', providerSubscriptionId: 'sub-a',
+    }, adapter, 4_100), { applied: true });
+    assert.equal(subscriptions.snapshot(actor).plan, 'family');
+    const event = workspaces.listAudit('ws-a', 20).find(item => item.action === 'subscription.reconciliation.completed');
+    assert.equal(event?.actorUserId, 'system:billing-reconciliation');
+    assert.equal(event?.metadata?.source, 'scheduled');
+  } finally {
+    store.close();
+  }
+});
+
+test('scheduled billing reconciliation refuses provider state from another workspace', async () => {
+  const { store, reconciliation } = setup();
+  const adapter: BillingProviderReadAdapter = {
+    provider: 'stripe',
+    async read() {
+      return { workspaceId: 'ws-other', provider: 'stripe', providerSubscriptionId: 'sub-a', plan: 'team', status: 'active', sourceUpdatedAt: 4_000 };
+    },
+  };
+  try {
+    await assert.rejects(() => reconciliation.reconcileSystem({
+      workspaceId: 'ws-a', provider: 'stripe', providerSubscriptionId: 'sub-a',
+    }, adapter, 4_100), /BILLING_PROVIDER_STATE_SCOPE_MISMATCH/);
+  } finally {
+    store.close();
+  }
+});
