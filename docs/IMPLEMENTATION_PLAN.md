@@ -67,7 +67,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Renderer-safe allocation snapshots expose provider total/free/used and PhotoX effective writable capacity without OAuth secrets.
 - [x] Electron IPC and authenticated Web PATCH transport use the same strict allocation mutation contract with server-derived workspace/account authority.
 - [x] Shared Desktop/Web allocation manager now exposes real per-account ratio and safety-reserve editing, authoritative refresh after mutation, reset to production defaults, loading/error states, and no fake 10 GB cap.
-- [ ] Move the allocation editor from the global shared launcher into the storage-account page once that page is split into a reusable component without duplicating its account logic.
+- [x] Allocation controls are now embedded directly in the storage-account surface instead of a floating global launcher; the same backed `DesktopBridge` mutation path remains shared by Electron and Web.
 - [ ] Live mutation E2E against a real Google account remains NOT VERIFIED.
 
 ### Google Photos migration
