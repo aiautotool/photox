@@ -8,6 +8,7 @@ import { OneTimeTicketStore } from '@photosync/core';
 import { requireActiveDesktopWorkspaceAuth } from './workspaceAuth.js';
 import { billingMutationHttpStatus } from './billingMutationTransport.js';
 import { updateDriveAllocationPolicyForWeb } from './driveAllocationDesktopTransport.js';
+import { forwardedProtoIsHttps, parseTrustedProxyAddresses, resolveClientAddress } from './webProxyTrust.js';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
@@ -65,6 +66,7 @@ export interface WebEdgeConfig {
   staticDir:string;
   publicBaseUrl?:string;
   rateLimitPerMinute:number;
+  trustedProxyAddresses?:string[];
 }
 
 type Bucket={minute:number;count:number};
@@ -80,14 +82,23 @@ export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
   const port=Number(process.env.PHOTOX_WEB_PORT||43118);
   if(!Number.isInteger(port)||port<1||port>65535)throw new Error('PHOTOX_WEB_PORT is invalid');
+  const rateLimitPerMinute=Number(process.env.PHOTOX_WEB_RATE_LIMIT||300);
+  if(!Number.isFinite(rateLimitPerMinute)||rateLimitPerMinute<1)throw new Error('PHOTOX_WEB_RATE_LIMIT is invalid');
+  const publicBaseUrl=process.env.PHOTOX_WEB_PUBLIC_BASE_URL?.replace(/\/$/,'');
+  if(publicBaseUrl){
+    let parsed:URL;
+    try{parsed=new URL(publicBaseUrl);}catch{throw new Error('PHOTOX_WEB_PUBLIC_BASE_URL is invalid');}
+    if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash)throw new Error('PHOTOX_WEB_PUBLIC_BASE_URL is invalid');
+  }
   return {
     enabled,
     host:process.env.PHOTOX_WEB_HOST||'127.0.0.1',
     port,
     allowedOrigins:(process.env.PHOTOX_WEB_ALLOWED_ORIGINS||'').split(',').map(v=>v.trim()).filter(Boolean),
     staticDir,
-    publicBaseUrl:process.env.PHOTOX_WEB_PUBLIC_BASE_URL?.replace(/\/$/,''),
-    rateLimitPerMinute:Math.max(30,Number(process.env.PHOTOX_WEB_RATE_LIMIT||300)),
+    publicBaseUrl,
+    rateLimitPerMinute:Math.max(30,rateLimitPerMinute),
+    trustedProxyAddresses:parseTrustedProxyAddresses(process.env.PHOTOX_WEB_TRUSTED_PROXIES),
   };
 }
 
@@ -183,7 +194,8 @@ export class PhotoXWebEdgeServer {
   }
 
   private rateAllowed(req:IncomingMessage){
-    const key=req.socket.remoteAddress||'unknown';const minute=Math.floor(Date.now()/60_000);const bucket=this.buckets.get(key);
+    const key=resolveClientAddress(req.socket.remoteAddress,req.headers['x-forwarded-for'],this.config.trustedProxyAddresses||[]);
+    const minute=Math.floor(Date.now()/60_000);const bucket=this.buckets.get(key);
     if(!bucket||bucket.minute!==minute){this.buckets.set(key,{minute,count:1});return true;}
     bucket.count+=1;return bucket.count<=this.config.rateLimitPerMinute;
   }
@@ -200,7 +212,7 @@ export class PhotoXWebEdgeServer {
   }
 
   private secureCookie(req:IncomingMessage){
-    return Boolean(this.config.publicBaseUrl?.startsWith('https://')||String(req.headers['x-forwarded-proto']||'').split(',')[0]?.trim()==='https');
+    return Boolean(this.config.publicBaseUrl?.startsWith('https://')||forwardedProtoIsHttps(req.socket.remoteAddress,req.headers['x-forwarded-proto'],this.config.trustedProxyAddresses||[]));
   }
 
   private sessionCookies(req:IncomingMessage,refreshToken:string,csrfToken:string){
