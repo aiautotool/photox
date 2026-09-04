@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES, DEFAULT_PROVIDER_USAGE_RATIO } from '@photosync/core';
-import { driveRuntimeAllocation, rendererDriveAllocationSnapshot } from './driveRuntimeAllocation.js';
+import { driveRuntimeAllocation, rendererDriveAccountInfo, rendererDriveAllocationSnapshot } from './driveRuntimeAllocation.js';
 
 const GIB=1024**3;
 
@@ -36,6 +36,34 @@ test('renderer snapshot excludes account credentials and provider secrets',()=>{
   assert.equal('tokens' in exposed,false);
   assert.equal('workspaceId' in exposed,false);
   assert.equal('email' in exposed,false);
+});
+
+test('renderer account projection exposes authoritative quota and effective writable bytes only',()=>{
+  const saved=account({maxUsageRatio:0.5,safetyReserveBytes:GIB});
+  const runtime=driveRuntimeAllocation({account:saved,email:'owner@example.com',quota:{limit:20*GIB,usage:14*GIB},appUsedBytes:3*GIB});
+  const info=rendererDriveAccountInfo({account:saved,email:'owner@example.com',runtime}) as unknown as Record<string,unknown>;
+  assert.equal(info.status,'ready');
+  assert.equal(info.totalBytes,20*GIB);
+  assert.equal(info.usedBytes,14*GIB);
+  assert.equal(info.freeBytes,6*GIB);
+  const allocation=info.allocation as Record<string,unknown>;
+  assert.equal(allocation.allocationRatio,0.5);
+  assert.equal(allocation.safetyReserveBytes,GIB);
+  assert.equal(allocation.availableBytes,5*GIB);
+  assert.equal('tokens' in info,false);
+  assert.equal('workspaceId' in info,false);
+});
+
+test('unavailable renderer account keeps persisted policy without inventing provider quota',()=>{
+  const saved=account({maxUsageRatio:0.8,safetyReserveBytes:2*GIB});
+  const info=rendererDriveAccountInfo({account:saved});
+  assert.equal(info.status,'unavailable');
+  assert.equal(info.totalBytes,0);
+  assert.equal(info.allocation.providerTotalBytes,null);
+  assert.equal(info.allocation.allocationLimitBytes,null);
+  assert.equal(info.allocation.allocationRatio,0.8);
+  assert.equal(info.allocation.safetyReserveBytes,2*GIB);
+  assert.equal(info.allocation.availableBytes,0);
 });
 
 test('runtime allocation normalizes malformed quota counters fail closed',()=>{
