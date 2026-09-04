@@ -38,3 +38,26 @@ test('Web bridge reads the authenticated workspace overview endpoint', async () 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Web bridge sends billing idempotency key as transport metadata, not request body', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    assert.equal(url, 'https://photox.example/api/web/v1/workspace/subscription/mutations');
+    assert.equal(init?.method, 'POST');
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get('authorization'), 'Bearer workspace-access');
+    assert.equal(headers.get('idempotency-key'), 'billing-mutation-key-0001');
+    assert.deepEqual(JSON.parse(String(init?.body)), { operation: 'change_plan', targetPlan: 'pro' });
+    assert.equal(String(init?.body).includes('billing-mutation-key-0001'), false);
+    return new Response(JSON.stringify({ status: 'succeeded', replayed: false, attempts: 1, providerStateResult: 'APPLIED' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const bridge = createHttpDesktopBridge({ baseUrl: 'https://photox.example', accessToken: 'workspace-access' });
+    const result = await bridge.mutateWorkspaceSubscription({ operation: 'change_plan', targetPlan: 'pro' }, 'billing-mutation-key-0001');
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.replayed, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
