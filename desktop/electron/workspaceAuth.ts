@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
-import type { WorkspaceRole } from '@photosync/core';
+import type { WorkspacePlanCode, WorkspaceRole } from '@photosync/core';
 import { entitlementsForPlan } from '@photosync/core';
 import { AuthSessionService, AuthorizationService, bearerToken, type MediaApiScope, type WorkspaceSessionRole } from '@photox/media-api';
 import { JoseAccessTokenService } from '@photox/auth-jose';
@@ -20,6 +20,15 @@ export type PairExchangeInput = {
   platform?: 'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';
 };
 
+const PHOTOX_PLANS = new Set<WorkspacePlanCode>(['free', 'personal', 'pro', 'family', 'team']);
+const SUBSCRIPTION_MAINTENANCE_INTERVAL_MS = 60_000;
+
+function subscriptionPeriodEndTargetPlan(): WorkspacePlanCode {
+  const configured = String(process.env.PHOTOX_BILLING_PERIOD_END_TARGET_PLAN || 'free').trim() as WorkspacePlanCode;
+  if (!PHOTOX_PLANS.has(configured)) throw new Error('PHOTOX_BILLING_PERIOD_END_TARGET_PLAN_INVALID');
+  return configured;
+}
+
 let activeDesktopWorkspaceAuth:DesktopWorkspaceAuth|null=null;
 let workspaceAuthIpcRegistered=false;
 export function requireActiveDesktopWorkspaceAuth(){if(!activeDesktopWorkspaceAuth)throw new Error('WORKSPACE_AUTH_NOT_READY');return activeDesktopWorkspaceAuth;}
@@ -31,6 +40,7 @@ export class DesktopWorkspaceAuth {
   private readonly deviceSessions: DeviceSessionManagementService;
   private readonly overview: WorkspaceOverviewService;
   private readonly subscriptions: WorkspaceSubscriptionService;
+  private subscriptionMaintenanceTimer?: ReturnType<typeof setInterval>;
 
   private constructor(
     secret: Uint8Array,
@@ -81,8 +91,27 @@ export class DesktopWorkspaceAuth {
     if (secret.byteLength < 32) throw new Error('PHOTOX_AUTH_SECRET_INVALID');
     const auth=new DesktopWorkspaceAuth(new Uint8Array(secret), input.store, input.workspaces, input.pairing, input.workspaceId, input.ownerUserId);
     activeDesktopWorkspaceAuth=auth;
+    auth.runSubscriptionMaintenance();
+    auth.startSubscriptionMaintenance();
     if(process.versions.electron)await auth.registerElectronIpc();
     return auth;
+  }
+
+  private runSubscriptionMaintenance() {
+    try {
+      const result = this.subscriptions.runDueEndOfPeriodTransitions({ targetPlan: subscriptionPeriodEndTargetPlan() });
+      if (result.applied > 0 || result.failed > 0) {
+        console.info('PhotoX subscription maintenance', result);
+      }
+    } catch (error) {
+      console.error('PhotoX subscription maintenance failed', error instanceof Error ? error.message : 'UNKNOWN_ERROR');
+    }
+  }
+
+  private startSubscriptionMaintenance() {
+    if (this.subscriptionMaintenanceTimer) return;
+    this.subscriptionMaintenanceTimer = setInterval(() => this.runSubscriptionMaintenance(), SUBSCRIPTION_MAINTENANCE_INTERVAL_MS);
+    this.subscriptionMaintenanceTimer.unref?.();
   }
 
   private trustedDesktopActor():DeviceSessionActor{

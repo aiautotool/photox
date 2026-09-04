@@ -49,6 +49,13 @@ export type EndOfPeriodEntitlementTransition = {
   effectiveAt: number;
 };
 
+export type SubscriptionMaintenanceResult = {
+  due: number;
+  applied: number;
+  skipped: number;
+  failed: number;
+};
+
 const ADMIN_ROLES = new Set<WorkspaceRole>(['owner', 'admin']);
 const ENTITLEMENT_ACTIVE_STATUSES = new Set<WorkspaceSubscriptionStatus>(['trialing', 'active', 'past_due']);
 
@@ -67,12 +74,14 @@ export class WorkspaceSubscriptionService {
         provider TEXT NOT NULL,
         provider_customer_id TEXT,
         provider_subscription_id TEXT NOT NULL,
+        provider_event_id TEXT,
         plan_code TEXT NOT NULL,
         status TEXT NOT NULL,
         current_period_start INTEGER,
         current_period_end INTEGER,
         cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
         source_updated_at INTEGER NOT NULL,
+        entitlement_transitioned_at INTEGER,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY(workspace_id) REFERENCES photox_workspaces(id) ON DELETE CASCADE
       );
@@ -92,6 +101,13 @@ export class WorkspaceSubscriptionService {
       CREATE INDEX IF NOT EXISTS idx_photox_subscription_events_workspace
         ON photox_subscription_provider_events(workspace_id, processed_at DESC);
     `);
+    const columns = this.store.db.prepare('PRAGMA table_info(photox_workspace_subscriptions)').all() as Array<{ name?: string }>;
+    if (!columns.some(column => column.name === 'provider_event_id')) {
+      this.store.db.exec('ALTER TABLE photox_workspace_subscriptions ADD COLUMN provider_event_id TEXT');
+    }
+    if (!columns.some(column => column.name === 'entitlement_transitioned_at')) {
+      this.store.db.exec('ALTER TABLE photox_workspace_subscriptions ADD COLUMN entitlement_transitioned_at INTEGER');
+    }
   }
 
   private requireAdmin(actor: WorkspaceSubscriptionActor) {
@@ -146,8 +162,20 @@ export class WorkspaceSubscriptionService {
         }
       }
 
-      const existing = this.store.db.prepare('SELECT source_updated_at FROM photox_workspace_subscriptions WHERE workspace_id=?').get(input.workspaceId) as { source_updated_at?: number } | undefined;
-      if (existing?.source_updated_at != null && Number(existing.source_updated_at) >= input.sourceUpdatedAt) {
+      const existing = this.store.db.prepare(`SELECT source_updated_at,provider_event_id
+        FROM photox_workspace_subscriptions WHERE workspace_id=?`).get(input.workspaceId) as { source_updated_at?: number; provider_event_id?: string | null } | undefined;
+      const existingUpdatedAt = existing?.source_updated_at == null ? undefined : Number(existing.source_updated_at);
+      const incomingEventId = input.providerEventId?.trim() || undefined;
+      const existingEventId = typeof existing?.provider_event_id === 'string' && existing.provider_event_id.trim()
+        ? existing.provider_event_id.trim()
+        : undefined;
+      const staleByTimestamp = existingUpdatedAt != null && existingUpdatedAt > input.sourceUpdatedAt;
+      // Provider timestamps (Stripe `event.created`) have second precision. When two different
+      // events share the same timestamp, use the provider event id as a deterministic tie-breaker
+      // so every delivery order converges on the same state instead of dropping both arbitrarily.
+      const staleAtEqualTimestamp = existingUpdatedAt === input.sourceUpdatedAt
+        && (!incomingEventId || (existingEventId != null && incomingEventId <= existingEventId));
+      if (staleByTimestamp || staleAtEqualTimestamp) {
         if (input.providerEventId) {
           this.recordProviderEvent(input, false, 'STALE_PROVIDER_EVENT', now);
         }
@@ -156,30 +184,34 @@ export class WorkspaceSubscriptionService {
       }
 
       this.store.db.prepare(`INSERT INTO photox_workspace_subscriptions(
-        workspace_id,provider,provider_customer_id,provider_subscription_id,plan_code,status,
-        current_period_start,current_period_end,cancel_at_period_end,source_updated_at,updated_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        workspace_id,provider,provider_customer_id,provider_subscription_id,provider_event_id,plan_code,status,
+        current_period_start,current_period_end,cancel_at_period_end,source_updated_at,entitlement_transitioned_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(workspace_id) DO UPDATE SET
         provider=excluded.provider,
         provider_customer_id=excluded.provider_customer_id,
         provider_subscription_id=excluded.provider_subscription_id,
+        provider_event_id=excluded.provider_event_id,
         plan_code=excluded.plan_code,
         status=excluded.status,
         current_period_start=excluded.current_period_start,
         current_period_end=excluded.current_period_end,
         cancel_at_period_end=excluded.cancel_at_period_end,
         source_updated_at=excluded.source_updated_at,
+        entitlement_transitioned_at=NULL,
         updated_at=excluded.updated_at`).run(
         input.workspaceId,
         input.provider,
         input.providerCustomerId ?? null,
         input.providerSubscriptionId,
+        incomingEventId ?? null,
         input.plan,
         input.status,
         input.currentPeriodStart ?? null,
         input.currentPeriodEnd ?? null,
         input.cancelAtPeriodEnd ? 1 : 0,
         input.sourceUpdatedAt,
+        null,
         now,
       );
 
@@ -221,7 +253,7 @@ export class WorkspaceSubscriptionService {
 
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.store.db.prepare(`SELECT provider,provider_subscription_id,status,current_period_end,cancel_at_period_end
+      const row = this.store.db.prepare(`SELECT provider,provider_subscription_id,status,current_period_end,cancel_at_period_end,entitlement_transitioned_at
         FROM photox_workspace_subscriptions WHERE workspace_id=?`).get(input.workspaceId) as Record<string, unknown> | undefined;
       if (!row) {
         this.store.db.exec('COMMIT');
@@ -230,6 +262,10 @@ export class WorkspaceSubscriptionService {
       if (String(row.provider) !== input.provider || String(row.provider_subscription_id) !== input.providerSubscriptionId) {
         this.store.db.exec('COMMIT');
         return { applied: false, reason: 'SUBSCRIPTION_MISMATCH' as const };
+      }
+      if (row.entitlement_transitioned_at != null) {
+        this.store.db.exec('COMMIT');
+        return { applied: false, reason: 'ALREADY_TRANSITIONED' as const };
       }
       if (String(row.status) !== 'canceled' || !Boolean(Number(row.cancel_at_period_end))) {
         this.store.db.exec('COMMIT');
@@ -243,11 +279,15 @@ export class WorkspaceSubscriptionService {
       const currentWorkspace = this.workspaces.getWorkspace(input.workspaceId);
       if (!currentWorkspace) throw new Error('WORKSPACE_NOT_FOUND');
       if (currentWorkspace.plan === input.targetPlan) {
+        this.store.db.prepare('UPDATE photox_workspace_subscriptions SET entitlement_transitioned_at=?,updated_at=? WHERE workspace_id=?')
+          .run(now, now, input.workspaceId);
         this.store.db.exec('COMMIT');
         return { applied: false, reason: 'ALREADY_TRANSITIONED' as const };
       }
 
       this.store.db.prepare('UPDATE photox_workspaces SET plan=?, updated_at=? WHERE id=?').run(input.targetPlan, now, input.workspaceId);
+      this.store.db.prepare('UPDATE photox_workspace_subscriptions SET entitlement_transitioned_at=?,updated_at=? WHERE workspace_id=?')
+        .run(now, now, input.workspaceId);
       this.workspaces.appendAudit({
         workspaceId: input.workspaceId,
         actorUserId: 'system:billing',
@@ -270,6 +310,36 @@ export class WorkspaceSubscriptionService {
       this.store.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  runDueEndOfPeriodTransitions(input: { targetPlan?: WorkspacePlanCode; now?: number; limit?: number } = {}): SubscriptionMaintenanceResult {
+    const now = input.now ?? Date.now();
+    const targetPlan = input.targetPlan ?? 'free';
+    const limit = Math.max(1, Math.min(500, Math.floor(input.limit ?? 100)));
+    const rows = this.store.db.prepare(`SELECT workspace_id,provider,provider_subscription_id,current_period_end
+      FROM photox_workspace_subscriptions
+      WHERE status='canceled' AND cancel_at_period_end=1 AND current_period_end IS NOT NULL
+        AND current_period_end<=? AND entitlement_transitioned_at IS NULL
+      ORDER BY current_period_end ASC,workspace_id ASC LIMIT ?`).all(now, limit) as Array<Record<string, unknown>>;
+    let applied = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const result = this.applyEndOfPeriodEntitlementTransition({
+          workspaceId: String(row.workspace_id),
+          provider: String(row.provider),
+          providerSubscriptionId: String(row.provider_subscription_id),
+          targetPlan,
+          effectiveAt: Number(row.current_period_end),
+        }, now);
+        if (result.applied) applied += 1;
+        else skipped += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { due: rows.length, applied, skipped, failed };
   }
 
   private recordProviderEvent(input: ProviderSubscriptionState, applied: boolean, resultCode: string | null, now: number) {
