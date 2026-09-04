@@ -13,6 +13,8 @@
   "include": [
     "electron/deviceSessionManagement.ts",
     "electron/deviceSessionManagement.test.ts",
+    "electron/driveAccountPolicyStore.ts",
+    "electron/driveAccountPolicyStore.test.ts",
     "electron/googlePhotosMigration.ts",
     "electron/googlePhotosMigration.test.ts",
     "electron/webEdgeServer.ts",
