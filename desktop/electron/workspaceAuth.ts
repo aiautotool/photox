@@ -11,6 +11,8 @@ import { DeviceSessionManagementService, type DeviceSessionActor } from './devic
 import { WorkspaceOverviewService } from './workspaceOverview.js';
 import { WorkspaceSubscriptionService } from './workspaceSubscription.js';
 import { parseStripeSubscriptionWebhook } from './billingWebhook.js';
+import { BillingReconciliationService } from './billingReconciliation.js';
+import { StripeBillingProviderAdapter, stripeBillingConfigFromEnv } from './stripeBillingProvider.js';
 
 export type PairExchangeInput = {
   workspaceId: string;
@@ -22,11 +24,18 @@ export type PairExchangeInput = {
 
 const PHOTOX_PLANS = new Set<WorkspacePlanCode>(['free', 'personal', 'pro', 'family', 'team']);
 const SUBSCRIPTION_MAINTENANCE_INTERVAL_MS = 60_000;
+const DEFAULT_BILLING_RECONCILIATION_INTERVAL_MS = 15 * 60_000;
 
 function subscriptionPeriodEndTargetPlan(): WorkspacePlanCode {
   const configured = String(process.env.PHOTOX_BILLING_PERIOD_END_TARGET_PLAN || 'free').trim() as WorkspacePlanCode;
   if (!PHOTOX_PLANS.has(configured)) throw new Error('PHOTOX_BILLING_PERIOD_END_TARGET_PLAN_INVALID');
   return configured;
+}
+
+function billingReconciliationIntervalMs() {
+  const raw = Number(process.env.PHOTOX_BILLING_RECONCILIATION_INTERVAL_MS || DEFAULT_BILLING_RECONCILIATION_INTERVAL_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_BILLING_RECONCILIATION_INTERVAL_MS;
+  return Math.max(60_000, Math.min(24 * 60 * 60_000, Math.floor(raw)));
 }
 
 let activeDesktopWorkspaceAuth:DesktopWorkspaceAuth|null=null;
@@ -40,7 +49,11 @@ export class DesktopWorkspaceAuth {
   private readonly deviceSessions: DeviceSessionManagementService;
   private readonly overview: WorkspaceOverviewService;
   private readonly subscriptions: WorkspaceSubscriptionService;
+  private readonly billingReconciliation?: BillingReconciliationService;
+  private readonly stripeBilling?: StripeBillingProviderAdapter;
   private subscriptionMaintenanceTimer?: ReturnType<typeof setInterval>;
+  private billingReconciliationTimer?: ReturnType<typeof setInterval>;
+  private billingReconciliationRunning = false;
 
   private constructor(
     secret: Uint8Array,
@@ -72,6 +85,11 @@ export class DesktopWorkspaceAuth {
     this.deviceSessions = new DeviceSessionManagementService(store, workspaces);
     this.overview = new WorkspaceOverviewService(workspaces);
     this.subscriptions = new WorkspaceSubscriptionService(store, workspaces);
+    const stripeConfig = stripeBillingConfigFromEnv();
+    if (stripeConfig.secretKey) {
+      this.stripeBilling = new StripeBillingProviderAdapter(stripeConfig);
+      this.billingReconciliation = new BillingReconciliationService(store, workspaces, this.subscriptions);
+    }
   }
 
   static async create(input: {
@@ -93,6 +111,8 @@ export class DesktopWorkspaceAuth {
     activeDesktopWorkspaceAuth=auth;
     auth.runSubscriptionMaintenance();
     auth.startSubscriptionMaintenance();
+    void auth.runBillingReconciliation();
+    auth.startBillingReconciliation();
     if(process.versions.electron)await auth.registerElectronIpc();
     return auth;
   }
@@ -112,6 +132,41 @@ export class DesktopWorkspaceAuth {
     if (this.subscriptionMaintenanceTimer) return;
     this.subscriptionMaintenanceTimer = setInterval(() => this.runSubscriptionMaintenance(), SUBSCRIPTION_MAINTENANCE_INTERVAL_MS);
     this.subscriptionMaintenanceTimer.unref?.();
+  }
+
+  private async runBillingReconciliation() {
+    if (!this.billingReconciliation || !this.stripeBilling || this.billingReconciliationRunning) return;
+    const binding = this.store.db.prepare(`SELECT provider,provider_subscription_id
+      FROM photox_workspace_subscriptions WHERE workspace_id=?`).get(this.workspaceId) as
+      { provider?: string; provider_subscription_id?: string } | undefined;
+    if (!binding || binding.provider !== this.stripeBilling.provider || !binding.provider_subscription_id) return;
+    this.billingReconciliationRunning = true;
+    try {
+      const result = await this.billingReconciliation.reconcileSystem({
+        workspaceId: this.workspaceId,
+        provider: binding.provider,
+        providerSubscriptionId: binding.provider_subscription_id,
+      }, this.stripeBilling);
+      if (result.applied) console.info('PhotoX billing reconciliation applied authoritative provider state');
+    } catch (error) {
+      console.error('PhotoX billing reconciliation failed', error instanceof Error ? error.message : 'UNKNOWN_ERROR');
+    } finally {
+      this.billingReconciliationRunning = false;
+    }
+  }
+
+  private startBillingReconciliation() {
+    if (!this.billingReconciliation || !this.stripeBilling || this.billingReconciliationTimer) return;
+    this.billingReconciliationTimer = setInterval(() => void this.runBillingReconciliation(), billingReconciliationIntervalMs());
+    this.billingReconciliationTimer.unref?.();
+  }
+
+  dispose() {
+    if (this.subscriptionMaintenanceTimer) clearInterval(this.subscriptionMaintenanceTimer);
+    if (this.billingReconciliationTimer) clearInterval(this.billingReconciliationTimer);
+    this.subscriptionMaintenanceTimer = undefined;
+    this.billingReconciliationTimer = undefined;
+    if (activeDesktopWorkspaceAuth === this) activeDesktopWorkspaceAuth = null;
   }
 
   private trustedDesktopActor():DeviceSessionActor{
