@@ -71,6 +71,67 @@ test('active provider state is workspace-scoped, monotonic and updates the effec
   }
 });
 
+test('provider event ids are durably idempotent and stale events are recorded without mutating subscription state', () => {
+  const { store, workspaces, service } = setup();
+  try {
+    workspaces.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'owner-a', plan: 'personal', now: 100 });
+    const first = service.applyProviderState({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerEventId: 'evt-1',
+      providerSubscriptionId: 'sub-a',
+      plan: 'pro',
+      status: 'active',
+      sourceUpdatedAt: 2_000,
+    }, 2_100);
+    assert.deepEqual(first, { applied: true });
+
+    const duplicate = service.applyProviderState({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerEventId: 'evt-1',
+      providerSubscriptionId: 'sub-a',
+      plan: 'free',
+      status: 'canceled',
+      sourceUpdatedAt: 3_000,
+    }, 3_100);
+    assert.deepEqual(duplicate, { applied: false, reason: 'DUPLICATE_PROVIDER_EVENT' });
+    assert.equal(workspaces.getWorkspace('ws-a')?.plan, 'pro');
+    assert.equal(service.snapshot({ subject: 'owner-a', workspaceId: 'ws-a', workspaceRole: 'owner' }).status, 'active');
+
+    const stale = service.applyProviderState({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerEventId: 'evt-stale',
+      providerSubscriptionId: 'sub-a',
+      plan: 'free',
+      status: 'canceled',
+      sourceUpdatedAt: 1_999,
+    }, 3_200);
+    assert.deepEqual(stale, { applied: false, reason: 'STALE_PROVIDER_EVENT' });
+
+    const staleReplay = service.applyProviderState({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerEventId: 'evt-stale',
+      providerSubscriptionId: 'sub-a',
+      plan: 'free',
+      status: 'canceled',
+      sourceUpdatedAt: 1_999,
+    }, 3_300);
+    assert.deepEqual(staleReplay, { applied: false, reason: 'DUPLICATE_PROVIDER_EVENT' });
+
+    const rows = store.db.prepare(`SELECT provider_event_id,applied,result_code FROM photox_subscription_provider_events
+      WHERE workspace_id=? ORDER BY provider_event_id`).all('ws-a') as Array<Record<string, unknown>>;
+    assert.deepEqual(rows, [
+      { provider_event_id: 'evt-1', applied: 1, result_code: null },
+      { provider_event_id: 'evt-stale', applied: 0, result_code: 'STALE_PROVIDER_EVENT' },
+    ]);
+  } finally {
+    store.close();
+  }
+});
+
 test('subscription snapshot enforces active membership, current role and admin access', () => {
   const { store, workspaces, service } = setup();
   try {
@@ -106,6 +167,63 @@ test('canceled provider state is persisted without silently downgrading the curr
     assert.equal(snapshot.status, 'canceled');
     assert.equal(snapshot.cancelAtPeriodEnd, true);
     assert.equal(workspaces.getWorkspace('ws-a')?.plan, 'pro');
+  } finally {
+    store.close();
+  }
+});
+
+test('end-of-period entitlement transition is explicit, subscription-bound and cannot run early', () => {
+  const { store, workspaces, service } = setup();
+  try {
+    workspaces.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'owner-a', plan: 'pro', now: 100 });
+    service.applyProviderState({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerEventId: 'evt-cancel',
+      providerSubscriptionId: 'sub-a',
+      plan: 'pro',
+      status: 'canceled',
+      currentPeriodEnd: 5_000,
+      cancelAtPeriodEnd: true,
+      sourceUpdatedAt: 4_000,
+    }, 4_100);
+
+    assert.deepEqual(service.applyEndOfPeriodEntitlementTransition({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerSubscriptionId: 'sub-wrong',
+      targetPlan: 'free',
+      effectiveAt: 5_000,
+    }, 5_000), { applied: false, reason: 'SUBSCRIPTION_MISMATCH' });
+
+    assert.deepEqual(service.applyEndOfPeriodEntitlementTransition({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerSubscriptionId: 'sub-a',
+      targetPlan: 'free',
+      effectiveAt: 4_999,
+    }, 4_999), { applied: false, reason: 'PERIOD_NOT_ENDED' });
+    assert.equal(workspaces.getWorkspace('ws-a')?.plan, 'pro');
+
+    assert.deepEqual(service.applyEndOfPeriodEntitlementTransition({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerSubscriptionId: 'sub-a',
+      targetPlan: 'free',
+      effectiveAt: 5_000,
+    }, 5_100), { applied: true });
+    assert.equal(workspaces.getWorkspace('ws-a')?.plan, 'free');
+
+    assert.deepEqual(service.applyEndOfPeriodEntitlementTransition({
+      workspaceId: 'ws-a',
+      provider: 'test-billing',
+      providerSubscriptionId: 'sub-a',
+      targetPlan: 'free',
+      effectiveAt: 5_000,
+    }, 5_200), { applied: false, reason: 'ALREADY_TRANSITIONED' });
+
+    const audit = workspaces.listAudit('ws-a', 20);
+    assert.equal(audit.some(event => event.action === 'subscription.entitlements.period_end_applied'), true);
   } finally {
     store.close();
   }
