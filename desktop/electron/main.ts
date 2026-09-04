@@ -19,6 +19,8 @@ import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js'
 import { PhotoXWebEdgeServer, webEdgeConfigFromEnv } from './webEdgeServer.js';
 import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DesktopWorkspaceAuth } from './workspaceAuth.js';
+import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
+import { driveRuntimeAllocation, rendererDriveAccountInfo, type DriveRuntimeAllocation, type RendererDriveAccountInfo } from './driveRuntimeAllocation.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -125,9 +127,9 @@ type MediaIndexRow = {
   cloud?:CloudDestination;
   cloudReplicas?:CloudDestination[];
 };
-type SavedDriveAccount = { id:string; workspaceId?:string; email?:string; tokens:any };
-type RuntimeDriveAccount = { id:string; email:string; client:OAuth2Client; storage:StorageAccount; folderId:string; quota:{limit:number;usage:number;free:number} };
-type DriveAccountInfo = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
+type SavedDriveAccount = SavedDriveAccountRecord;
+type RuntimeDriveAccount = { id:string; email:string; client:OAuth2Client; storage:StorageAccount; allocation:DriveRuntimeAllocation; folderId:string; quota:{limit:number;usage:number;free:number} };
+type DriveAccountInfo = RendererDriveAccountInfo;
 type CloudUploadItem = { key:string;filename:string;size:number;receivedAt:string;deviceId:string;state:CloudState;accountId?:string;accountEmail?:string;folderId?:string;remotePath?:string;remoteFileId?:string;webViewLink?:string;uploadedAt?:string;verifiedAt?:string;message?:string };
 type BackupHealthSnapshot = {
   total:number;
@@ -263,7 +265,7 @@ async function deleteManagedMedia(key:string,workspaceId=LEGACY_WORKSPACE_ID){
     if(!replica.accountId){failures.push('Replica thiếu accountId');continue;}
     const account=accounts.get(replica.accountId);if(!account){failures.push(`Không còn thông tin tài khoản ${replica.accountId}`);continue;}
     try{
-      const client=oauthClient();client.setCredentials(account.tokens);const token=await client.getAccessToken();if(!token.token)throw new Error('Không lấy được access token');
+      const client=oauthClient();client.setCredentials(account.tokens as any);const token=await client.getAccessToken();if(!token.token)throw new Error('Không lấy được access token');
       const response=await net.fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(replica.remoteFileId!)}`,{method:'DELETE',headers:{authorization:`Bearer ${token.token}`}});
       if(!response.ok&&response.status!==404)throw new Error(`Drive ${response.status}: ${await response.text()}`);
     }catch(error){failures.push(`${replica.accountEmail||replica.accountId}: ${error instanceof Error?error.message:String(error)}`)}
@@ -283,7 +285,7 @@ async function fetchCloudMedia(row:MediaIndexRow,request:Request):Promise<Respon
   for(const replica of replicas){
     const account=accounts.get(replica.accountId!);if(!account)continue;
     try{
-      const client=oauthClient();client.setCredentials(account.tokens);
+      const client=oauthClient();client.setCredentials(account.tokens as any);
       const token=await client.getAccessToken();if(!token.token)continue;
       if(JSON.stringify(client.credentials)!==JSON.stringify(account.tokens))await fs.writeFile(path.join(driveAccountsDir(),`${account.id}.json`),JSON.stringify({...account,tokens:client.credentials},null,2),'utf8');
       const headers:Record<string,string>={authorization:`Bearer ${token.token}`};
@@ -311,18 +313,13 @@ function oauthClient(redirectUri=REDIRECT_URI){
 }
 
 async function savedDriveAccounts(workspaceId=LEGACY_WORKSPACE_ID):Promise<SavedDriveAccount[]>{
-  await fs.mkdir(driveAccountsDir(),{recursive:true});
-  const files=(await fs.readdir(driveAccountsDir())).filter(x=>x.endsWith('.json'));
+  const loaded=await loadWorkspaceDriveAccounts(driveAccountsDir(),workspaceId,LEGACY_WORKSPACE_ID);
   const unique=new Map<string,SavedDriveAccount>();
-  for(const file of files){try{
-    const filePath=path.join(driveAccountsDir(),file);const raw:SavedDriveAccount=JSON.parse(await fs.readFile(filePath,'utf8'));
-    const account:SavedDriveAccount=raw.workspaceId?raw:{...raw,workspaceId:LEGACY_WORKSPACE_ID};
-    if(!raw.workspaceId)await fs.writeFile(filePath,JSON.stringify(account,null,2),'utf8');
-    if(account.workspaceId!==workspaceId)continue;
-    const identity=tokenIdentity(account.tokens); const email=(account.email||identity.email)?.toLowerCase();
+  for(const account of loaded){
+    const identity=tokenIdentity(account.tokens);const email=(account.email||identity.email)?.toLowerCase();
     const key=identity.sub||email||account.id;
     unique.set(key,{...account,email:email||account.email});
-  }catch{}}
+  }
   return [...unique.values()];
 }
 
@@ -351,15 +348,16 @@ async function connectGoogle(){
 async function runtimeDriveAccounts(workspaceId=LEGACY_WORKSPACE_ID):Promise<RuntimeDriveAccount[]>{
   const saved=await savedDriveAccounts(workspaceId); const result:RuntimeDriveAccount[]=[];
   for(const account of saved){try{
-    const client=oauthClient(); client.setCredentials(account.tokens); const token=await client.getAccessToken(); if(!token.token)continue;
+    const client=oauthClient(); client.setCredentials(account.tokens as any); const token=await client.getAccessToken(); if(!token.token)continue;
     if(JSON.stringify(client.credentials)!==JSON.stringify(account.tokens)) await fs.writeFile(path.join(driveAccountsDir(),`${account.id}.json`),JSON.stringify({...account,tokens:client.credentials},null,2),'utf8');
     const folderId=await ensurePhotoSyncFolder(token.token); const [quota,files]=await Promise.all([getStorageQuota(token.token),listPhotoSyncFiles(token.token,folderId)]);
-    const appUsedBytes=files.reduce((sum,f)=>sum+Number(f.size||0),0); const providerFreeBytes=Math.max(0,Number(quota.limit||0)-Number(quota.usage||0));
+    const appUsedBytes=files.reduce((sum,f)=>sum+Number(f.size||0),0);
     let email=account.email;
     if(!email){try{email=(await client.getTokenInfo(token.token)).email}catch{}}
     email=email||account.id;
     if(email!==account.email)await fs.writeFile(path.join(driveAccountsDir(),`${account.id}.json`),JSON.stringify({...account,email,tokens:client.credentials},null,2),'utf8');
-    result.push({id:account.id,email,client,folderId,storage:{id:account.id,email,appUsedBytes,providerFreeBytes,providerTotalBytes:Number(quota.limit||0)},quota:{limit:Number(quota.limit||0),usage:Number(quota.usage||0),free:providerFreeBytes}});
+    const allocation=driveRuntimeAllocation({account,email,quota:{limit:Number(quota.limit||0),usage:Number(quota.usage||0)},appUsedBytes});
+    result.push({id:account.id,email,client,folderId,storage:allocation.storage,allocation,quota:{limit:Number(quota.limit||0),usage:Number(quota.usage||0),free:allocation.snapshot.providerFreeBytes}});
   }catch(e){console.error('Drive account unavailable',account.id,e)}}
   return result;
 }
@@ -369,10 +367,7 @@ async function listDriveAccounts(workspaceId=LEGACY_WORKSPACE_ID):Promise<DriveA
   const runtime=new Map((await runtimeDriveAccounts(workspaceId)).map(account=>[account.id,account]));
   return saved.map(account=>{
     const active=runtime.get(account.id);
-    const freeBytes=active?.quota.free||0;
-    const usedBytes=active?.quota.usage||0;
-    const totalBytes=active?.quota.limit||usedBytes+freeBytes;
-    return {id:account.id,email:active?.email||account.email||account.id,usedBytes,freeBytes,totalBytes,status:active?'ready':'unavailable'};
+    return rendererDriveAccountInfo({account,email:active?.email, runtime:active?.allocation});
   });
 }
 
@@ -616,7 +611,8 @@ async function startReceiver(){
       if(!row){res.writeHead(404);res.end('Not found');return}
       try{await streamNodeFile(req,res,row.path,row.mimeType||mimeTypeForFilename(row.filename));return}catch{}
       const response=await fetchCloudMedia(row,new Request(`${PUBLIC_TUNNEL_URL}${url.pathname}`,{headers:req.headers.range?{range:req.headers.range}:{}}));
-      const headers=Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase())));if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
+      const headers=Object.fromEntries([...response.headers].filter(([name])=>['content-type','content-length','content-range','accept-ranges'].includes(name.toLowerCase())));
+      if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
       res.writeHead(response.status,headers);if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
     }
     if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res);return;} res.writeHead(404);res.end('Not found');
