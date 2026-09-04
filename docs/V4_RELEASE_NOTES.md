@@ -9,6 +9,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Default allocation is 2/3 of the provider-authoritative account total quota, constrained by real remaining provider bytes and a safety reserve.
 - Allocation ratio can be configured per account.
 - The core allocation contract now also supports a per-account safety reserve. The default remains 100 MB for legacy/unconfigured accounts, while invalid ratio/reserve inputs are clamped safely and the allocation snapshot exposes authoritative total/free/used, ratio-derived limit, reserve and actually available PhotoX bytes for future transport/UI use.
+- Desktop now has a workspace-scoped Drive allocation policy persistence layer. Per-account `maxUsageRatio` and `safetyReserveBytes` survive restart, writes preserve OAuth credential payloads without exposing them, legacy unscoped credential files are adopted only into the configured legacy workspace, and cross-workspace mutation fails closed.
 - Media-cloud replica catalog and provider/account statistics are workspace isolated.
 - Local, Google Drive and Telegram provider work is structured around workspace ownership and replica policy.
 
@@ -66,6 +67,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Stripe webhook ingress uses provider signature authentication rather than browser session authentication.
 - Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values come from the active server-side subscription row.
 - Billing idempotency keys are transport inputs and durable storage keeps only their digest, not the raw key.
+- Google Drive allocation policy persistence must preserve OAuth tokens server-side; renderer/Web policy payloads must never contain token material.
 
 ## Build / verification policy
 Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, not PASS.
@@ -75,5 +77,6 @@ See `V4_BUILD_INTEGRATION_GUIDE.md` for current setup and integration requiremen
 ## Known verification gaps
 - Live Google Photos OAuth/migration with real accounts: NOT VERIFIED.
 - Live Stripe billing/webhook E2E with a real Stripe account: NOT VERIFIED.
+- Live Google Drive allocation policy mutation with a real account: NOT VERIFIED.
 - Signed iOS IPA/Xcode release: NOT VERIFIED.
 - Signed Android APK/AAB release: NOT VERIFIED.
