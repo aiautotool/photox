@@ -62,7 +62,9 @@ Default account allocation is:
 4. subtract/retain the configured safety reserve;
 5. use the smallest safe result as writable PhotoX capacity.
 
-The ratio is configurable per Google Drive account. UI must distinguish provider total/free capacity from PhotoX allocated capacity.
+The ratio and safety reserve are account policy inputs. Core defaults are ratio `2/3` and safety reserve `100 MiB` for legacy/unconfigured accounts. Core clamps ratio into `0..1`, clamps reserve to a non-negative integer, and exposes `storageAllocationSnapshot()` with provider total/free/used, PhotoX ratio-derived limit, reserve, app-used bytes and final writable bytes. Desktop/Web persistence and mutation transport must carry those fields per workspace-owned Drive account before the UI enables editing them.
+
+UI must distinguish provider total/free capacity from PhotoX allocated capacity and must never present a fixed 10 GB PhotoX limit unless the provider itself authoritatively reports that capacity.
 
 ## 5. Google Photos migration
 
