@@ -83,7 +83,7 @@ The shared Desktop/Web workspace UI reads authoritative snapshots through `Deskt
 
 Workspace overview includes plan/status/role and technical quota dimensions for managed storage, monthly ingress, members, devices, providers, and public shares. Device/session management must preserve workspace ownership and owner/admin/member rules; refresh tokens and token hashes must never be rendered.
 
-Mobile should consume the same authenticated workspace semantics. Do not create a second quota or role model specifically for Mobile.
+Mobile consumes the same authenticated workspace semantics through the paired Desktop v2 session. The Mobile home route now exposes a visible `Workspace & dung lượng` shortcut that opens `/workspace`; the workspace screen itself remains responsible for loading authoritative workspace/device data and for showing retry/error states. Do not create a second quota or role model specifically for Mobile.
 
 ## 7. Billing / Stripe integration
 
