@@ -1,12 +1,14 @@
 # PhotoX V4 — Run 40: Approved UI Alignment
 
 ## Goal
-Implement the approved PhotoX V4 visual reference in the existing real Desktop/Web surfaces without replacing backed behavior with mock controls.
+Implement the approved PhotoX V4 visual reference in the existing real Desktop/Web and Mobile surfaces without replacing backed behavior with mock controls.
 
 ## Implemented
 - Restyled the shared Workspace surface with larger cards, clearer typography, readable quota/progress bars, capability chips, responsive layouts and the same light visual language as the approved reference.
 - Restyled the shared Subscription surface while preserving the existing authoritative role/lifecycle rules, confirmation flow, idempotent retry behavior and post-mutation refresh.
 - Restyled the shared Google Photos Migration surface with clearer source/destination configuration, progress hierarchy, transfer statistics, history rows and responsive behavior.
+- Restyled Mobile Workspace using the same approved visual language: workspace identity card, real plan badge, authoritative managed-storage summary cards, quota progress, entitlement status pills and device cards.
+- Mobile summary values are derived only from the authenticated workspace snapshot; no sample quota/provider values were introduced.
 - Kept Desktop and Web on the exact same React component/CSS tree.
 - No billing, provider or migration controls were added unless existing backing logic already existed.
 
