@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { MediaApiScope } from '@photox/media-api';
 import { OneTimeTicketStore } from '@photosync/core';
 import { requireActiveDesktopWorkspaceAuth } from './workspaceAuth.js';
+import { billingMutationHttpStatus } from './billingMutationTransport.js';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
@@ -23,6 +24,7 @@ export interface WebEdgeHandlers {
   handleStripeWebhook?(rawBody:Buffer,signatureHeader:string,now:number):Promise<unknown>|unknown;
   getWorkspaceOverview?(principal:WebPrincipal):Promise<unknown>;
   getWorkspaceSubscription?(principal:WebPrincipal):Promise<unknown>;
+  mutateWorkspaceSubscription?(principal:WebPrincipal,body:unknown,idempotencyKey:string):Promise<unknown>;
   listWorkspaceDevices?(principal:WebPrincipal):Promise<unknown>;
   listWorkspaceSessions?(principal:WebPrincipal):Promise<unknown>;
   revokeWorkspaceSession?(principal:WebPrincipal,sessionId:string):Promise<unknown>;
@@ -217,7 +219,7 @@ export class PhotoXWebEdgeServer {
 
   private cors(req:IncomingMessage,res:ServerResponse){
     const origin=String(req.headers.origin||'');if(origin&&this.originAllowed(req)){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','Origin');}
-    res.setHeader('access-control-allow-headers','authorization,content-type,range,x-csrf-token');
+    res.setHeader('access-control-allow-headers','authorization,content-type,range,x-csrf-token,idempotency-key');
     res.setHeader('access-control-allow-credentials','true');
     res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
     res.setHeader('x-content-type-options','nosniff');res.setHeader('referrer-policy','no-referrer');res.setHeader('x-frame-options','DENY');
@@ -295,6 +297,16 @@ export class PhotoXWebEdgeServer {
     if(m==='GET'&&p==='/api/web/v1/session')return this.json(res,200,{subject:principal.subject,workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole,deviceId:principal.deviceId,sessionId:principal.sessionId,scopes:principal.scopes});
     if(m==='GET'&&p==='/api/web/v1/workspace')return read(()=>this.handlers.getWorkspaceOverview?.(principal)??Promise.resolve(this.deviceApi().getWorkspaceOverview(principal)));
     if(m==='GET'&&p==='/api/web/v1/workspace/subscription')return read(()=>this.handlers.getWorkspaceSubscription?.(principal)??Promise.resolve(this.deviceApi().getWorkspaceSubscription(principal)));
+    if(m==='POST'&&p==='/api/web/v1/workspace/subscription/mutations'){
+      if(!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
+      try{
+        const b=await this.body(req);const idempotencyKey=String(req.headers['idempotency-key']||'');
+        const value=await (this.handlers.mutateWorkspaceSubscription?.(principal,b,idempotencyKey)??this.deviceApi().mutateWorkspaceSubscription(principal,b,idempotencyKey));
+        await this.handlers.appendAudit(principal,{action:'web.subscription.mutate',targetType:'subscription',metadata:{operation:typeof b?.operation==='string'?b.operation:'unknown'}});
+        this.json(res,200,value);
+      }catch(error){this.json(res,billingMutationHttpStatus(error),{error:error instanceof Error?error.message:String(error)});}
+      return;
+    }
     if(m==='GET'&&p==='/api/web/v1/devices')return read(()=>this.handlers.listWorkspaceDevices?.(principal)??Promise.resolve(this.deviceApi().listDevices(principal)));
     if(m==='GET'&&p==='/api/web/v1/sessions')return read(()=>this.handlers.listWorkspaceSessions?.(principal)??Promise.resolve(this.deviceApi().listSessions(principal)));
     let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceSession?.(principal,id)??Promise.resolve(this.deviceApi().revokeSession(principal,id)));return this.json(res,200,value);}
