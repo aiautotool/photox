@@ -45,7 +45,10 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Subscription events have replay/idempotency protection and deterministic same-timestamp ordering.
 - Restart-safe period-end entitlement maintenance is implemented.
 - Stripe authoritative reconciliation periodically heals missed/delayed webhook delivery.
-- A durable billing mutation coordinator exists for change-plan/cancel-at-period-end/resume primitives; provider mutation transport/UI remains gated until the complete security/test path is ready.
+- A durable billing mutation coordinator exists for change-plan/cancel-at-period-end/resume primitives.
+- The public billing mutation transport contract is now strict: clients may supply only `operation` plus an optional `targetPlan`, while the idempotency key comes from the request header and workspace/provider/subscription binding is derived server-side. Client-supplied provider/workspace/subscription identifiers are rejected before coordinator execution.
+- Billing mutation HTTP status semantics are defined for validation, authorization, missing subscription, conflict/replay-in-progress, provider-not-configured and upstream provider failures.
+- Mutation UI remains gated until Electron IPC and authenticated Web transport are fully wired and regression-tested.
 
 ## Security notes
 - Renderer/Mobile must never receive Google/Telegram/Stripe provider secrets.
@@ -53,6 +56,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Tenant-sensitive persistent identities must include workspace ownership.
 - Browser destructive mutations require authenticated authorization and CSRF where applicable.
 - Stripe webhook ingress uses provider signature authentication rather than browser session authentication.
+- Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values must come from the active server-side subscription row.
 
 ## Build / verification policy
 Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, not PASS.
