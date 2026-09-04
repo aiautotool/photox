@@ -30,7 +30,7 @@ Recommended Desktop/Web navigation:
 9. Activity / Operations
 10. Settings
 
-Mobile keeps media-first bottom navigation and exposes Workspace/Devices/Storage through the account/profile area until usage justifies a dedicated tab.
+Mobile keeps media-first bottom navigation. Workspace/Devices/Storage must remain easy to reach without adding a fake admin tab. V4 currently exposes a backed `Workspace & dung lượng` shortcut from the Mobile home route; the preferred end-state remains an account/profile entry when the profile sheet is refactored into a reusable component.
 
 ## 3. Workspace dashboard
 
@@ -267,7 +267,7 @@ This should read like cloud durability, not raw provider bookkeeping.
 
 ## 10. Mobile Workspace screen
 
-Account/profile sheet should contain a visible `Workspace & storage` entry opening the existing workspace screen.
+A visible `Workspace & dung lượng` entry now opens the existing authenticated `/workspace` screen from the Mobile home route. When the account/profile sheet is split into a reusable component, move the same backed navigation into that sheet rather than duplicating workspace logic.
 
 Mobile screen sections:
 1. workspace identity + plan/role
