@@ -46,9 +46,12 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Restart-safe period-end entitlement maintenance is implemented.
 - Stripe authoritative reconciliation periodically heals missed/delayed webhook delivery.
 - A durable billing mutation coordinator exists for change-plan/cancel-at-period-end/resume primitives.
-- The public billing mutation transport contract is now strict: clients may supply only `operation` plus an optional `targetPlan`, while the idempotency key comes from the request header and workspace/provider/subscription binding is derived server-side. Client-supplied provider/workspace/subscription identifiers are rejected before coordinator execution.
-- Billing mutation HTTP status semantics are defined for validation, authorization, missing subscription, conflict/replay-in-progress, provider-not-configured and upstream provider failures.
-- Mutation UI remains gated until Electron IPC and authenticated Web transport are fully wired and regression-tested.
+- The public billing mutation transport contract is strict: clients may supply only `operation` plus an optional `targetPlan`, while the idempotency key comes from transport metadata and workspace/provider/subscription binding is derived server-side.
+- Desktop Electron IPC/preload and the shared `DesktopBridge` now expose that same mutation contract without exposing Stripe or subscription provider identifiers.
+- Web now exposes `POST /api/web/v1/workspace/subscription/mutations`; it requires authenticated owner/admin context, browser CSRF, and an `Idempotency-Key` header. CORS explicitly permits that header.
+- Web billing mutation failures use defined validation/authorization/conflict/provider status mapping rather than falling through to generic authentication errors.
+- Regression coverage verifies auth, CSRF, role enforcement, public-body/idempotency separation, CORS preflight and conflict mapping.
+- Billing UI remains intentionally gated: Change plan / Cancel / Resume controls should be enabled only after final transport CI is green and UI state/reconciliation behavior is implemented according to `V4_UI_SPEC.md`.
 
 ## Security notes
 - Renderer/Mobile must never receive Google/Telegram/Stripe provider secrets.
@@ -56,7 +59,8 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Tenant-sensitive persistent identities must include workspace ownership.
 - Browser destructive mutations require authenticated authorization and CSRF where applicable.
 - Stripe webhook ingress uses provider signature authentication rather than browser session authentication.
-- Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values must come from the active server-side subscription row.
+- Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values come from the active server-side subscription row.
+- Billing idempotency keys are transport inputs and durable storage keeps only their digest, not the raw key.
 
 ## Build / verification policy
 Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, not PASS.
