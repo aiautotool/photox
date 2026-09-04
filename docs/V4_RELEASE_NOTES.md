@@ -40,18 +40,20 @@ This file is a cumulative release/development note for branch `v4`. It should be
 ### Plans, quotas and subscription control-plane
 - Workspace overview exposes managed storage, monthly ingress, members, devices, storage providers and public-share quota dimensions.
 - Subscription snapshots support legacy/unmanaged and billing-managed lifecycle states without exposing provider identifiers to renderer code.
-- Shared Desktop/Web UI surfaces subscription state read-only; fake payment/change-plan controls are intentionally absent.
 - Stripe webhook ingress verifies the signature against raw request bytes, validates supported events/plans and feeds the durable subscription event ledger.
 - Subscription events have replay/idempotency protection and deterministic same-timestamp ordering.
 - Restart-safe period-end entitlement maintenance is implemented.
 - Stripe authoritative reconciliation periodically heals missed/delayed webhook delivery.
 - A durable billing mutation coordinator exists for change-plan/cancel-at-period-end/resume primitives.
 - The public billing mutation transport contract is strict: clients may supply only `operation` plus an optional `targetPlan`, while the idempotency key comes from transport metadata and workspace/provider/subscription binding is derived server-side.
-- Desktop Electron IPC/preload and the shared `DesktopBridge` now expose that same mutation contract without exposing Stripe or subscription provider identifiers.
-- Web now exposes `POST /api/web/v1/workspace/subscription/mutations`; it requires authenticated owner/admin context, browser CSRF, and an `Idempotency-Key` header. CORS explicitly permits that header.
+- Desktop Electron IPC/preload and the shared `DesktopBridge` expose that same mutation contract without exposing Stripe or subscription provider identifiers.
+- Web exposes `POST /api/web/v1/workspace/subscription/mutations`; it requires authenticated owner/admin context, browser CSRF, and an `Idempotency-Key` header. CORS explicitly permits that header.
 - Web billing mutation failures use defined validation/authorization/conflict/provider status mapping rather than falling through to generic authentication errors.
-- Regression coverage verifies auth, CSRF, role enforcement, public-body/idempotency separation, CORS preflight and conflict mapping.
-- Billing UI remains intentionally gated: Change plan / Cancel / Resume controls should be enabled only after final transport CI is green and UI state/reconciliation behavior is implemented according to `V4_UI_SPEC.md`.
+- Shared Desktop/Web Subscription UI now exposes real Change plan, Cancel at period end and Resume controls only when authoritative role/lifecycle state permits them.
+- Billing UI does not optimistically mutate local plan state: after success it refreshes the authoritative workspace/subscription snapshot.
+- A failed UI mutation retains the same request fingerprint/idempotency key for an explicit retry, while changing the requested mutation generates a new idempotency identity.
+- Member/viewer and unmanaged workspaces receive a permission/state explanation instead of fake disabled billing controls.
+- Checkout, payment-method and customer-portal controls remain intentionally absent because their backing contracts are not implemented yet.
 
 ## Security notes
 - Renderer/Mobile must never receive Google/Telegram/Stripe provider secrets.
