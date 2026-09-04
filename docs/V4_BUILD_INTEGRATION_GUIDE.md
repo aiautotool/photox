@@ -140,7 +140,20 @@ Requirements:
 
 The raw idempotency key is forwarded to Stripe for provider idempotency but PhotoX persistence stores only its SHA-256 digest. A repeated successful request with the same key replays the durable result without a second provider mutation. Reusing the key with different payload is a conflict.
 
-Do not add Change plan / Cancel / Resume controls until their shared React states implement in-progress, safe error, authoritative refresh, retry/replay behavior, and the final transport CI is green. Checkout/payment method/customer portal remain separate future capabilities.
+### Shared Desktop/Web billing UI
+
+The Subscription card now uses the real mutation transport for owner/admin billing workspaces.
+
+- Change plan supports PhotoX billable plans `personal`, `pro`, `family`, and `team`; the current plan is disabled in the selector.
+- Cancel is only presented when the authoritative lifecycle allows a cancel-at-period-end request.
+- Resume is only presented when the authoritative subscription is currently marked `cancelAtPeriodEnd` and is not already canceled.
+- Member/viewer or unmanaged workspaces get an explanatory state rather than a functional mutation control.
+- Destructive/lifecycle changes use a confirmation dialog.
+- UI never writes plan/status optimistically. After a successful mutation it calls the authoritative workspace/subscription reads again.
+- On a recoverable mutation failure, the UI preserves the same mutation fingerprint and raw caller idempotency key for the explicit retry button. Selecting/changing to another requested mutation clears that retry identity and generates a new key.
+- Provider errors are shown without exposing provider secret/binding details.
+
+Checkout, payment methods, price presentation and customer portal remain separate future capabilities and must not be represented by mock buttons.
 
 ## 8. Provider integration rules
 
