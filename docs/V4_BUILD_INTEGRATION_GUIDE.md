@@ -40,9 +40,16 @@ PHOTOX_WEB_PORT=43118
 PHOTOX_WEB_PUBLIC_BASE_URL=https://photos.example.com
 PHOTOX_WEB_ALLOWED_ORIGINS=https://photos.example.com
 PHOTOX_WEB_RATE_LIMIT=300
+PHOTOX_WEB_TRUSTED_PROXIES=loopback
 ```
 
 For public deployment, terminate TLS at a trusted reverse proxy and keep workspace/session auth, role checks, CORS, CSRF on browser mutations, rate limiting, audit, and WebSocket authentication enabled.
+
+`PHOTOX_WEB_TRUSTED_PROXIES` is a comma-separated list of the **immediate reverse-proxy IP addresses** that PhotoX is allowed to trust. `loopback` expands to `127.0.0.1` and `::1` for same-host Nginx/Caddy/Traefik deployments. Hostnames are intentionally rejected because DNS changes must not silently widen the trust boundary. Leave the setting empty when PhotoX is exposed directly.
+
+PhotoX ignores `X-Forwarded-For` and `X-Forwarded-Proto` from an untrusted socket peer. When the immediate peer is trusted, the rate-limit identity is resolved from the nearest untrusted address in the forwarded chain and HTTPS cookie state may use the forwarded protocol. A public HTTPS deployment should also set `PHOTOX_WEB_PUBLIC_BASE_URL` explicitly so login/media URLs are canonical and secure-cookie behavior does not depend only on proxy headers.
+
+`PHOTOX_WEB_PUBLIC_BASE_URL` must be an absolute `http://` or `https://` URL without credentials, query, or fragment. Invalid public URLs, invalid rate limits, and invalid trusted proxy addresses fail startup instead of silently weakening or disabling controls.
 
 ## 3. Workspace / tenant isolation
 
@@ -72,7 +79,7 @@ Desktop uses `driveAccountPolicyStore.ts` as the persistence boundary for these 
 
 `listDriveAccounts()` now projects account state through `rendererDriveAccountInfo()`. Ready accounts expose provider total/used/free, allocation ratio, ratio-derived PhotoX allocation limit, safety reserve, PhotoX app-used bytes and final writable bytes. Unavailable accounts preserve persisted policy but must not invent provider quota. OAuth tokens and workspace credential material remain server-side.
 
-The remaining transport work before enabling the allocation editor is to connect `DriveAllocationPolicyService` through owner/admin Electron IPC and authenticated Web GET/PATCH routes with server-derived workspace/account binding, browser CSRF and audit, then expose that contract through the shared `DesktopBridge`.
+Allocation policy mutation is backed end-to-end through owner/admin Electron IPC and authenticated Web PATCH, server-derived workspace/account binding, browser CSRF/role enforcement, and the shared `DesktopBridge`. The shared Desktop/Web storage-account surface edits per-account ratio and safety reserve and refreshes authoritative snapshots after mutation rather than applying optimistic quota state.
 
 UI must distinguish provider total/free capacity from PhotoX allocated capacity and must never present a fixed 10 GB PhotoX limit unless the provider itself authoritatively reports that capacity.
 
@@ -196,5 +203,6 @@ Unless a later run explicitly verifies them, report these accurately:
 - live Google Photos OAuth/migration with real accounts;
 - live Stripe billing/webhook E2E with a real Stripe account;
 - live Google Drive allocation policy mutation with a real account;
+- real TLS reverse-proxy deployment acceptance (including WebSocket upgrade and Range streaming through the proxy);
 - signed iOS IPA/Xcode release build;
 - signed Android APK/AAB release build.
