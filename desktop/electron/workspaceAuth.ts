@@ -12,6 +12,8 @@ import { WorkspaceOverviewService } from './workspaceOverview.js';
 import { WorkspaceSubscriptionService } from './workspaceSubscription.js';
 import { parseStripeSubscriptionWebhook } from './billingWebhook.js';
 import { BillingReconciliationService } from './billingReconciliation.js';
+import { BillingMutationCoordinator, type BillingMutationResult } from './billingMutationCoordinator.js';
+import { bindBillingMutationRequest, parsePublicBillingMutationInput, type PublicBillingMutationInput } from './billingMutationTransport.js';
 import { StripeBillingProviderAdapter, stripeBillingConfigFromEnv } from './stripeBillingProvider.js';
 
 export type PairExchangeInput = {
@@ -49,6 +51,7 @@ export class DesktopWorkspaceAuth {
   private readonly deviceSessions: DeviceSessionManagementService;
   private readonly overview: WorkspaceOverviewService;
   private readonly subscriptions: WorkspaceSubscriptionService;
+  private readonly billingMutations: BillingMutationCoordinator;
   private readonly billingReconciliation?: BillingReconciliationService;
   private readonly stripeBilling?: StripeBillingProviderAdapter;
   private subscriptionMaintenanceTimer?: ReturnType<typeof setInterval>;
@@ -85,6 +88,7 @@ export class DesktopWorkspaceAuth {
     this.deviceSessions = new DeviceSessionManagementService(store, workspaces);
     this.overview = new WorkspaceOverviewService(workspaces);
     this.subscriptions = new WorkspaceSubscriptionService(store, workspaces);
+    this.billingMutations = new BillingMutationCoordinator(store, workspaces, this.subscriptions);
     const stripeConfig = stripeBillingConfigFromEnv();
     if (stripeConfig.secretKey) {
       this.stripeBilling = new StripeBillingProviderAdapter(stripeConfig);
@@ -180,6 +184,7 @@ export class DesktopWorkspaceAuth {
     const {ipcMain}=await import('electron');
     ipcMain.handle('photosync:workspace-overview',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.getWorkspaceOverview(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-subscription',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.getWorkspaceSubscription(auth.trustedDesktopActor());});
+    ipcMain.handle('photosync:workspace-subscription-mutate',(_event,body:unknown,idempotencyKey:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.mutateWorkspaceSubscription(auth.trustedDesktopActor(),body,idempotencyKey);});
     ipcMain.handle('photosync:workspace-devices',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listDevices(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-sessions',()=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.listSessions(auth.trustedDesktopActor());});
     ipcMain.handle('photosync:workspace-session-revoke',(_event,sessionId:string)=>{const auth=requireActiveDesktopWorkspaceAuth();return auth.revokeSession(auth.trustedDesktopActor(),String(sessionId||''));});
@@ -233,6 +238,21 @@ export class DesktopWorkspaceAuth {
   }
   getWorkspaceOverview(actor: DeviceSessionActor) { return this.overview.snapshot(actor); }
   getWorkspaceSubscription(actor: DeviceSessionActor) { return this.subscriptions.snapshot(actor); }
+  async mutateWorkspaceSubscription(actor: DeviceSessionActor, body: unknown, idempotencyHeader: unknown): Promise<BillingMutationResult> {
+    const parsed = parsePublicBillingMutationInput(body, idempotencyHeader);
+    if (!this.stripeBilling) throw new Error('BILLING_PROVIDER_NOT_CONFIGURED');
+    const binding = this.store.db.prepare(`SELECT provider,provider_subscription_id
+      FROM photox_workspace_subscriptions WHERE workspace_id=?`).get(actor.workspaceId) as
+      { provider?: string; provider_subscription_id?: string } | undefined;
+    if (!binding?.provider || !binding.provider_subscription_id) throw new Error('SUBSCRIPTION_NOT_FOUND');
+    if (binding.provider !== this.stripeBilling.provider) throw new Error('BILLING_PROVIDER_NOT_CONFIGURED');
+    const request = bindBillingMutationRequest({
+      workspaceId: actor.workspaceId,
+      provider: binding.provider,
+      providerSubscriptionId: binding.provider_subscription_id,
+    }, parsed.input as PublicBillingMutationInput, parsed.idempotencyKey);
+    return this.billingMutations.execute(actor, request, this.stripeBilling);
+  }
   handleStripeWebhook(rawBody: Buffer, signatureHeader: string, now = Date.now()) {
     const state = parseStripeSubscriptionWebhook(rawBody, signatureHeader, process.env.PHOTOX_STRIPE_WEBHOOK_SECRET || '', now);
     return this.subscriptions.applyProviderState(state, now);
