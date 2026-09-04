@@ -11,6 +11,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - The core allocation contract now also supports a per-account safety reserve. The default remains 100 MB for legacy/unconfigured accounts, while invalid ratio/reserve inputs are clamped safely and the allocation snapshot exposes authoritative total/free/used, ratio-derived limit, reserve and actually available PhotoX bytes for future transport/UI use.
 - Desktop now has a workspace-scoped Drive allocation policy persistence layer. Per-account `maxUsageRatio` and `safetyReserveBytes` survive restart, writes preserve OAuth credential payloads without exposing them, legacy unscoped credential files are adopted only into the configured legacy workspace, and cross-workspace mutation fails closed.
 - A strict Drive allocation mutation transport parser now accepts only `maxUsageRatio` and `safetyReserveBytes`; client-supplied workspace/account binding fields are rejected, ratio must stay within 0..1, reserve must be a non-negative safe integer, empty patches fail closed, and stable HTTP error mapping is defined for the upcoming IPC/Web transport wiring.
+- A dedicated Drive runtime-allocation adapter now combines a persisted workspace-owned account policy with authoritative provider quota counters and PhotoX app-used bytes to produce the exact `StorageAccount` consumed by account selection plus a renderer-safe allocation snapshot. This adapter carries the persisted ratio/reserve into the allocation algorithm and has regression coverage for the default 2/3 policy, custom reserve/ratio, malformed quota counters and secret-free renderer output. Main-process account loading still needs to call this adapter before the allocation editor can be enabled.
 - Media-cloud replica catalog and provider/account statistics are workspace isolated.
 - Local, Google Drive and Telegram provider work is structured around workspace ownership and replica policy.
 
@@ -30,7 +31,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Workspace, Subscription and Google Photos Migration surfaces now use the approved light card-based visual system from the V4 design reference: larger readable hierarchy, clearer quota/progress presentation, consistent blue primary actions and responsive layouts. Existing authoritative mutation/migration logic is preserved; no mock controls were introduced.
 
 ### Tenant isolation and reliability
-- Workspace scoping has been added across media/cloud replica records, Google Drive ownership, Telegram contracts, durable jobs, video/derived-media persistence, device/session state and subscription state.
+- Workspace scoping has been added across media/cloud replica records, Google Drive ownership, Telegram contracts, durable jobs, video/derived media, device/session state and subscription state.
 - Legacy SQLite migrations adopt unscoped rows into a designated legacy workspace instead of exposing them cross-tenant.
 - Durable background jobs, reconciliation and migration state are designed for restart/retry behavior.
 
@@ -67,12 +68,12 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Browser destructive mutations require authenticated authorization and CSRF where applicable.
 - Stripe webhook ingress uses provider signature authentication rather than browser session authentication.
 - Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values come from the active server-side subscription row.
-- Billing idempotency keys are transport inputs and durable storage keeps only their digest, not the raw key.
+- Billing idempotency keys are transport inputs and durable storage keeps only their SHA-256 digest, not the raw key.
 - Google Drive allocation policy persistence must preserve OAuth tokens server-side; renderer/Web policy payloads must never contain token material.
 - Drive allocation mutation payloads may not choose workspace/account identity; those bindings must come from the authenticated route/IPC target.
 
 ## Build / verification policy
-Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, not PASS.
+Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, never PASS.
 
 See `V4_BUILD_INTEGRATION_GUIDE.md` for current setup and integration requirements and `V4_UI_SPEC.md` for the UI implementation contract.
 
