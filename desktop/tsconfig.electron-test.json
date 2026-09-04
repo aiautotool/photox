@@ -29,6 +29,8 @@
     "electron/webEdgeDriveAllocation.test.ts",
     "electron/webEdgeServer.ts",
     "electron/webEdgeServer.test.ts",
+    "electron/webProxyTrust.ts",
+    "electron/webProxyTrust.test.ts",
     "electron/workspaceOverview.ts",
     "electron/workspaceOverview.test.ts"
   ]
