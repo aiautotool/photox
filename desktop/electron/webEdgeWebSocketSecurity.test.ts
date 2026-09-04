@@ -32,23 +32,28 @@ async function handshakeStatus(input: {
       origin: input.origin,
       headers: input.forwardedFor ? { 'x-forwarded-for': input.forwardedFor } : undefined,
     });
+    let settled = false;
+    const finish = (status: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (status === 101) socket.close();
+      resolve(status);
+    };
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       socket.terminate();
       reject(new Error('websocket handshake timeout'));
     }, 2_000);
-    const finish = (status: number) => {
-      clearTimeout(timer);
-      socket.removeAllListeners();
-      if (status === 101) socket.close();
-      else socket.terminate();
-      resolve(status);
-    };
     socket.once('open', () => finish(101));
     socket.once('unexpected-response', (_request, response) => {
       response.resume();
       finish(response.statusCode || 0);
     });
-    socket.once('error', (error) => {
+    socket.on('error', (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(error);
     });
