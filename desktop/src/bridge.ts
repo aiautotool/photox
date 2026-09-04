@@ -3,7 +3,8 @@ export type CloudState = 'QUEUED'|'UPLOADING'|'VERIFYING'|'VERIFIED'|'UPLOADED'|
 export type CloudUpload = { key:string;filename:string;size:number;receivedAt:string;deviceId:string;state:CloudState;accountId?:string;accountEmail?:string;folderId?:string;remotePath?:string;remoteFileId?:string;webViewLink?:string;uploadedAt?:string;verifiedAt?:string;message?:string };
 export type DesktopStatus = { state:'idle'|'receiving'|'uploading'|'error'; received:number; duplicates:number; cloudUploaded:number; cloudBlocked:number; message?:string; receiverUrl?:string; publicUrl?:string; tunnelHealthy?:boolean; pairCode?:string; libraryPath?:string; driveAccounts?:number; lastRunAt?:string };
 export type TunnelState = { connected:boolean; relayUrl:string; desktopId:string; pairingPayload:string; lastError?:string };
-export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable' };
+export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable';maxUsageRatio:number;safetyReserveBytes:number;photoXAllocationLimitBytes:number;photoXUsedBytes:number;photoXRemainingBytes:number;effectiveWritableBytes:number };
+export type DriveAllocationUpdateInput={maxUsageRatio?:number;safetyReserveBytes?:number};
 export type GooglePhotosAccount={id:string;email:string;capabilities:('picker'|'append')[];status:'ready'|'unavailable'};
 export type WorkspaceDevice={id:string;workspaceId:string;userId:string;name:string;platform:'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';kind:'desktop'|'mobile'|'web'|'service';createdAt:number;lastSeenAt?:number;revokedAt?:number};
 export type WorkspaceSessionSummary={sessionId:string;subject:string;deviceId?:string;scopes:string[];expiresAt:number;createdAt:number;lastUsedAt?:number};
@@ -32,6 +33,7 @@ export interface DesktopBridge {
   openExternal(url:string):Promise<void>;
   addGoogleAccount():Promise<DesktopStatus>;
   listGoogleAccounts():Promise<DriveAccount[]>;
+  updateGoogleDriveAllocation(accountId:string,input:DriveAllocationUpdateInput):Promise<DriveAccount>;
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
   createWebLoginLink():Promise<{url:string;expiresAt:number}>;
@@ -182,6 +184,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     openExternal:async(url)=>{const parsed=new URL(url);if(parsed.protocol!=='https:')throw new Error('WEB_EXTERNAL_URL_REJECTED');window.open(parsed.toString(),'_blank','noopener,noreferrer');},
     addGoogleAccount:()=>json('/api/web/v1/google-drive/accounts/connect',{method:'POST'}),
     listGoogleAccounts:()=>json('/api/web/v1/google-drive/accounts'),
+    updateGoogleDriveAllocation:(accountId,input)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}/allocation`,{method:'PATCH',body:JSON.stringify(input)}),
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
     createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},
