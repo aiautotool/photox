@@ -36,6 +36,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Shared Desktop/Web UI shows registered devices and permitted sessions with real loading/error/permission states.
 - Workspace dashboard shows authoritative plan, role, status, quotas and entitlement availability.
 - Mobile has an authenticated workspace/quota/device screen using the same workspace/session semantics.
+- Mobile home now exposes a real `Workspace & dung lượng` navigation shortcut that opens the authenticated `/workspace` screen instead of leaving that route discoverable only by direct navigation.
 
 ### Plans, quotas and subscription control-plane
 - Workspace overview exposes managed storage, monthly ingress, members, devices, storage providers and public-share quota dimensions.
