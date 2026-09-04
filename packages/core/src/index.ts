@@ -1,5 +1,7 @@
 export const GIB = 1024 ** 3;
-export const RESERVE_BYTES = 100 * 1024 ** 2;
+export const DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES = 100 * 1024 ** 2;
+/** @deprecated Use DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES. */
+export const RESERVE_BYTES = DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES;
 export const DEFAULT_PROVIDER_USAGE_RATIO = 2 / 3;
 
 export type StorageAccount = {
@@ -9,7 +11,21 @@ export type StorageAccount = {
   providerFreeBytes: number;
   providerTotalBytes?: number;
   maxUsageRatio?: number;
+  safetyReserveBytes?: number;
   status?: 'READY' | 'NEAR_LIMIT' | 'FULL_FOR_BACKUP' | 'INSUFFICIENT_RESERVE';
+};
+
+export type StorageAllocationSnapshot = {
+  providerTotalBytes: number | null;
+  providerFreeBytes: number;
+  providerUsedBytes: number | null;
+  allocationRatio: number;
+  allocationLimitBytes: number | null;
+  safetyReserveBytes: number;
+  appUsedBytes: number;
+  ratioRemainingBytes: number | null;
+  providerRemainingAfterReserveBytes: number;
+  availableBytes: number;
 };
 
 export type MediaAsset = {
@@ -100,18 +116,52 @@ export function evaluateBackupHealth(
   return { health: 'at_risk', originalCopies: originals.length, remoteOriginalCopies: remoteOriginals.length, viewableCopies, missingOriginalCopies, reasons };
 }
 
+function normalizedUsageRatio(account: StorageAccount): number {
+  const requestedRatio = account.maxUsageRatio ?? DEFAULT_PROVIDER_USAGE_RATIO;
+  return Number.isFinite(requestedRatio) ? Math.max(0, Math.min(1, requestedRatio)) : DEFAULT_PROVIDER_USAGE_RATIO;
+}
+
+function normalizedSafetyReserve(account: StorageAccount): number {
+  const requestedReserve = account.safetyReserveBytes ?? DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES;
+  return Number.isFinite(requestedReserve) ? Math.max(0, Math.floor(requestedReserve)) : DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES;
+}
+
 export function accountUsageLimit(account: StorageAccount): number {
   const total = account.providerTotalBytes;
   if (!total || !Number.isFinite(total) || total <= 0) return Number.POSITIVE_INFINITY;
-  const requestedRatio = account.maxUsageRatio ?? DEFAULT_PROVIDER_USAGE_RATIO;
-  const ratio = Math.max(0, Math.min(1, requestedRatio));
-  return Math.floor(total * ratio);
+  return Math.floor(total * normalizedUsageRatio(account));
+}
+
+export function storageAllocationSnapshot(account: StorageAccount): StorageAllocationSnapshot {
+  const total = account.providerTotalBytes;
+  const hasAuthoritativeTotal = Boolean(total && Number.isFinite(total) && total > 0);
+  const providerTotalBytes = hasAuthoritativeTotal ? Math.floor(total!) : null;
+  const providerFreeBytes = Math.max(0, Math.floor(Number.isFinite(account.providerFreeBytes) ? account.providerFreeBytes : 0));
+  const appUsedBytes = Math.max(0, Math.floor(Number.isFinite(account.appUsedBytes) ? account.appUsedBytes : 0));
+  const allocationRatio = normalizedUsageRatio(account);
+  const safetyReserveBytes = normalizedSafetyReserve(account);
+  const allocationLimit = accountUsageLimit(account);
+  const allocationLimitBytes = Number.isFinite(allocationLimit) ? allocationLimit : null;
+  const ratioRemainingBytes = allocationLimitBytes === null ? null : Math.max(0, allocationLimitBytes - appUsedBytes);
+  const providerRemainingAfterReserveBytes = Math.max(0, providerFreeBytes - safetyReserveBytes);
+  const availableBytes = Math.max(0, Math.min(ratioRemainingBytes ?? Number.POSITIVE_INFINITY, providerRemainingAfterReserveBytes));
+  const providerUsedBytes = providerTotalBytes === null ? null : Math.max(0, providerTotalBytes - providerFreeBytes);
+  return {
+    providerTotalBytes,
+    providerFreeBytes,
+    providerUsedBytes,
+    allocationRatio,
+    allocationLimitBytes,
+    safetyReserveBytes,
+    appUsedBytes,
+    ratioRemainingBytes,
+    providerRemainingAfterReserveBytes,
+    availableBytes,
+  };
 }
 
 export function safeAvailable(account: StorageAccount): number {
-  const ratioRemaining = Math.max(0, accountUsageLimit(account) - account.appUsedBytes);
-  const providerRemaining = Math.max(0, account.providerFreeBytes - RESERVE_BYTES);
-  return Math.max(0, Math.min(ratioRemaining, providerRemaining));
+  return storageAllocationSnapshot(account).availableBytes;
 }
 
 export function chooseAccount(accounts: StorageAccount[], fileSize: number): StorageAccount | null {
