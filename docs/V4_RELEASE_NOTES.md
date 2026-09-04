@@ -24,6 +24,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Media delivery preserves Range requests for streaming.
 - Public Web access includes workspace/session auth, role enforcement, CORS/CSRF where applicable, rate limiting and audit boundaries.
 - Web reconnect logic refreshes credentials and retries transient refresh/network failures with bounded backoff.
+- Workspace, Subscription and Google Photos Migration surfaces now use the approved light card-based visual system from the V4 design reference: larger readable hierarchy, clearer quota/progress presentation, consistent blue primary actions and responsive layouts. Existing authoritative mutation/migration logic is preserved; no mock controls were introduced.
 
 ### Tenant isolation and reliability
 - Workspace scoping has been added across media/cloud replica records, Google Drive ownership, Telegram contracts, durable jobs, video/derived-media persistence, device/session state and subscription state.
