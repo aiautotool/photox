@@ -20,6 +20,7 @@ export interface WebEdgeHandlers {
   createWebSession(input:{deviceId:string;deviceName?:string}):Promise<WebSession>;
   refreshSession(refreshToken:string):Promise<{accessToken:string;accessExpiresAt:number;sessionId:string}>;
   revokeSession(sessionId:string):Promise<void>;
+  handleStripeWebhook?(rawBody:Buffer,signatureHeader:string,now:number):Promise<unknown>|unknown;
   getWorkspaceOverview?(principal:WebPrincipal):Promise<unknown>;
   getWorkspaceSubscription?(principal:WebPrincipal):Promise<unknown>;
   listWorkspaceDevices?(principal:WebPrincipal):Promise<unknown>;
@@ -69,6 +70,7 @@ const WEB_REFRESH_COOKIE='photox_refresh';
 const WEB_CSRF_COOKIE='photox_csrf';
 const WEB_REFRESH_MAX_AGE=30*24*60*60;
 const WEB_LOGIN_TTL_MS=2*60_000;
+const STRIPE_WEBHOOK_PATH='/api/web/v1/billing/webhooks/stripe';
 
 export function webEdgeConfigFromEnv(staticDir:string):WebEdgeConfig{
   const enabled=process.env.PHOTOX_WEB_ENABLED==='true';
@@ -221,11 +223,16 @@ export class PhotoXWebEdgeServer {
     res.setHeader('x-content-type-options','nosniff');res.setHeader('referrer-policy','no-referrer');res.setHeader('x-frame-options','DENY');
   }
 
-  private async body(req:IncomingMessage){
+  private async rawBody(req:IncomingMessage){
     const chunks:Buffer[]=[];let total=0;
     for await(const chunk of req){const b=Buffer.from(chunk);total+=b.length;if(total>1024*1024)throw new Error('REQUEST_TOO_LARGE');chunks.push(b);}
-    if(!chunks.length)return {};
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return Buffer.concat(chunks);
+  }
+
+  private async body(req:IncomingMessage){
+    const raw=await this.rawBody(req);
+    if(!raw.length)return {};
+    return JSON.parse(raw.toString('utf8'));
   }
 
   private json(res:ServerResponse,status:number,value:unknown){res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(value));}
@@ -238,6 +245,21 @@ export class PhotoXWebEdgeServer {
     if(!this.originAllowed(req)){this.json(res,403,{error:'ORIGIN_FORBIDDEN'});return;}
     if(!this.rateAllowed(req)){res.setHeader('retry-after','60');this.json(res,429,{error:'RATE_LIMITED'});return;}
     const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname===STRIPE_WEBHOOK_PATH&&req.method==='POST'){
+      try{
+        const raw=await this.rawBody(req);
+        const signature=String(req.headers['stripe-signature']||'');
+        if(!signature)throw new Error('BILLING_WEBHOOK_SIGNATURE_REQUIRED');
+        const now=Date.now();
+        const value=await (this.handlers.handleStripeWebhook?.(raw,signature,now)??Promise.resolve(this.deviceApi().handleStripeWebhook(raw,signature,now)));
+        this.json(res,200,value);
+      }catch(error){
+        const message=error instanceof Error?error.message:String(error);
+        const status=message==='BILLING_WEBHOOK_NOT_CONFIGURED'?503:message==='REQUEST_TOO_LARGE'?413:400;
+        this.json(res,status,{error:'BILLING_WEBHOOK_REJECTED'});
+      }
+      return;
+    }
     if(url.pathname==='/api/web/v1/auth/ticket'&&req.method==='POST'){
       try{const b=await this.body(req);const ticket=String(b.ticket||'');if(!ticket)throw new Error('LOGIN_TICKET_REQUIRED');const session=this.loginTickets.consume(ticket);if(!session)throw new Error('LOGIN_TICKET_INVALID_OR_EXPIRED');const csrfToken=crypto.randomBytes(24).toString('base64url');res.setHeader('set-cookie',this.sessionCookies(req,session.refreshToken,csrfToken));this.json(res,200,{accessToken:session.accessToken,accessExpiresAt:session.accessExpiresAt,sessionId:session.sessionId,csrfToken});}catch(error){this.json(res,401,{error:error instanceof Error?error.message:String(error)});}return;
     }
