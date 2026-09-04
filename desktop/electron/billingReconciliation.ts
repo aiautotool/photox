@@ -10,6 +10,12 @@ export type BillingReconciliationResult = {
   reason?: 'STALE_PROVIDER_EVENT' | 'DUPLICATE_PROVIDER_EVENT';
 };
 
+type BillingReconciliationInput = {
+  workspaceId: string;
+  provider: string;
+  providerSubscriptionId: string;
+};
+
 export class BillingReconciliationService {
   constructor(
     private readonly store: SqlitePhotoXStore,
@@ -19,12 +25,38 @@ export class BillingReconciliationService {
 
   async reconcile(
     actor: WorkspaceSubscriptionActor,
-    input: { workspaceId: string; provider: string; providerSubscriptionId: string },
+    input: BillingReconciliationInput,
     adapter: BillingProviderReadAdapter,
     now = Date.now(),
   ): Promise<BillingReconciliationResult> {
     if (actor.workspaceId !== input.workspaceId) throw new Error('WORKSPACE_SCOPE_MISMATCH');
     this.subscriptions.snapshot(actor); // authoritative membership + owner/admin authorization
+    return this.reconcileBoundSubscription(input, adapter, {
+      actorUserId: actor.subject,
+      actorDeviceId: actor.deviceId,
+      source: 'interactive',
+    }, now);
+  }
+
+  async reconcileSystem(
+    input: BillingReconciliationInput,
+    adapter: BillingProviderReadAdapter,
+    now = Date.now(),
+  ): Promise<BillingReconciliationResult> {
+    const workspace = this.workspaces.getWorkspace(input.workspaceId);
+    if (!workspace || workspace.status !== 'active') throw new Error('WORKSPACE_INACTIVE');
+    return this.reconcileBoundSubscription(input, adapter, {
+      actorUserId: 'system:billing-reconciliation',
+      source: 'scheduled',
+    }, now);
+  }
+
+  private async reconcileBoundSubscription(
+    input: BillingReconciliationInput,
+    adapter: BillingProviderReadAdapter,
+    audit: { actorUserId: string; actorDeviceId?: string; source: 'interactive' | 'scheduled' },
+    now: number,
+  ): Promise<BillingReconciliationResult> {
     if (adapter.provider !== input.provider) throw new Error('BILLING_PROVIDER_ADAPTER_MISMATCH');
 
     const binding = this.store.db.prepare(`SELECT provider,provider_subscription_id
@@ -47,8 +79,8 @@ export class BillingReconciliationService {
     const applied = this.subscriptions.applyProviderState(providerState, now);
     this.workspaces.appendAudit({
       workspaceId: input.workspaceId,
-      actorUserId: actor.subject,
-      actorDeviceId: actor.deviceId,
+      actorUserId: audit.actorUserId,
+      actorDeviceId: audit.actorDeviceId,
       action: 'subscription.reconciliation.completed',
       targetType: 'workspace_subscription',
       targetId: input.workspaceId,
@@ -56,6 +88,7 @@ export class BillingReconciliationService {
         provider: input.provider,
         applied: applied.applied,
         result: applied.applied ? 'APPLIED' : applied.reason,
+        source: audit.source,
       },
       createdAt: now,
     });
