@@ -62,7 +62,11 @@ Default account allocation is:
 4. subtract/retain the configured safety reserve;
 5. use the smallest safe result as writable PhotoX capacity.
 
-The ratio and safety reserve are account policy inputs. Core defaults are ratio `2/3` and safety reserve `100 MiB` for legacy/unconfigured accounts. Core clamps ratio into `0..1`, clamps reserve to a non-negative integer, and exposes `storageAllocationSnapshot()` with provider total/free/used, PhotoX ratio-derived limit, reserve, app-used bytes and final writable bytes. Desktop/Web persistence and mutation transport must carry those fields per workspace-owned Drive account before the UI enables editing them.
+The ratio and safety reserve are account policy inputs. Core defaults are ratio `2/3` and safety reserve `100 MiB` for legacy/unconfigured accounts. Core clamps ratio into `0..1`, clamps reserve to a non-negative integer, and exposes `storageAllocationSnapshot()` with provider total/free/used, PhotoX ratio-derived limit, reserve, app-used bytes and final writable bytes.
+
+Desktop now has `driveAccountPolicyStore.ts` as the persistence boundary for these per-account settings. Policy writes are workspace-scoped, atomic, preserve the OAuth credential payload server-side, and legacy unscoped files are adopted only into the configured legacy workspace. Restart and cross-tenant regression coverage is required. Renderer/Web payloads must never reuse the persisted credential record directly because it contains token material.
+
+The next transport layer must feed persisted `maxUsageRatio`/`safetyReserveBytes` into `RuntimeDriveAccount.storage`, return only safe allocation snapshot fields in `DriveAccountInfo`, and expose owner/admin mutation through Electron IPC and authenticated Web routes with CSRF/audit before the shared UI editor is enabled.
 
 UI must distinguish provider total/free capacity from PhotoX allocated capacity and must never present a fixed 10 GB PhotoX limit unless the provider itself authoritatively reports that capacity.
 
@@ -185,5 +189,6 @@ Unless a later run explicitly verifies them, report these accurately:
 
 - live Google Photos OAuth/migration with real accounts;
 - live Stripe billing/webhook E2E with a real Stripe account;
+- live Google Drive allocation policy mutation with a real account;
 - signed iOS IPA/Xcode release build;
 - signed Android APK/AAB release build.
