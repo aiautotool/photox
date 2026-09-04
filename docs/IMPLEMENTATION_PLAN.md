@@ -78,7 +78,9 @@ Audit against the current PhotoX master requirements, with priority on real impl
 ### Desktop/Web shared product
 - [x] Web uses the Desktop React tree through shared `DesktopBridge` semantics.
 - [x] Authenticated HTTP/WebSocket adapters, CSRF/CORS/rate-limit/audit boundaries and Range media delivery are implemented where applicable.
-- [ ] Continue deployment/reverse-proxy acceptance and public-host hardening tests.
+- [x] Reverse-proxy forwarded headers are now fail-closed: `X-Forwarded-For` and `X-Forwarded-Proto` are honored only when the immediate peer is in `PHOTOX_WEB_TRUSTED_PROXIES`; direct clients cannot spoof rate-limit identity or HTTPS cookie state.
+- [x] Public Web environment parsing now rejects malformed `PHOTOX_WEB_PUBLIC_BASE_URL`, invalid rate limits and invalid trusted-proxy addresses before binding the service.
+- [ ] Complete deployment acceptance behind a real TLS reverse proxy, including WebSocket upgrade and Range streaming through that proxy.
 
 ## Remaining work
 ### P0 — Release/build correctness
