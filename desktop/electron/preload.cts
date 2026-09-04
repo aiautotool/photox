@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   createWebLoginLink: () => ipcRenderer.invoke('photosync:web-login-link'),
   getWorkspaceOverview: () => ipcRenderer.invoke('photosync:workspace-overview'),
   getWorkspaceSubscription: () => ipcRenderer.invoke('photosync:workspace-subscription'),
+  mutateWorkspaceSubscription: (input: unknown, idempotencyKey: string) => ipcRenderer.invoke('photosync:workspace-subscription-mutate', input, idempotencyKey),
   listWorkspaceDevices: () => ipcRenderer.invoke('photosync:workspace-devices'),
   listWorkspaceSessions: () => ipcRenderer.invoke('photosync:workspace-sessions'),
   revokeWorkspaceSession: (sessionId: string) => ipcRenderer.invoke('photosync:workspace-session-revoke', sessionId),
