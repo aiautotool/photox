@@ -27,6 +27,7 @@
     "electron/googlePhotosMigration.ts",
     "electron/googlePhotosMigration.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
+    "electron/webEdgeProxyHardening.test.ts",
     "electron/webEdgeServer.ts",
     "electron/webEdgeServer.test.ts",
     "electron/webProxyTrust.ts",
