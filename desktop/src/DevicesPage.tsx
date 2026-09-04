@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { DesktopBridge, WorkspaceDevice, WorkspaceOverviewSnapshot, WorkspaceQuotaDimension, WorkspaceSessionSummary } from './bridge';
+import type { DesktopBridge, WorkspaceDevice, WorkspaceOverviewSnapshot, WorkspaceQuotaDimension, WorkspaceSessionSummary, WorkspaceSubscriptionSnapshot } from './bridge';
 import './DevicesPage.css';
 
 type Props={bridge:DesktopBridge|undefined;pairingCard:ReactNode;connectionReady:boolean;lastRunAt?:string};
@@ -7,6 +7,7 @@ type Props={bridge:DesktopBridge|undefined;pairingCard:ReactNode;connectionReady
 const platformLabel:Record<WorkspaceDevice['platform'],string>={ios:'iPhone / iPad',android:'Android',windows:'Windows',macos:'macOS',linux:'Linux',web:'Web',unknown:'Không rõ'};
 const kindLabel:Record<WorkspaceDevice['kind'],string>={desktop:'Desktop',mobile:'Mobile',web:'Web',service:'Service'};
 const roleLabel:Record<WorkspaceOverviewSnapshot['membership']['role'],string>={owner:'Chủ sở hữu',admin:'Quản trị viên',member:'Thành viên',viewer:'Chỉ xem'};
+const subscriptionStatusLabel:Record<WorkspaceSubscriptionSnapshot['status'],string>={unmanaged:'Chưa quản lý qua billing',trialing:'Đang dùng thử',active:'Đang hoạt động',past_due:'Thanh toán quá hạn',paused:'Đang tạm dừng',canceled:'Đã hủy',incomplete:'Chưa hoàn tất'};
 
 function formatTime(value?:number|string){
   if(value==null)return 'Chưa có dữ liệu';
@@ -38,21 +39,32 @@ function quotaTone(quota:WorkspaceQuotaDimension){
   return 'normal';
 }
 
+function subscriptionTone(status:WorkspaceSubscriptionSnapshot['status']){
+  if(status==='active'||status==='trialing')return 'healthy';
+  if(status==='past_due'||status==='incomplete')return 'warning';
+  if(status==='paused'||status==='canceled')return 'muted';
+  return 'neutral';
+}
+
 export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props){
   const [overview,setOverview]=useState<WorkspaceOverviewSnapshot|null>(null);
+  const [subscription,setSubscription]=useState<WorkspaceSubscriptionSnapshot|null>(null);
   const [devices,setDevices]=useState<WorkspaceDevice[]>([]);
   const [sessions,setSessions]=useState<WorkspaceSessionSummary[]>([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState('');
+  const [subscriptionNotice,setSubscriptionNotice]=useState('');
   const [sessionNotice,setSessionNotice]=useState('');
   const [busy,setBusy]=useState<string|null>(null);
 
   async function refresh(){
     if(!bridge){setLoading(false);setError('DesktopBridge chưa sẵn sàng.');return}
-    setLoading(true);setError('');setSessionNotice('');
+    setLoading(true);setError('');setSubscriptionNotice('');setSessionNotice('');
     try{
       const [nextOverview,nextDevices]=await Promise.all([bridge.getWorkspaceOverview(),bridge.listWorkspaceDevices()]);
       setOverview(nextOverview);setDevices(nextDevices);
+      try{setSubscription(await bridge.getWorkspaceSubscription())}
+      catch(err){setSubscription(null);setSubscriptionNotice(err instanceof Error?err.message:'Bạn không có quyền xem trạng thái subscription của workspace này.')}
       try{setSessions(await bridge.listWorkspaceSessions())}
       catch(err){setSessions([]);setSessionNotice(err instanceof Error?err.message:'Bạn không có quyền xem phiên đăng nhập của workspace này.')}
     }catch(err){
@@ -116,6 +128,23 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
         <span className="enabled">{overview.entitlements.targetOriginalReplicas} original replicas</span>
       </div>
     </div>}
+
+    {subscription&&<div className="panel subscription-panel">
+      <div className="subscription-head">
+        <div><span className="workspace-kicker">SUBSCRIPTION</span><h3>Trạng thái gói dịch vụ</h3><p>Đọc từ control-plane authoritative; màn hình này không thực hiện thanh toán hoặc đổi gói.</p></div>
+        <span className={`subscription-status subscription-${subscriptionTone(subscription.status)}`}>{subscriptionStatusLabel[subscription.status]}</span>
+      </div>
+      <div className="subscription-grid">
+        <div><span>Gói</span><b>{subscription.plan}</b></div>
+        <div><span>Nguồn quản lý</span><b>{subscription.source==='billing'?'Billing provider':'Legacy / unmanaged'}</b></div>
+        <div><span>Bắt đầu kỳ hiện tại</span><b>{subscription.currentPeriodStart?formatTime(subscription.currentPeriodStart):'—'}</b></div>
+        <div><span>Kết thúc kỳ hiện tại</span><b>{subscription.currentPeriodEnd?formatTime(subscription.currentPeriodEnd):'—'}</b></div>
+        <div><span>Hủy cuối kỳ</span><b>{subscription.cancelAtPeriodEnd?'Có':'Không'}</b></div>
+        <div><span>Cập nhật gần nhất</span><b>{formatTime(subscription.updatedAt)}</b></div>
+      </div>
+      {subscription.cancelAtPeriodEnd&&<div className="subscription-warning">Gói được đánh dấu hủy cuối kỳ. Entitlement hiện tại vẫn giữ nguyên cho đến khi control-plane áp dụng transition hợp lệ.</div>}
+    </div>}
+    {!subscription&&subscriptionNotice&&<div className="subscription-notice">Trạng thái subscription chỉ hiển thị cho chủ sở hữu hoặc quản trị viên của workspace. {subscriptionNotice}</div>}
 
     <div className="device-overview">
       <div>{pairingCard}</div>
