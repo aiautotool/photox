@@ -130,6 +130,7 @@ export class PhotoXWebEdgeServer {
       void (async()=>{
         const url=new URL(req.url||'/','http://localhost');
         if(url.pathname!=='/api/web/v1/events'||!this.originAllowed(req)){socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');socket.destroy();return;}
+        if(!this.rateAllowed(req)){socket.write('HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n');socket.destroy();return;}
         try{
           const principal=await this.authorize(req,['media:read']);
           this.ws!.handleUpgrade(req,socket,head,client=>{this.sockets.set(client,principal);client.on('close',()=>this.sockets.delete(client));});
