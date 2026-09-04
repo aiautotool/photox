@@ -17,6 +17,8 @@
     "electron/driveAccountPolicyStore.test.ts",
     "electron/driveAllocationTransport.ts",
     "electron/driveAllocationTransport.test.ts",
+    "electron/driveRuntimeAllocation.ts",
+    "electron/driveRuntimeAllocation.test.ts",
     "electron/googlePhotosMigration.ts",
     "electron/googlePhotosMigration.test.ts",
     "electron/webEdgeServer.ts",
