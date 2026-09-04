@@ -58,6 +58,28 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Added authenticated `DELETE /api/v1/media/:key`: managed Google Drive replicas are deleted first; local original/thumbnail/playback and catalog row are removed only after replica deletion succeeds.
 - Mobile viewer exposes `Xóa khỏi cloud` with destructive confirmation and removes the deleted asset from local PhotoX metadata.
 
+## SaaS V4 priority progress
+### Google Drive allocation
+- [x] Removed fixed 10 GB PhotoX allocation semantics.
+- [x] Default per-account allocation is 2/3 of Google authoritative total quota.
+- [x] Writable capacity is additionally bounded by actual provider remaining bytes and per-account safety reserve.
+- [x] Per-account ratio and safety reserve persist across restart and feed runtime account selection.
+- [x] Renderer-safe allocation snapshots expose provider total/free/used and PhotoX effective writable capacity without OAuth secrets.
+- [x] Electron IPC and authenticated Web PATCH transport use the same strict allocation mutation contract with server-derived workspace/account authority.
+- [x] Shared Desktop/Web allocation manager now exposes real per-account ratio and safety-reserve editing, authoritative refresh after mutation, reset to production defaults, loading/error states, and no fake 10 GB cap.
+- [ ] Move the allocation editor from the global shared launcher into the storage-account page once that page is split into a reusable component without duplicating its account logic.
+- [ ] Live mutation E2E against a real Google account remains NOT VERIFIED.
+
+### Google Photos migration
+- [x] Picker-selected source semantics only; no unrestricted full-library crawling claim.
+- [x] Google Photos append-only destination and Google Drive destination contracts exist with durable migration state/progress/retry semantics.
+- [ ] Complete live OAuth/provider E2E verification with real accounts.
+
+### Desktop/Web shared product
+- [x] Web uses the Desktop React tree through shared `DesktopBridge` semantics.
+- [x] Authenticated HTTP/WebSocket adapters, CSRF/CORS/rate-limit/audit boundaries and Range media delivery are implemented where applicable.
+- [ ] Continue deployment/reverse-proxy acceptance and public-host hardening tests.
+
 ## Remaining work
 ### P0 — Release/build correctness
 - [ ] Regenerate and commit root `package-lock.json` after native dependency changes.
@@ -109,7 +131,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - A stale IMG.LY patch-package file was removed after it blocked `npm install`.
 - Mobile + SDK typecheck passed on the editor/mobile-library hardening commit before video integration.
 - Desktop production build then exposed a pre-existing missing iconset asset. The build path now points to a real repository icon blob rather than a placeholder.
-- The current HEAD must still complete CI after the new video integration before the batch is release-ready.
+- Every V4 batch must still complete repository tests, TypeScript typecheck, production build and CI before being marked complete.
 
 ## Definition of done
 A feature is DONE only when UI, business logic, persistence (where needed), error/loading/empty states, platform behavior, tests and documentation agree. Rendering a screen or button alone is not completion.
