@@ -111,7 +111,36 @@ Webhook authentication is the Stripe raw-body signature, not browser Bearer/CSRF
 
 The control-plane also periodically reconciles Stripe state to heal missed/delayed webhooks. Period-end entitlement transitions are restart-safe and must not delete media/replicas.
 
-Billing mutation primitives are being built behind a durable idempotent coordinator. Do not expose Change plan / Cancel / Resume / Payment controls until authenticated transport, provider mutation, reconciliation, role/CSRF/idempotency tests, and failure states are all wired.
+### Billing mutation transport
+
+The durable mutation coordinator supports `change_plan`, `cancel_at_period_end`, and `resume`.
+
+Public clients may send only:
+
+```json
+{ "operation": "change_plan", "targetPlan": "pro" }
+```
+
+For cancel/resume, omit `targetPlan`. Never accept `workspaceId`, provider name, provider subscription ID, Stripe customer ID, Stripe subscription ID, or raw provider configuration from renderer/browser input.
+
+Electron uses `DesktopBridge.mutateWorkspaceSubscription(input, idempotencyKey)` -> preload -> `photosync:workspace-subscription-mutate` -> `DesktopWorkspaceAuth`, which derives the active workspace/provider/subscription binding from authoritative SQLite state before calling the coordinator/Stripe adapter.
+
+Web uses:
+
+`POST /api/web/v1/workspace/subscription/mutations`
+
+Requirements:
+
+- authenticated workspace session;
+- owner/admin role;
+- valid browser CSRF cookie/header pair;
+- caller-generated `Idempotency-Key` header, 16–200 characters;
+- JSON body limited to `operation` and optional `targetPlan`;
+- CORS reverse proxy must allow `Idempotency-Key` in addition to Authorization/Content-Type/CSRF headers.
+
+The raw idempotency key is forwarded to Stripe for provider idempotency but PhotoX persistence stores only its SHA-256 digest. A repeated successful request with the same key replays the durable result without a second provider mutation. Reusing the key with different payload is a conflict.
+
+Do not add Change plan / Cancel / Resume controls until their shared React states implement in-progress, safe error, authoritative refresh, retry/replay behavior, and the final transport CI is green. Checkout/payment method/customer portal remain separate future capabilities.
 
 ## 8. Provider integration rules
 
