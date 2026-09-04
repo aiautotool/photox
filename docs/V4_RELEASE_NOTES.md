@@ -29,6 +29,9 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Web exposure supports configurable host/port/public base URL/allowed origins and reverse-proxy deployment.
 - Media delivery preserves Range requests for streaming.
 - Public Web access includes workspace/session auth, role enforcement, CORS/CSRF where applicable, rate limiting and audit boundaries.
+- Reverse-proxy trust is now explicit through `PHOTOX_WEB_TRUSTED_PROXIES`; forwarded client/protocol headers are ignored unless the immediate socket peer is configured as trusted.
+- Trusted forwarded chains resolve the nearest untrusted client identity for rate limiting, while direct clients cannot spoof `X-Forwarded-For` to obtain independent buckets or spoof `X-Forwarded-Proto` to alter secure-cookie state.
+- Web runtime validation now fails startup for malformed public base URLs, invalid rate limits, and invalid trusted-proxy addresses instead of silently weakening deployment controls.
 - Web reconnect logic refreshes credentials and retries transient refresh/network failures with bounded backoff.
 - Workspace, Subscription and Google Photos Migration surfaces now use the approved light card-based visual system from the V4 design reference: larger readable hierarchy, clearer quota/progress presentation, consistent blue primary actions and responsive layouts. Existing authoritative mutation/migration logic is preserved; no mock controls were introduced.
 
@@ -73,15 +76,9 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Billing idempotency keys are transport inputs and durable storage keeps only their SHA-256 digest, not the raw key.
 - Google Drive allocation policy persistence must preserve OAuth tokens server-side; renderer/Web policy payloads must never contain token material.
 - Drive allocation mutation payloads may not choose workspace/account identity; those bindings must come from the authenticated route/IPC target.
+- Forwarded proxy headers are security-sensitive input and are accepted only from explicitly configured immediate proxy addresses; hostnames and malformed proxy entries fail configuration validation.
 
 ## Build / verification policy
 Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, never PASS.
 
 See `V4_BUILD_INTEGRATION_GUIDE.md` for current setup and integration requirements and `V4_UI_SPEC.md` for the UI implementation contract.
-
-## Known verification gaps
-- Live Google Photos OAuth/migration with real accounts: NOT VERIFIED.
-- Live Stripe billing/webhook E2E with a real Stripe account: NOT VERIFIED.
-- Live Google Drive allocation policy mutation with a real account: NOT VERIFIED.
-- Signed iOS IPA/Xcode release: NOT VERIFIED.
-- Signed Android APK/AAB release: NOT VERIFIED.
