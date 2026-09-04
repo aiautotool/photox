@@ -10,6 +10,7 @@ import type { WorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DeviceSessionManagementService, type DeviceSessionActor } from './deviceSessionManagement.js';
 import { WorkspaceOverviewService } from './workspaceOverview.js';
 import { WorkspaceSubscriptionService } from './workspaceSubscription.js';
+import { parseStripeSubscriptionWebhook } from './billingWebhook.js';
 
 export type PairExchangeInput = {
   workspaceId: string;
@@ -148,6 +149,10 @@ export class DesktopWorkspaceAuth {
   }
   getWorkspaceOverview(actor: DeviceSessionActor) { return this.overview.snapshot(actor); }
   getWorkspaceSubscription(actor: DeviceSessionActor) { return this.subscriptions.snapshot(actor); }
+  handleStripeWebhook(rawBody: Buffer, signatureHeader: string, now = Date.now()) {
+    const state = parseStripeSubscriptionWebhook(rawBody, signatureHeader, process.env.PHOTOX_STRIPE_WEBHOOK_SECRET || '', now);
+    return this.subscriptions.applyProviderState(state, now);
+  }
   listDevices(actor: DeviceSessionActor) { return this.deviceSessions.listDevices(actor); }
   listSessions(actor: DeviceSessionActor) { return this.deviceSessions.listSessions(actor); }
   revokeSession(actor: DeviceSessionActor, sessionId: string) { return this.deviceSessions.revokeSession(actor, sessionId); }
