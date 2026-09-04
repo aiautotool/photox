@@ -7,6 +7,7 @@ import type { MediaApiScope } from '@photox/media-api';
 import { OneTimeTicketStore } from '@photosync/core';
 import { requireActiveDesktopWorkspaceAuth } from './workspaceAuth.js';
 import { billingMutationHttpStatus } from './billingMutationTransport.js';
+import { updateDriveAllocationPolicyForWeb } from './driveAllocationDesktopTransport.js';
 
 export type WebRole='owner'|'admin'|'member'|'viewer';
 export type WebEdgeEvent='migration-updated'|'file-received'|'storage-updated'|'tunnel-state';
@@ -29,6 +30,7 @@ export interface WebEdgeHandlers {
   listWorkspaceSessions?(principal:WebPrincipal):Promise<unknown>;
   revokeWorkspaceSession?(principal:WebPrincipal,sessionId:string):Promise<unknown>;
   revokeWorkspaceDevice?(principal:WebPrincipal,deviceId:string):Promise<unknown>;
+  updateGoogleDriveAllocation?(principal:WebPrincipal,accountId:string,body:unknown):Promise<unknown>;
   appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
@@ -221,7 +223,7 @@ export class PhotoXWebEdgeServer {
     const origin=String(req.headers.origin||'');if(origin&&this.originAllowed(req)){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','Origin');}
     res.setHeader('access-control-allow-headers','authorization,content-type,range,x-csrf-token,idempotency-key');
     res.setHeader('access-control-allow-credentials','true');
-    res.setHeader('access-control-allow-methods','GET,POST,DELETE,OPTIONS');
+    res.setHeader('access-control-allow-methods','GET,POST,PATCH,DELETE,OPTIONS');
     res.setHeader('x-content-type-options','nosniff');res.setHeader('referrer-policy','no-referrer');res.setHeader('x-frame-options','DENY');
   }
 
@@ -322,6 +324,19 @@ export class PhotoXWebEdgeServer {
     if(m==='POST'&&p==='/api/web/v1/library/open')return mutate('admin',{action:'web.library.open',targetType:'library'},this.handlers.openLibrary);
     if(m==='POST'&&p==='/api/web/v1/google-drive/accounts/connect')return mutate('admin',{action:'web.google_drive.connect',targetType:'provider'},this.handlers.addGoogleAccount);
     if(m==='GET'&&p==='/api/web/v1/google-drive/accounts')return read(this.handlers.listGoogleAccounts);
+    match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)\/allocation$/.exec(p);if(m==='PATCH'&&match){
+      if(!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
+      const accountId=decodeURIComponent(match[1]);const body=await this.body(req);
+      try{
+        const value=await (this.handlers.updateGoogleDriveAllocation?.(principal,accountId,body)??updateDriveAllocationPolicyForWeb(principal,accountId,body));
+        this.json(res,200,value);
+      }catch(error){
+        const message=error instanceof Error?error.message:String(error);
+        const status=message.includes('ROLE_FORBIDDEN')?403:message.includes('NOT_FOUND')?404:message.includes('INVALID')||message.includes('REQUIRED')||message.includes('MUTATION')?400:500;
+        this.json(res,status,{error:message.startsWith('DRIVE_')?message:'DRIVE_ALLOCATION_INTERNAL_ERROR'});
+      }
+      return;
+    }
     match=/^\/api\/web\/v1\/google-drive\/accounts\/([^/]+)$/.exec(p);if(m==='DELETE'&&match)return mutate('admin',{action:'web.google_drive.remove',targetType:'provider',targetId:decodeURIComponent(match![1])},()=>this.handlers.removeGoogleAccount(decodeURIComponent(match![1])));
     if(m==='POST'&&p==='/api/web/v1/cloud/retry')return mutate('member',{action:'web.cloud.retry',targetType:'cloud_queue'},this.handlers.retryCloud);
     if(m==='GET'&&p==='/api/web/v1/google-photos/accounts')return read(this.handlers.listGooglePhotosAccounts);
