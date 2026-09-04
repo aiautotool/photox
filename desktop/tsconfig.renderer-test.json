@@ -16,6 +16,8 @@
     "src/bridge.test.ts",
     "src/workspaceBridge.test.ts",
     "src/billingUi.ts",
-    "src/billingUi.test.ts"
+    "src/billingUi.test.ts",
+    "src/driveAllocationUi.ts",
+    "src/driveAllocationUi.test.ts"
   ]
 }
