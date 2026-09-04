@@ -14,6 +14,8 @@
   "include": [
     "src/bridge.ts",
     "src/bridge.test.ts",
-    "src/workspaceBridge.test.ts"
+    "src/workspaceBridge.test.ts",
+    "src/billingUi.ts",
+    "src/billingUi.test.ts"
   ]
 }
