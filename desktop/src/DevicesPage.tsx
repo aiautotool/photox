@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { DesktopBridge, WorkspaceDevice, WorkspaceOverviewSnapshot, WorkspaceQuotaDimension, WorkspaceSessionSummary, WorkspaceSubscriptionSnapshot } from './bridge';
+import type { DesktopBridge, WorkspaceBillingMutationInput, WorkspaceDevice, WorkspaceOverviewSnapshot, WorkspaceQuotaDimension, WorkspaceSessionSummary, WorkspaceSubscriptionSnapshot } from './bridge';
+import { billingMutationFingerprint, billingPlans, billingUiPermissions, createBillingMutationKey, type BillingPlan } from './billingUi';
 import './DevicesPage.css';
 
 type Props={bridge:DesktopBridge|undefined;pairingCard:ReactNode;connectionReady:boolean;lastRunAt?:string};
+
+type BillingRetry={fingerprint:string;key:string;input:WorkspaceBillingMutationInput};
 
 const platformLabel:Record<WorkspaceDevice['platform'],string>={ios:'iPhone / iPad',android:'Android',windows:'Windows',macos:'macOS',linux:'Linux',web:'Web',unknown:'Không rõ'};
 const kindLabel:Record<WorkspaceDevice['kind'],string>={desktop:'Desktop',mobile:'Mobile',web:'Web',service:'Service'};
@@ -46,6 +49,10 @@ function subscriptionTone(status:WorkspaceSubscriptionSnapshot['status']){
   return 'neutral';
 }
 
+function randomMutationId(){
+  return globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props){
   const [overview,setOverview]=useState<WorkspaceOverviewSnapshot|null>(null);
   const [subscription,setSubscription]=useState<WorkspaceSubscriptionSnapshot|null>(null);
@@ -56,6 +63,11 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
   const [subscriptionNotice,setSubscriptionNotice]=useState('');
   const [sessionNotice,setSessionNotice]=useState('');
   const [busy,setBusy]=useState<string|null>(null);
+  const [targetPlan,setTargetPlan]=useState<BillingPlan>('pro');
+  const [billingBusy,setBillingBusy]=useState<string|null>(null);
+  const [billingNotice,setBillingNotice]=useState('');
+  const [billingError,setBillingError]=useState('');
+  const [billingRetry,setBillingRetry]=useState<BillingRetry|null>(null);
 
   async function refresh(){
     if(!bridge){setLoading(false);setError('DesktopBridge chưa sẵn sàng.');return}
@@ -73,6 +85,11 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
   }
 
   useEffect(()=>{void refresh()},[bridge]);
+  useEffect(()=>{
+    if(!subscription)return;
+    const next=billingPlans.find(plan=>plan.id!==subscription.plan)?.id;
+    if(next)setTargetPlan(next);
+  },[subscription?.plan]);
 
   const activeDevices=useMemo(()=>devices.filter(device=>!device.revokedAt),[devices]);
   const sessionsByDevice=useMemo(()=>{
@@ -91,6 +108,7 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
     {key:'providers',label:'Nơi lưu trữ',quota:overview.quota.storageProviders,unit:'count' as const},
     {key:'shares',label:'Chia sẻ công khai',quota:overview.quota.publicShares,unit:'count' as const},
   ]:[],[overview]);
+  const billingPermissions=useMemo(()=>subscription&&overview?billingUiPermissions(subscription,overview.membership.role):null,[subscription,overview]);
 
   async function revokeSession(session:WorkspaceSessionSummary){
     if(!bridge||!window.confirm('Đăng xuất phiên này? Thiết bị sẽ cần đăng nhập hoặc ghép lại nếu không còn phiên hợp lệ.'))return;
@@ -106,6 +124,39 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
     try{await bridge.revokeWorkspaceDevice(device.id);await refresh()}
     catch(err){setError(err instanceof Error?err.message:String(err))}
     finally{setBusy(null)}
+  }
+
+  async function mutateSubscription(input:WorkspaceBillingMutationInput,retry?:BillingRetry){
+    if(!bridge||!subscription||!overview)return;
+    const fingerprint=billingMutationFingerprint(input);
+    const previous=retry?.fingerprint===fingerprint?retry:billingRetry?.fingerprint===fingerprint?billingRetry:null;
+    const idempotencyKey=previous?.key||createBillingMutationKey(input,randomMutationId());
+    setBillingBusy(fingerprint);setBillingError('');setBillingNotice('');
+    try{
+      const result=await bridge.mutateWorkspaceSubscription(input,idempotencyKey);
+      setBillingRetry(null);
+      await refresh();
+      setBillingNotice(result.replayed?'Yêu cầu trước đó đã được xác nhận lại an toàn. Trạng thái subscription đã được làm mới.':'Thay đổi đã được billing provider xác nhận. Trạng thái subscription đã được làm mới từ control-plane.');
+    }catch(err){
+      setBillingRetry({fingerprint,key:idempotencyKey,input});
+      setBillingError(err instanceof Error?err.message:String(err));
+    }finally{setBillingBusy(null)}
+  }
+
+  function changePlan(){
+    if(!subscription||targetPlan===subscription.plan)return;
+    if(!window.confirm(`Đổi gói từ ${subscription.plan} sang ${targetPlan}? PhotoX sẽ gửi thay đổi tới billing provider và đọc lại trạng thái authoritative.`))return;
+    void mutateSubscription({operation:'change_plan',targetPlan});
+  }
+
+  function cancelAtPeriodEnd(){
+    if(!window.confirm('Hủy subscription vào cuối kỳ hiện tại? Media và replica hiện có sẽ không bị xóa bởi thao tác này.'))return;
+    void mutateSubscription({operation:'cancel_at_period_end'});
+  }
+
+  function resumeSubscription(){
+    if(!window.confirm('Tiếp tục subscription và bỏ yêu cầu hủy cuối kỳ?'))return;
+    void mutateSubscription({operation:'resume'});
   }
 
   return <section className="page-section devices-page">
@@ -131,7 +182,7 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
 
     {subscription&&<div className="panel subscription-panel">
       <div className="subscription-head">
-        <div><span className="workspace-kicker">SUBSCRIPTION</span><h3>Trạng thái gói dịch vụ</h3><p>Đọc từ control-plane authoritative; màn hình này không thực hiện thanh toán hoặc đổi gói.</p></div>
+        <div><span className="workspace-kicker">SUBSCRIPTION</span><h3>Trạng thái gói dịch vụ</h3><p>Trạng thái authoritative từ control-plane. Mọi thay đổi bên dưới được gửi qua mutation contract có role, CSRF và idempotency protection.</p></div>
         <span className={`subscription-status subscription-${subscriptionTone(subscription.status)}`}>{subscriptionStatusLabel[subscription.status]}</span>
       </div>
       <div className="subscription-grid">
@@ -143,6 +194,22 @@ export function DevicesPage({bridge,pairingCard,connectionReady,lastRunAt}:Props
         <div><span>Cập nhật gần nhất</span><b>{formatTime(subscription.updatedAt)}</b></div>
       </div>
       {subscription.cancelAtPeriodEnd&&<div className="subscription-warning">Gói được đánh dấu hủy cuối kỳ. Entitlement hiện tại vẫn giữ nguyên cho đến khi control-plane áp dụng transition hợp lệ.</div>}
+      {billingPermissions?.canManage?<div className="billing-actions">
+        <div className="billing-action-copy"><b>Quản lý subscription</b><span>Chỉ owner/admin. Sau mutation PhotoX luôn đọc lại trạng thái authoritative; không cập nhật UI theo kiểu optimistic.</span></div>
+        <div className="billing-plan-action">
+          <label htmlFor="billing-target-plan">Đổi gói</label>
+          <select id="billing-target-plan" value={targetPlan} disabled={billingBusy!==null||!billingPermissions.canChangePlan} onChange={event=>{setTargetPlan(event.target.value as BillingPlan);setBillingError('');setBillingRetry(null)}}>
+            {billingPlans.map(plan=><option key={plan.id} value={plan.id} disabled={plan.id===subscription.plan}>{plan.label}{plan.id===subscription.plan?' · hiện tại':''}</option>)}
+          </select>
+          <button className="billing-primary" disabled={billingBusy!==null||!billingPermissions.canChangePlan||targetPlan===subscription.plan} onClick={changePlan}>{billingBusy===`change_plan:${targetPlan}`?'Đang đổi…':'Xác nhận đổi gói'}</button>
+        </div>
+        <div className="billing-secondary-actions">
+          {billingPermissions.canCancelAtPeriodEnd&&<button className="billing-danger" disabled={billingBusy!==null} onClick={cancelAtPeriodEnd}>{billingBusy==='cancel_at_period_end:-'?'Đang gửi…':'Hủy vào cuối kỳ'}</button>}
+          {billingPermissions.canResume&&<button className="billing-primary" disabled={billingBusy!==null} onClick={resumeSubscription}>{billingBusy==='resume:-'?'Đang gửi…':'Tiếp tục subscription'}</button>}
+        </div>
+      </div>:billingPermissions?.reason&&<div className="billing-permission-note">{billingPermissions.reason}</div>}
+      {billingNotice&&<div className="billing-feedback billing-success">{billingNotice}</div>}
+      {billingError&&<div className="billing-feedback billing-failure"><div><b>Không thể hoàn tất thay đổi</b><span>{billingError}</span></div>{billingRetry&&<button disabled={billingBusy!==null} onClick={()=>void mutateSubscription(billingRetry.input,billingRetry)}>Thử lại cùng yêu cầu</button>}</div>}
     </div>}
     {!subscription&&subscriptionNotice&&<div className="subscription-notice">Trạng thái subscription chỉ hiển thị cho chủ sở hữu hoặc quản trị viên của workspace. {subscriptionNotice}</div>}
 
