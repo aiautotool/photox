@@ -80,6 +80,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Authenticated HTTP/WebSocket adapters, CSRF/CORS/rate-limit/audit boundaries and Range media delivery are implemented where applicable.
 - [x] Reverse-proxy forwarded headers are now fail-closed: `X-Forwarded-For` and `X-Forwarded-Proto` are honored only when the immediate peer is in `PHOTOX_WEB_TRUSTED_PROXIES`; direct clients cannot spoof rate-limit identity or HTTPS cookie state.
 - [x] Public Web environment parsing now rejects malformed `PHOTOX_WEB_PUBLIC_BASE_URL`, invalid rate limits and invalid trusted-proxy addresses before binding the service.
+- [x] WebSocket event upgrades now share the same trusted-client rate-limit identity as HTTP; origin and access-token checks remain fail-closed, trusted proxies separate client buckets, and direct clients cannot rotate spoofed `X-Forwarded-For` values to evade the limiter.
 - [ ] Complete deployment acceptance behind a real TLS reverse proxy, including WebSocket upgrade and Range streaming through that proxy.
 
 ## Remaining work
