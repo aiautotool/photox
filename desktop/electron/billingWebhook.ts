@@ -8,7 +8,7 @@ const ALLOWED_EVENT_TYPES = new Set([
   'customer.subscription.updated',
   'customer.subscription.deleted',
 ]);
-const ALLOWED_PLANS = new Set<WorkspacePlanCode>(['free', 'personal', 'pro', 'team']);
+const ALLOWED_PLANS = new Set<WorkspacePlanCode>(['free', 'personal', 'pro', 'family', 'team']);
 const STATUS_MAP: Record<string, WorkspaceSubscriptionStatus | undefined> = {
   trialing: 'trialing',
   active: 'active',
