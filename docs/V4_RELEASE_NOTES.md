@@ -10,6 +10,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Allocation ratio can be configured per account.
 - The core allocation contract now also supports a per-account safety reserve. The default remains 100 MB for legacy/unconfigured accounts, while invalid ratio/reserve inputs are clamped safely and the allocation snapshot exposes authoritative total/free/used, ratio-derived limit, reserve and actually available PhotoX bytes for future transport/UI use.
 - Desktop now has a workspace-scoped Drive allocation policy persistence layer. Per-account `maxUsageRatio` and `safetyReserveBytes` survive restart, writes preserve OAuth credential payloads without exposing them, legacy unscoped credential files are adopted only into the configured legacy workspace, and cross-workspace mutation fails closed.
+- A strict Drive allocation mutation transport parser now accepts only `maxUsageRatio` and `safetyReserveBytes`; client-supplied workspace/account binding fields are rejected, ratio must stay within 0..1, reserve must be a non-negative safe integer, empty patches fail closed, and stable HTTP error mapping is defined for the upcoming IPC/Web transport wiring.
 - Media-cloud replica catalog and provider/account statistics are workspace isolated.
 - Local, Google Drive and Telegram provider work is structured around workspace ownership and replica policy.
 
@@ -68,6 +69,7 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Billing mutation clients never choose authoritative workspace/provider/subscription binding; those values come from the active server-side subscription row.
 - Billing idempotency keys are transport inputs and durable storage keeps only their digest, not the raw key.
 - Google Drive allocation policy persistence must preserve OAuth tokens server-side; renderer/Web policy payloads must never contain token material.
+- Drive allocation mutation payloads may not choose workspace/account identity; those bindings must come from the authenticated route/IPC target.
 
 ## Build / verification policy
 Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, not PASS.
