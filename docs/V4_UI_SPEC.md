@@ -75,11 +75,11 @@ Compact entitlement chips/list:
 - Priority video processing
 - Target original replica count
 
-Do not render Upgrade until billing mutation transport is production-ready.
+Do not render generic Upgrade/Checkout actions until price/checkout contracts are production-ready.
 
 ## 4. Subscription card
 
-Read-only until billing mutations are fully backed.
+The shared Desktop/Web Subscription card is now backed for lifecycle mutations. It must continue to use only authoritative subscription/workspace data.
 
 Show:
 - Plan
@@ -98,13 +98,27 @@ Status behavior:
 - `incomplete`: warning/error
 - `unmanaged`: explain that the workspace has no authoritative billing connection
 
-Future actions, only after backing APIs are green:
-- Change plan
+Implemented backed actions for owner/admin billing workspaces:
+- Change plan (`personal`, `pro`, `family`, `team`)
 - Cancel at period end
-- Resume subscription
-- Open billing/customer portal
+- Resume subscription when cancel-at-period-end is active
 
-Every mutation must show in-progress state, provider-safe error, refreshed authoritative result and idempotent retry behavior.
+Mutation UI requirements:
+- only render actions allowed by authoritative role/lifecycle state;
+- require confirmation for lifecycle-changing actions;
+- show an in-progress state and disable concurrent billing mutation controls;
+- never optimistically rewrite plan/status;
+- after success refresh authoritative workspace/subscription state;
+- distinguish replayed success from a newly applied mutation when useful;
+- preserve the same caller idempotency key for explicit retry of the exact failed mutation fingerprint;
+- generate a new idempotency identity for a different payload;
+- show safe provider errors without leaking provider bindings/secrets.
+
+Still future/gated until backing contracts exist:
+- Checkout
+- Payment methods
+- Billing/customer portal
+- Price/currency presentation
 
 ## 5. Devices and sessions
 
