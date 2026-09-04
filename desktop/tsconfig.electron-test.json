@@ -15,6 +15,7 @@
     "electron/deviceSessionManagement.test.ts",
     "electron/driveAccountPolicyStore.ts",
     "electron/driveAccountPolicyStore.test.ts",
+    "electron/driveAllocationDesktopTransport.ts",
     "electron/driveAllocationPolicyService.ts",
     "electron/driveAllocationPolicyService.test.ts",
     "electron/driveAllocationTransport.ts",
