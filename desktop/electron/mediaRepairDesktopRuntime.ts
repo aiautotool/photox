@@ -8,10 +8,10 @@ import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, migrateLegacyWorkspaceRows, type StorageAccount } from '@photosync/core';
 import { createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 import { SqlitePhotoXStore, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
-import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
+import { loadWorkspaceDriveAccounts } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation } from './driveRuntimeAllocation.js';
 import { MediaRepairCoordinator } from './mediaRepairCoordinator.js';
-import { repairMediaFromPrincipal, type MediaRepairPrincipal } from './mediaRepairTransport.js';
+import { repairMediaFromPrincipal, type MediaRepairAuditEvent, type MediaRepairPrincipal } from './mediaRepairTransport.js';
 import { mimeTypeForFilename } from './mediaProcessing.js';
 
 const LEGACY_WORKSPACE_ID = process.env.PHOTOX_WORKSPACE_ID || 'legacy-personal';
@@ -213,6 +213,8 @@ async function uploadExactMedia(workspaceId: string, key: string) {
     latest = await saveReplica(workspaceId, key, replica);
 
     try {
+      const sourceSha256 = typeof latest.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(latest.sha256) ? latest.sha256 : undefined;
+      if (!sourceSha256) throw new Error('MEDIA_REPAIR_SHA256_REQUIRED');
       const token = await account.client.getAccessToken();
       if (!token.token) throw new Error('DRIVE_ACCESS_TOKEN_UNAVAILABLE');
       const mimeType = latest.mimeType || mimeTypeForFilename(latest.filename);
@@ -221,7 +223,7 @@ async function uploadExactMedia(workspaceId: string, key: string) {
         mimeType,
         sizeBytes: latest.size,
         folderId: account.folderId,
-        appProperties: { photosyncKey: latest.key, photosyncSha256: latest.sha256 },
+        appProperties: { photosyncKey: latest.key, photosyncSha256: sourceSha256 },
       });
       const response = await fetch(session, {
         method: 'PUT',
@@ -235,8 +237,7 @@ async function uploadExactMedia(workspaceId: string, key: string) {
 
       const remote = await getDriveFile(token.token, uploaded.id);
       if (Number(remote.size || 0) !== latest.size) throw new Error('DRIVE_REMOTE_SIZE_MISMATCH');
-      const remoteSha = remote.appProperties?.photosyncSha256;
-      if (latest.sha256 && remoteSha !== latest.sha256) throw new Error('DRIVE_REMOTE_SHA256_MISMATCH');
+      if (remote.appProperties?.photosyncSha256 !== sourceSha256) throw new Error('DRIVE_REMOTE_SHA256_MISMATCH');
 
       const now = new Date().toISOString();
       replica = {
@@ -274,7 +275,7 @@ async function trustedDesktopPrincipal(): Promise<MediaRepairPrincipal> {
   }
 }
 
-async function appendDesktopAudit(principal: MediaRepairPrincipal, event: Parameters<typeof repairMediaFromPrincipal>[0]['appendAudit'] extends ((principal: any, event: infer E) => any) ? E : never) {
+async function appendDesktopAudit(principal: MediaRepairPrincipal, event: MediaRepairAuditEvent) {
   const resolved = await paths();
   const store = new SqlitePhotoXStore({ path: resolved.databasePath });
   const workspaces = new SqliteWorkspaceRepository(store);
@@ -321,7 +322,7 @@ export async function repairMediaForTrustedDesktop(key: string) {
     key,
     coordinator,
     source: 'desktop',
-    appendAudit: appendDesktopAudit as any,
+    appendAudit: appendDesktopAudit,
   });
 }
 
