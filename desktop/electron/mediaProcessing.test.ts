@@ -62,6 +62,11 @@ test('corrupt MOV fails closed with a stable probe error and does not expose the
         assert.equal(error.message, 'Video processing failed during probe.');
         assert.equal(error.message.includes(inputPath), false);
         assert.equal(error.message.includes('private-camera-roll.MOV'), false);
+
+        const serialized = JSON.stringify(error);
+        assert.equal(serialized.includes(inputPath), false);
+        assert.equal(serialized.includes('private-camera-roll.MOV'), false);
+        assert.equal(serialized.toLowerCase().includes('ffprobe'), false);
         return true;
       },
     );
