@@ -23,9 +23,10 @@ test('first-run append creates a missing media-index through the serialized boun
   const { dir, file } = await fixture();
   try {
     const repo = createMediaIndexMutationRepository<Row>(file);
-    await repo.append({ workspaceId: 'w1', key: 'a', filename: 'a.jpg' });
+    const appended = await repo.append({ workspaceId: 'w1', key: 'a', filename: 'a.jpg' });
     const rows = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
     assert.deepEqual(rows, [{ workspaceId: 'w1', key: 'a', filename: 'a.jpg' }]);
+    assert.deepEqual(appended, rows[0]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -58,8 +59,10 @@ test('identical media keys remain workspace isolated for patch and remove', asyn
     const repo = createMediaIndexMutationRepository<Row>(file);
     await repo.append({ workspaceId: 'w1', key: 'same', filename: 'one.jpg' });
     await repo.append({ workspaceId: 'w2', key: 'same', filename: 'two.jpg' });
-    await repo.patch('w1', 'same', { cloudState: 'ERROR' });
+    const patched = await repo.patch('w1', 'same', { cloudState: 'ERROR' });
     const removed = await repo.remove('w2', 'same');
+    assert.equal(patched?.workspaceId, 'w1');
+    assert.equal(patched?.cloudState, 'ERROR');
     assert.equal(removed?.filename, 'two.jpg');
     const rows = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
     assert.equal(rows.length, 1);
@@ -87,6 +90,22 @@ test('patch cannot move a row across workspace or media identity', async () => {
     assert.equal(rows[0]?.workspaceId, 'w1');
     assert.equal(rows[0]?.key, 'a');
     assert.equal(rows[0]?.filename, 'renamed.jpg');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('patch and remove return null when exact media identity does not exist', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const repo = createMediaIndexMutationRepository<Row>(file);
+    await repo.append({ workspaceId: 'w1', key: 'a', filename: 'a.jpg' });
+    assert.equal(await repo.patch('w1', 'missing', { cloudState: 'ERROR' }), null);
+    assert.equal(await repo.patch('w2', 'a', { cloudState: 'ERROR' }), null);
+    assert.equal(await repo.remove('w1', 'missing'), null);
+    assert.equal(await repo.remove('w2', 'a'), null);
+    const rows = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
+    assert.deepEqual(rows, [{ workspaceId: 'w1', key: 'a', filename: 'a.jpg' }]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
