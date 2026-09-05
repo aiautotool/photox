@@ -140,6 +140,23 @@ export class GooglePhotosMigrationRunner {
         return (await this.ledger.updateJob(jobId, { state: 'paused', transferRateBps: undefined, etaSeconds: undefined, updatedAt: this.now().toISOString() })) ?? job;
       }
       if (item.state === 'completed' || item.state === 'cancelled') continue;
+
+      // A durable target ID means the destination already accepted this item. This can
+      // happen when the process exits while verification is running. Never re-upload
+      // an append-only Google Photos destination merely because the process restarted;
+      // resume from verification and clear any resumable checkpoint only after success.
+      if (item.targetId) {
+        try {
+          const verifying = (await this.ledger.updateItem(item.id, { state: 'verifying', error: undefined, updatedAt: this.now().toISOString() })) ?? item;
+          if (this.adapter.verify) await this.adapter.verify({ job, item: verifying, targetId: item.targetId, signal });
+          await this.ledger.updateItem(item.id, { state: 'completed', targetId: item.targetId, targetUrl: item.targetUrl, error: undefined, updatedAt: this.now().toISOString() });
+          await this.ledger.setTransferCheckpoint(item.id, null);
+        } catch (error) {
+          await this.ledger.updateItem(item.id, { state: 'failed', error: error instanceof Error ? error.message : String(error), updatedAt: this.now().toISOString() });
+        }
+        continue;
+      }
+
       const source = sources.get(item.sourceMediaId);
       if (!source) {
         await this.ledger.updateItem(item.id, { state: 'failed', attempts: item.attempts + 1, error: 'PICKER_SOURCE_EXPIRED_OR_MISSING', updatedAt: this.now().toISOString() });
