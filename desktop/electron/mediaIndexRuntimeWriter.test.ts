@@ -145,6 +145,62 @@ test('syncReplicas keeps only the newest transient marker from a caller snapshot
   }
 });
 
+test('deletion tombstone blocks video and replica writers until its owner clears it', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const writer = createMediaIndexRuntimeWriter<Row>(file);
+    await writer.ingest({
+      workspaceId: 'w1',
+      key: 'video',
+      filename: 'clip.mov',
+      videoProcessing: 'processing',
+      cloudReplicas: [{ state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'a' }],
+    });
+    const claimed = await writer.claimDeletion('w1', 'video', 'delete-1', '2026-09-06T00:00:00.000Z');
+    assert.equal(claimed?.deletion?.claimId, 'delete-1');
+
+    await Promise.all([
+      writer.patchVideo('w1', 'video', { videoProcessing: 'ready', duration: 42 }),
+      writer.upsertReplica('w1', 'video', { state: 'VERIFIED', accountId: 'drive-b', remoteFileId: 'b' }),
+      writer.syncReplicas('w1', 'video', [{ state: 'ERROR', accountId: 'drive-a', remoteFileId: 'a' }]),
+    ]);
+
+    let [row] = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
+    assert.equal(row.deletion?.claimId, 'delete-1');
+    assert.equal(row.videoProcessing, 'processing');
+    assert.equal(row.duration, undefined);
+    assert.equal(row.cloudReplicas?.length, 1);
+    assert.equal(row.cloudReplicas?.[0]?.state, 'VERIFIED');
+
+    const wrongClear = await writer.clearDeletion('w1', 'video', 'delete-2');
+    assert.equal(wrongClear?.deletion?.claimId, 'delete-1');
+    const cleared = await writer.clearDeletion('w1', 'video', 'delete-1');
+    assert.equal(cleared?.deletion, undefined);
+    await writer.patchVideo('w1', 'video', { videoProcessing: 'ready', duration: 42 });
+    [row] = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
+    assert.equal(row.videoProcessing, 'ready');
+    assert.equal(row.duration, 42);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('only the deletion claim owner can finalize catalog removal', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const writer = createMediaIndexRuntimeWriter<Row>(file);
+    await writer.ingest({ workspaceId: 'w1', key: 'photo', filename: 'photo.jpg' });
+    await writer.claimDeletion('w1', 'photo', 'owner-claim');
+    assert.equal(await writer.removeClaimed('w1', 'photo', 'other-claim'), null);
+    assert.equal((JSON.parse(await fs.readFile(file, 'utf8')) as Row[]).length, 1);
+    const removed = await writer.removeClaimed('w1', 'photo', 'owner-claim');
+    assert.equal(removed?.filename, 'photo.jpg');
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), []);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('remove stays tenant isolated when identical keys exist in two workspaces', async () => {
   const { dir, file } = await fixture();
   try {
