@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const __dirname=path.dirname(fileURLToPath(import.meta.url));
 const devArgPrefix='--photox-dev-server=';
 const devArg=process.argv.find(arg=>arg.startsWith(devArgPrefix));
 
