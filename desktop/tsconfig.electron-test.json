@@ -34,6 +34,8 @@
     "electron/mediaIndexReplicaMerge.test.ts",
     "electron/mediaProcessing.ts",
     "electron/mediaProcessing.test.ts",
+    "electron/mediaRepairCoordinator.ts",
+    "electron/mediaRepairCoordinator.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
     "electron/webEdgeProxyHardening.test.ts",
     "electron/webEdgeServer.ts",
