@@ -38,6 +38,32 @@ export interface DesktopGooglePhotosMigrationOptions {
 function stableAccountId(email: string) { return `photos-${crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 20)}`; }
 function accountFilename(workspaceId: string, id: string) { const scope=crypto.createHash('sha256').update(workspaceId).digest('hex').slice(0,16); return `${scope}--${id}.json`; }
 
+export async function verifyDriveMigrationCheckpoint(input: {
+  uploadToDrive: DriveMigrationDestination;
+  accountId: string;
+  source: PickedMediaItem;
+  response: Response;
+  checkpoint: MigrationTransferCheckpoint | null;
+  targetId: string;
+  signal?: AbortSignal;
+  onCheckpoint?: (checkpoint: MigrationTransferCheckpoint | null) => Promise<void>;
+}) {
+  const checkpoint = input.checkpoint;
+  if (!checkpoint || checkpoint.kind !== 'google_drive_resumable_v1' || checkpoint.accountId !== input.accountId || checkpoint.targetId !== input.targetId) {
+    throw new Error('GOOGLE_DRIVE_MIGRATION_VERIFICATION_CHECKPOINT_MISSING');
+  }
+  const verified = await input.uploadToDrive({
+    accountId: input.accountId,
+    source: input.source,
+    response: input.response,
+    signal: input.signal,
+    checkpoint,
+    onCheckpoint: input.onCheckpoint,
+  });
+  if (!verified.targetId || verified.targetId !== input.targetId) throw new Error('GOOGLE_DRIVE_MIGRATION_TARGET_ID_MISMATCH');
+  return verified;
+}
+
 export class DesktopGooglePhotosMigrationService {
   private readonly oauthPort: number;
   private readonly paused = new Set<string>();
@@ -154,10 +180,26 @@ export class DesktopGooglePhotosMigrationService {
         if (created?.status?.code && created.status.code !== 0) throw new Error(created.status.message || `GOOGLE_PHOTOS_CREATE_${created.status.code}`);
         const targetId = created?.mediaItem?.id; if (!targetId) throw new Error('GOOGLE_PHOTOS_DESTINATION_ID_MISSING'); return { targetId, targetUrl: created.mediaItem?.productUrl };
       },
-      verify: async ({ job: currentJob, targetId }) => { if (!targetId) throw new Error('MIGRATION_DESTINATION_NOT_VERIFIED'); if (currentJob.target === 'google_photos') return; },
+      verify: async ({ job: currentJob, item, targetId, signal }) => {
+        if (!targetId) throw new Error('MIGRATION_DESTINATION_NOT_VERIFIED');
+        if (currentJob.target === 'google_photos') return;
+        const source = sources.get(item.sourceMediaId); if (!source) throw new Error('MIGRATION_SOURCE_SPOOL_MISSING');
+        const checkpoint = await this.options.ledger.getTransferCheckpoint(item.id);
+        const response = await this.spool.response(currentJob.id, source.id);
+        await verifyDriveMigrationCheckpoint({
+          uploadToDrive: this.options.uploadToDrive,
+          accountId: currentJob.targetAccountId,
+          source,
+          response,
+          checkpoint,
+          targetId,
+          signal,
+          onCheckpoint: async nextCheckpoint => { await this.options.ledger.setTransferCheckpoint(item.id, nextCheckpoint); },
+        });
+      },
     });
     const result = await runner.run(jobId, sources, { workspaceId: this.options.workspaceId, shouldPause: () => this.paused.has(jobId), shouldCancel: () => this.cancelled.has(jobId) }); await this.emit(jobId);
-    if (result.state === 'completed') await this.spool.remove(jobId);
+    if (result.state === 'completed' || result.state === 'cancelled') await this.spool.remove(jobId);
     return result;
   }
 
