@@ -34,6 +34,8 @@
     "electron/mediaIndexMutationRepository.test.ts",
     "electron/mediaIndexReplicaMerge.ts",
     "electron/mediaIndexReplicaMerge.test.ts",
+    "electron/mediaIndexRuntimeWriter.ts",
+    "electron/mediaIndexRuntimeWriter.test.ts",
     "electron/mediaIndexSerializedStore.ts",
     "electron/mediaIndexSerializedStore.test.ts",
     "electron/mediaProcessing.ts",
