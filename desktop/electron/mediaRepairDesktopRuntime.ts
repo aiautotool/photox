@@ -315,15 +315,18 @@ const coordinator = new MediaRepairCoordinator({
   },
 });
 
+export async function repairMediaForPrincipal(
+  principal: MediaRepairPrincipal,
+  key: string,
+  source: 'desktop' | 'web',
+  appendAudit?: (principal: MediaRepairPrincipal, event: MediaRepairAuditEvent) => Promise<void> | void,
+) {
+  return repairMediaFromPrincipal({ principal, key, coordinator, source, appendAudit });
+}
+
 export async function repairMediaForTrustedDesktop(key: string) {
   const principal = await trustedDesktopPrincipal();
-  return repairMediaFromPrincipal({
-    principal,
-    key,
-    coordinator,
-    source: 'desktop',
-    appendAudit: appendDesktopAudit,
-  });
+  return repairMediaForPrincipal(principal, key, 'desktop', appendDesktopAudit);
 }
 
 export async function registerMediaRepairDesktopRuntime() {
