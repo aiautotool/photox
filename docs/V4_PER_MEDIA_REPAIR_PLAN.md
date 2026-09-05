@@ -21,11 +21,13 @@ Replace the shared Desktop/Web Problems-page Repair action that currently starts
 - Exact Desktop/Web repair reuses the authoritative Drive allocation projection (`driveRuntimeAllocation` + `chooseAccount`), so account eligibility continues to honor authoritative provider quota, actual remaining bytes, safety reserve and the persisted per-account allocation ratio rather than any fixed capacity.
 - Exact repair requires a valid source SHA-256, writes it as the Drive `photosyncSha256` app property, then reads the remote object back and verifies remote size + SHA-256 metadata before marking the replacement replica `VERIFIED`.
 - Exact repair media-index mutations now run through `mediaIndexSerializedStore.ts`, which serializes migrated writers in-process and retains compare-before-rename retry against legacy writers. Regression coverage proves concurrent serialized writers preserve both updates, legacy external changes are merged on retry, and malformed index shape fails closed.
+- Shared Desktop/Web Problems UI now routes each row-level Repair action through `repairMedia(problem.key)` only. The existing `Sửa tất cả có thể` button intentionally remains mapped to the explicit workspace-wide repair sweep.
+- Renderer repair delegation is isolated behind `repairBackupProblem`, whose bridge contract exposes only `repairMedia`. Regression coverage proves the selected media key is normalized and forwarded exactly once and an empty key is rejected before any bridge call, preventing fallback to `retryCloud()`.
 
 ## Next integration batch
-1. Replace the Problems-page row Repair button with `bridge.repairMedia(problem.key)`. Keep `Sửa tất cả có thể` mapped to the explicit workspace sweep.
-2. Add renderer regression proving row Repair invokes only the selected key and does not fall back to `retryCloud()`.
-3. Migrate replica verification, ingest and video-processing media-index mutations to the same serialized boundary, then move the durable catalog to SQLite transactions once all call sites share a single persistence contract.
+1. Migrate replica verification, ingest and video-processing media-index mutations to the same serialized boundary so all high-frequency writers share one persistence contract.
+2. Add focused concurrency regressions for verifier-versus-ingest and verifier-versus-video-processing updates.
+3. Once all JSON catalog writers share the boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
 
 ## Done criteria
-Per-media repair is complete only when Electron IPC and Web HTTP both call the same coordinator/transport contract, the shared Desktop/Web React UI uses that exact-media method, all regressions are CI-gated, repository tests/typecheck/build are green, and no existing workspace-wide control is mislabeled as exact-media repair.
+Per-media repair is complete when Electron IPC and Web HTTP call the same coordinator/transport contract, the shared Desktop/Web React UI uses that exact-media method, all regressions are CI-gated, repository tests/typecheck/build are green, and no existing workspace-wide control is mislabeled as exact-media repair.
