@@ -4,6 +4,8 @@
   "version": "0.6.0",
   "packageManager": "npm@11",
   "overrides": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "react-native-reanimated": "4.5.0",
     "react-native-worklets": "0.10.4"
   },
@@ -26,6 +28,8 @@
     "typecheck": "npm run typecheck:sdk && npm --workspace @photosync/mobile run typecheck && npm --workspace @photosync/desktop run typecheck && npm --workspace @photosync/relay run typecheck && npm --workspace @photosync/core run typecheck && npm --workspace @photosync/google-drive run typecheck && npm --workspace @photosync/google-photos run typecheck"
   },
   "devDependencies": {
-    "patch-package": "^8.0.1"
+    "patch-package": "^8.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
   }
 }

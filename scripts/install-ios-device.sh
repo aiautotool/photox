@@ -15,17 +15,16 @@ xcrun xctrace list devices 2>/dev/null | sed -n '/== Devices ==/,/== Simulators 
 
 cd "$ROOT_DIR/mobile"
 
-if [[ ! -d ios ]]; then
-  log "Native iOS project not found; running Expo prebuild..."
-  npx expo prebuild --platform ios --no-install
-fi
+log "Syncing the native iOS project and installing Pods..."
+npx expo prebuild --platform ios --no-install
+npx pod-install ios
 
 if [[ -n "$DEVICE" ]]; then
-  log "Building and installing PhotoSync on iOS device: $DEVICE"
-  npx expo run:ios --device "$DEVICE" --no-install
+  log "Building and installing standalone PhotoSync on iOS device: $DEVICE"
+  npx expo run:ios --device "$DEVICE" --no-install --configuration Release
 else
   log "No IOS_DEVICE supplied; Expo will show the connected-device picker."
-  npx expo run:ios --device --no-install
+  npx expo run:ios --device --no-install --configuration Release
 fi
 
 log "Install command completed. If iOS asks, enable Developer Mode and trust the developer certificate on the device."
