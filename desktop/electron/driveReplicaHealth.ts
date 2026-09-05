@@ -76,7 +76,7 @@ export async function probeDriveReplica(
   }
 }
 
-export function applyDriveReplicaProbe<T extends DriveReplicaHealthRecord>(replica: T, result: DriveReplicaProbeResult): T {
+export function applyDriveReplicaProbe<T extends DriveReplicaHealthRecord>(replica: T, result: DriveReplicaProbeResult): T & DriveReplicaHealthRecord {
   if (result.kind === 'healthy') {
     return {
       ...replica,
