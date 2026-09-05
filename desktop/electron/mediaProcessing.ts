@@ -31,19 +31,24 @@ const ERROR_CODE_BY_PHASE: Record<VideoProcessingPhase, VideoProcessingErrorCode
 /**
  * Stable, renderer-safe processing error. Raw ffmpeg/ffprobe stderr can contain
  * local filesystem paths and command details, so callers should persist only
- * this message/code and keep the original cause server-side for diagnostics.
+ * this message/code. The original cause stays non-enumerable in the main/server
+ * process for diagnostics and cannot leak through ordinary JSON serialization.
  */
 export class VideoProcessingError extends Error {
   readonly code: VideoProcessingErrorCode;
   readonly phase: VideoProcessingPhase;
-  readonly originalCause: unknown;
 
   constructor(phase: VideoProcessingPhase, cause: unknown) {
     super(`Video processing failed during ${phase}.`);
     this.name = 'VideoProcessingError';
     this.code = ERROR_CODE_BY_PHASE[phase];
     this.phase = phase;
-    this.originalCause = cause;
+    Object.defineProperty(this, 'cause', {
+      value: cause,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
   }
 }
 
