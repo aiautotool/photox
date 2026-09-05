@@ -34,6 +34,8 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Web runtime validation now fails startup for malformed public base URLs, invalid rate limits, and invalid trusted-proxy addresses instead of silently weakening deployment controls.
 - Web reconnect logic refreshes credentials and retries transient refresh/network failures with bounded backoff.
 - Workspace, Subscription and Google Photos Migration surfaces now use the approved light card-based visual system from the V4 design reference: larger readable hierarchy, clearer quota/progress presentation, consistent blue primary actions and responsive layouts. Existing authoritative mutation/migration logic is preserved; no mock controls were introduced.
+- Desktop renderer startup is now a release-gated behavior rather than being inferred from `vite build`. CI launches the built renderer under Electron, verifies `#root`, `.app-shell`, visible UI text and the preload `DesktopBridge`, then packages the app with electron-builder and launches that packaged binary under Xvfb with the same smoke contract. A blank packaged window therefore fails CI.
+- Renderer and preload startup failures are no longer silent white windows: the main process records `did-fail-load`, preload errors, renderer console errors and renderer-process termination, while the React root has an error boundary that renders a visible diagnostic screen when application rendering throws.
 
 ### Tenant isolation and reliability
 - Workspace scoping has been added across media/cloud replica records, Google Drive ownership, Telegram contracts, durable jobs, video/derived media, device/session state and subscription state.
@@ -77,8 +79,3 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Google Drive allocation policy persistence must preserve OAuth tokens server-side; renderer/Web policy payloads must never contain token material.
 - Drive allocation mutation payloads may not choose workspace/account identity; those bindings must come from the authenticated route/IPC target.
 - Forwarded proxy headers are security-sensitive input and are accepted only from explicitly configured immediate proxy addresses; hostnames and malformed proxy entries fail configuration validation.
-
-## Build / verification policy
-Every V4 code batch must run repository tests, TypeScript typecheck, impacted production builds and repository CI. A platform build that cannot run because signing/tooling is unavailable is reported as **NOT VERIFIED**, never PASS.
-
-See `V4_BUILD_INTEGRATION_GUIDE.md` for current setup and integration requirements and `V4_UI_SPEC.md` for the UI implementation contract.
