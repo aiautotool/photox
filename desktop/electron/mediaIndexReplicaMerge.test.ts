@@ -62,6 +62,28 @@ test('replica health patch never resurrects a replica removed concurrently', () 
   assert.deepEqual(result.rows, latest);
 });
 
+test('replica health patch is skipped when media has an active deletion tombstone', () => {
+  const latest = [{
+    workspaceId: 'ws-1',
+    key: 'media-1',
+    deletion: { state: 'deleting' as const, claimId: 'delete-1', startedAt: '2026-09-06T00:00:00.000Z' },
+    cloudReplicas: [{ state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'file-a' }],
+    cloud: { state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'file-a' },
+  }];
+
+  const result = applyReplicaHealthPatches(latest, [{
+    workspaceId: 'ws-1',
+    key: 'media-1',
+    accountId: 'drive-a',
+    remoteFileId: 'file-a',
+    replica: { state: 'ERROR', accountId: 'drive-a', remoteFileId: 'file-a', message: 'late verifier result' },
+  }]);
+
+  assert.equal(result.applied, 0);
+  assert.equal(result.skipped, 1);
+  assert.deepEqual(result.rows, latest);
+});
+
 test('workspace identity prevents a verifier patch from crossing tenants', () => {
   const latest = [
     { workspaceId: 'ws-a', key: 'same-key', cloudReplicas: [{ state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'file-a' }] },
