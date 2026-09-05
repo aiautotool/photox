@@ -51,6 +51,60 @@ test('mutation retries against an external legacy writer and merges the latest s
   }
 });
 
+test('replica verifier mutation preserves a concurrent legacy ingest row', async () => {
+  const initial = [{ workspaceId: 'w1', key: 'existing', filename: 'a.jpg', cloudReplicas: [{ accountId: 'drive-a', state: 'VERIFIED' }] }];
+  const { dir, file } = await fixture(initial);
+  try {
+    let attempts = 0;
+    await mutateSerializedJsonArray<Record<string, unknown>>(file, async rows => {
+      attempts += 1;
+      if (attempts === 1) {
+        await fs.writeFile(file, JSON.stringify([
+          ...initial,
+          { workspaceId: 'w1', key: 'new-ingest', filename: 'new.jpg', videoProcessing: undefined },
+        ], null, 2), 'utf8');
+      }
+      return rows.map(row => row.key === 'existing' ? {
+        ...row,
+        cloudReplicas: [{ accountId: 'drive-a', state: 'ERROR', message: 'DRIVE_REPLICA_MISSING' }],
+      } : row);
+    }, { tempLabel: 'replica-health' });
+    const rows = JSON.parse(await fs.readFile(file, 'utf8')) as Array<Record<string, any>>;
+    assert.ok(attempts >= 2);
+    assert.equal(rows.find(row => row.key === 'existing')?.cloudReplicas?.[0]?.state, 'ERROR');
+    assert.equal(rows.find(row => row.key === 'new-ingest')?.filename, 'new.jpg');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replica verifier mutation preserves concurrent legacy video-processing metadata', async () => {
+  const initial = [{ workspaceId: 'w1', key: 'video', filename: 'clip.mov', videoProcessing: 'processing', cloudReplicas: [{ accountId: 'drive-a', state: 'VERIFIED' }] }];
+  const { dir, file } = await fixture(initial);
+  try {
+    let attempts = 0;
+    await mutateSerializedJsonArray<Record<string, unknown>>(file, async rows => {
+      attempts += 1;
+      if (attempts === 1) {
+        await fs.writeFile(file, JSON.stringify([{ ...initial[0], videoProcessing: 'ready', thumbnailPath: '/cache/thumb.jpg', playbackPath: '/cache/playback.mp4', duration: 12.5 }], null, 2), 'utf8');
+      }
+      return rows.map(row => row.key === 'video' ? {
+        ...row,
+        cloudReplicas: [{ accountId: 'drive-a', state: 'VERIFIED', remoteCheckedAt: '2026-09-05T00:00:00.000Z' }],
+      } : row);
+    }, { tempLabel: 'replica-health' });
+    const [row] = JSON.parse(await fs.readFile(file, 'utf8')) as Array<Record<string, any>>;
+    assert.ok(attempts >= 2);
+    assert.equal(row.videoProcessing, 'ready');
+    assert.equal(row.thumbnailPath, '/cache/thumb.jpg');
+    assert.equal(row.playbackPath, '/cache/playback.mp4');
+    assert.equal(row.duration, 12.5);
+    assert.equal(row.cloudReplicas?.[0]?.remoteCheckedAt, '2026-09-05T00:00:00.000Z');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('invalid media-index JSON shape fails closed', async () => {
   const { dir, file } = await fixture([]);
   try {
