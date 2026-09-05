@@ -15,12 +15,17 @@ export type DriveReplicaHealthRecord = {
 export type DriveReplicaProbeResult =
   | { kind: 'healthy'; checkedAt: string; remoteMd5?: string }
   | { kind: 'missing'; checkedAt: string; message: 'DRIVE_REPLICA_MISSING' }
-  | { kind: 'mismatch'; checkedAt: string; message: 'DRIVE_REPLICA_SIZE_MISMATCH' | 'DRIVE_REPLICA_CHECKSUM_MISMATCH' | 'DRIVE_REPLICA_ID_MISMATCH' }
+  | { kind: 'mismatch'; checkedAt: string; message: 'DRIVE_REPLICA_SIZE_MISMATCH' | 'DRIVE_REPLICA_CHECKSUM_MISMATCH' | 'DRIVE_REPLICA_SOURCE_HASH_MISMATCH' | 'DRIVE_REPLICA_ID_MISMATCH' }
   | { kind: 'deferred'; checkedAt: string; message: 'DRIVE_REPLICA_VERIFICATION_DEFERRED' };
 
 function normalizedMd5(value?: string) {
   const normalized = value?.trim().toLowerCase();
   return normalized && /^[a-f0-9]{32}$/.test(normalized) ? normalized : undefined;
+}
+
+function normalizedSha256(value?: string) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && /^[a-f0-9]{64}$/.test(normalized) ? normalized : undefined;
 }
 
 function isDefinitiveMissing(error: unknown) {
@@ -39,6 +44,7 @@ export async function probeDriveReplica(
     remoteFileId: string;
     expectedSizeBytes: number;
     storedMd5?: string;
+    expectedSha256?: string;
     fetchRemote: (remoteFileId: string) => Promise<DriveFile>;
     now?: () => Date;
   },
@@ -52,6 +58,11 @@ export async function probeDriveReplica(
     const remoteSize = Number(remote.size);
     if (!Number.isSafeInteger(remoteSize) || remoteSize < 0 || remoteSize !== input.expectedSizeBytes) {
       return { kind: 'mismatch', checkedAt, message: 'DRIVE_REPLICA_SIZE_MISMATCH' };
+    }
+    const expectedSha256 = normalizedSha256(input.expectedSha256);
+    const remoteSourceSha256 = normalizedSha256(remote.appProperties?.photosyncSha256);
+    if (expectedSha256 && remoteSourceSha256 && expectedSha256 !== remoteSourceSha256) {
+      return { kind: 'mismatch', checkedAt, message: 'DRIVE_REPLICA_SOURCE_HASH_MISMATCH' };
     }
     const expectedMd5 = normalizedMd5(input.storedMd5);
     const remoteMd5 = normalizedMd5(remote.md5Checksum);
