@@ -56,6 +56,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Persisted Google Drive replicas are now periodically re-verified against authoritative remote metadata. Missing objects, size mismatch, source SHA-256 app-property mismatch, or MD5 mismatch are downgraded so the existing repair sweep replenishes under-replicated assets; transient provider failures retain last-known VERIFIED state and are retried instead of causing duplicate repair uploads.
 - Remote verification is workspace/account scoped, records `remoteCheckedAt` and the provider MD5 baseline, defaults to a 15-minute cadence, and is configurable with `PHOTOX_REPLICA_VERIFY_INTERVAL_MS` (minimum one minute).
 - Replica-health persistence now merges only the targeted workspace/key/replica fields onto the latest media-index snapshot and skips replicas removed concurrently, with optimistic compare-before-rename retries to avoid replacing newer ingestion/video/repair metadata with a stale verifier snapshot.
+- A per-media repair coordinator now provides exact workspace/key selection, local-original validation, unique verified-account target checks, and in-flight de-duplication. It is regression-tested and CI-gated; IPC/Web/renderer wiring remains the next integration step before replacing the current workspace-wide Repair action.
 
 ## Backup UI and cloud management restoration
 - Detailed mobile upload progress restored using real native upload byte callbacks: current filename, uploaded bytes, total bytes, remaining bytes and queue count.
@@ -142,7 +143,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Merge background verifier mutations onto the latest media-index row/replica snapshot instead of replacing a stale whole-index snapshot; tenant/replica identity regressions cover preservation of concurrent metadata and non-resurrection of removed replicas.
 - [ ] Migrate all media-index writers to one serialized persistence layer or SQLite transaction boundary; optimistic verifier retries reduce the current race but do not replace a single-writer/transactional store.
 - [x] Under-replicated/failed/missing UI drill-down with per-media replica/account/provider details and guarded Repair action backed by the existing real repair sweep.
-- [ ] Add per-media repair scheduling if Repair should enqueue only the selected asset; the current action intentionally invokes the workspace repair sweep and may repair other eligible media at the same time.
+- [ ] Wire the new per-media repair coordinator through Electron IPC, authenticated Web role/CSRF/audit, shared `DesktopBridge`, and the existing Repair button; coordinator selection/dedupe/eligibility logic is implemented and CI-gated, but the UI intentionally still uses workspace-wide repair until this wiring is complete.
 - [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
 ## CI notes
