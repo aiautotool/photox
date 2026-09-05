@@ -55,6 +55,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Backup health calculation and repair sweep structure.
 - Persisted Google Drive replicas are now periodically re-verified against authoritative remote metadata. Missing objects, size mismatch, source SHA-256 app-property mismatch, or MD5 mismatch are downgraded so the existing repair sweep replenishes under-replicated assets; transient provider failures retain last-known VERIFIED state and are retried instead of causing duplicate repair uploads.
 - Remote verification is workspace/account scoped, records `remoteCheckedAt` and the provider MD5 baseline, defaults to a 15-minute cadence, and is configurable with `PHOTOX_REPLICA_VERIFY_INTERVAL_MS` (minimum one minute).
+- Replica-health persistence now merges only the targeted workspace/key/replica fields onto the latest media-index snapshot and skips replicas removed concurrently, with optimistic compare-before-rename retries to avoid replacing newer ingestion/video/repair metadata with a stale verifier snapshot.
 
 ## Backup UI and cloud management restoration
 - Detailed mobile upload progress restored using real native upload byte callbacks: current filename, uploaded bytes, total bytes, remaining bytes and queue count.
@@ -137,6 +138,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [ ] Persist upload chunks/jobs and resume from acknowledged byte offsets after restart/network interruption.
 - [ ] Network-change/Wi-Fi/charging policy enforcement and tests.
 - [x] Periodically verify persisted Google Drive replica existence and integrity against authoritative remote metadata before allowing stale VERIFIED state to remain trusted indefinitely; definitive missing/size/SHA-256/MD5 mismatches are downgraded for repair while transient outages defer without duplicating uploads.
+- [x] Merge background verifier mutations onto the latest media-index row/replica snapshot instead of replacing a stale whole-index snapshot; tenant/replica identity regressions cover preservation of concurrent metadata and non-resurrection of removed replicas.
+- [ ] Migrate all media-index writers to one serialized persistence layer or SQLite transaction boundary; optimistic verifier retries reduce the current race but do not replace a single-writer/transactional store.
 - [ ] Under-replicated/failed/missing UI drill-down and repair actions.
 - [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
