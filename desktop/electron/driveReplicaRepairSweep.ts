@@ -7,11 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { OAuth2Client } from 'google-auth-library';
 import { getDriveFile } from '@photosync/google-drive';
 import { applyDriveReplicaProbe, probeDriveReplica, replicaNeedsRemoteVerification } from './driveReplicaHealth.js';
+import { applyReplicaHealthPatches, type ReplicaHealthPatch } from './mediaIndexReplicaMerge.js';
 import type { SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 
 const LEGACY_WORKSPACE_ID = process.env.PHOTOX_WORKSPACE_ID || 'legacy-personal';
 const DEFAULT_VERIFY_INTERVAL_MS = 15 * 60_000;
 const MIN_VERIFY_INTERVAL_MS = 60_000;
+const INDEX_WRITE_RETRIES = 5;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type Replica = {
@@ -73,11 +75,32 @@ async function loadAccounts(): Promise<SavedDriveAccountRecord[]> {
   return result;
 }
 
-async function writeIndexAtomic(rows: Row[]) {
+/**
+ * The verifier can run while ingestion/video processing/repair mutate the same
+ * JSON index in the main process. Re-read the latest snapshot and merge only
+ * replica-health fields, then use an optimistic compare-before-rename retry so
+ * a stale verifier snapshot does not replace newer media metadata wholesale.
+ */
+async function writeReplicaHealthPatches(patches: ReplicaHealthPatch[]) {
+  if (!patches.length) return;
   const target = indexFile();
-  const temp = `${target}.${process.pid}.${Date.now()}.replica-health.tmp`;
-  await fs.writeFile(temp, JSON.stringify(rows, null, 2), 'utf8');
-  await fs.rename(temp, target);
+  for (let attempt = 0; attempt < INDEX_WRITE_RETRIES; attempt += 1) {
+    const before = await fs.readFile(target, 'utf8');
+    const latest = (JSON.parse(before) as Row[]).map(row => ({ ...row, workspaceId: row.workspaceId || LEGACY_WORKSPACE_ID }));
+    const merged = applyReplicaHealthPatches(latest, patches);
+    if (!merged.applied) return;
+
+    const temp = `${target}.${process.pid}.${Date.now()}.${attempt}.replica-health.tmp`;
+    await fs.writeFile(temp, JSON.stringify(merged.rows, null, 2), 'utf8');
+    const current = await fs.readFile(target, 'utf8');
+    if (current !== before) {
+      await fs.rm(temp, { force: true });
+      continue;
+    }
+    await fs.rename(temp, target);
+    return;
+  }
+  throw new Error('MEDIA_INDEX_CONCURRENT_WRITE_RETRY_EXHAUSTED');
 }
 
 async function localMd5(filePath?: string) {
@@ -105,23 +128,27 @@ export async function runDriveReplicaRepairSweep(nowMs = Date.now()) {
   const accounts = await loadAccounts();
   const accountMap = new Map(accounts.map(account => [`${account.workspaceId || LEGACY_WORKSPACE_ID}:${account.id}`, account]));
   const interval = configuredIntervalMs();
+  const patches: ReplicaHealthPatch[] = [];
   let checked = 0;
   let degraded = 0;
   let deferred = 0;
-  let changed = false;
 
   for (const row of rows) {
     const workspaceId = row.workspaceId || LEGACY_WORKSPACE_ID;
     const replicas = row.cloudReplicas?.length ? row.cloudReplicas : row.cloud ? [row.cloud] : [];
-    for (let index = 0; index < replicas.length; index += 1) {
-      const replica = replicas[index];
+    for (const replica of replicas) {
       if (!replicaNeedsRemoteVerification(replica, nowMs, interval)) continue;
       checked += 1;
       const account = accountMap.get(`${workspaceId}:${replica.accountId}`);
       if (!account) {
-        replicas[index] = { ...replica, state: 'ERROR', remoteCheckedAt: new Date(nowMs).toISOString(), message: 'DRIVE_REPLICA_ACCOUNT_UNAVAILABLE' };
+        patches.push({
+          workspaceId,
+          key: row.key,
+          accountId: replica.accountId,
+          remoteFileId: replica.remoteFileId,
+          replica: { ...replica, state: 'ERROR', remoteCheckedAt: new Date(nowMs).toISOString(), message: 'DRIVE_REPLICA_ACCOUNT_UNAVAILABLE' },
+        });
         degraded += 1;
-        changed = true;
         continue;
       }
 
@@ -143,18 +170,19 @@ export async function runDriveReplicaRepairSweep(nowMs = Date.now()) {
         },
         now: () => new Date(nowMs),
       });
-      replicas[index] = applyDriveReplicaProbe(replica, result);
-      changed = true;
+      patches.push({
+        workspaceId,
+        key: row.key,
+        accountId: replica.accountId,
+        remoteFileId: replica.remoteFileId,
+        replica: applyDriveReplicaProbe(replica, result),
+      });
       if (result.kind === 'missing' || result.kind === 'mismatch') degraded += 1;
       if (result.kind === 'deferred') deferred += 1;
     }
-    if (replicas.length) {
-      row.cloudReplicas = replicas;
-      row.cloud = replicas[0];
-    }
   }
 
-  if (changed) await writeIndexAtomic(rows);
+  await writeReplicaHealthPatches(patches);
   return { checked, degraded, deferred };
 }
 
