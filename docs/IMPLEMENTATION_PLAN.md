@@ -77,7 +77,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Picker-selected source semantics only; no unrestricted full-library crawling claim.
 - [x] Google Photos append-only destination and Google Drive destination contracts exist with durable migration state/progress/retry semantics.
 - [x] Restart recovery for items with a durable destination `targetId` resumes verification only instead of retransferring; verification failures retain target identity/checkpoint for retry, preventing avoidable duplicate append-only uploads after a process restart.
-- [ ] Stage Picker-selected source media into a durable local migration spool before session expiry so queued/restarted transfers no longer depend on a live Picker session; never persist session-bound Picker base URLs.
+- [x] Picker-selected media is staged into a workspace/job-scoped durable local spool before the Picker session is deleted; queued/restarted transfers read the spool instead of session-bound Picker URLs.
+- [x] Migration spool records size + SHA-256, never persists Picker `baseUrl`, rejects duplicate/malformed manifest items, verifies bytes before transfer, cleans partial staging on failure, and is covered by Electron regression tests.
 - [ ] Complete live OAuth/provider E2E verification with real accounts.
 
 ### Desktop/Web shared product
