@@ -34,13 +34,16 @@ Replace the shared Desktop/Web Problems-page Repair action that currently starts
 - Production `main.ts` now routes `receiveMedia` catalog append through exact `mediaIndexWriter().ingest`, `processVideoRow` metadata updates through `patchVideo`, and legacy Drive upload persistence through authoritative `syncReplicas`. These paths no longer replace a whole workspace snapshot.
 - A CI-gated `mediaIndexRuntimeWiring.test.ts` prevents those three production call sites from regressing back to `rows.push()+writeIndex`, `updateIndexRow`, or whole-snapshot replica persistence.
 - Duplicate ingest races now fail closed at the exact catalog append boundary with `MEDIA_INDEX_DUPLICATE_KEY` and return the existing 208 `ALREADY_RECEIVED` protocol result instead of creating a duplicate catalog identity.
+- The runtime writer now has an authoritative deletion tombstone contract: `claimDeletion`, owner-only `clearDeletion`, and owner-only `removeClaimed`. While a tombstone is present, video metadata and Drive replica writers preserve the deleting row unchanged instead of racing new state into it. Regression coverage proves wrong claims cannot clear/finalize another delete and normal writers resume only after the owner clears its claim.
+- Replica-health merging now fails closed for rows with an active deletion tombstone. This covers the important in-flight verifier race: even if a verifier read the row before deletion started, its later health patch cannot recreate/change replica state after the tombstone committed.
 
 ## Next integration batch
-1. Design a deletion claim/tombstone boundary and migrate `deleteManagedMedia` without allowing a concurrent uploader/verifier to create a new cloud replica after remote deletion but before catalog removal. A plain `remove()` substitution is intentionally not considered safe enough.
-2. After deletion is serialized safely, remove or constrain legacy whole-workspace `writeIndex` / `updateIndexRow` to explicit migration-only use.
-3. Add deletion-vs-upload and deletion-vs-background-verification regressions, plus cleanup/recovery behavior for a partially completed remote deletion.
-4. Harden the remaining concurrent duplicate-ingest file-placement edge case so two simultaneous requests for one identity cannot overwrite or orphan a local target before the exact catalog append decides the winner.
-5. Once every active JSON catalog writer shares the exact serialized boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
+1. Wire `deleteManagedMedia` to claim the tombstone before any remote/local side effects, operate on the authoritative claimed row, clear only its own claim on partial failure, and finalize with `removeClaimed` after all provider/local cleanup succeeds.
+2. Serialize per-media Drive upload/repair side effects with deletion so an upload already in progress cannot leave an untracked remote object after deletion claims the asset. The tombstone already blocks late catalog persistence, but provider-side orphan cleanup still needs the operation gate.
+3. Add production deletion-vs-upload and deletion-vs-background-verification integration regressions, plus restart/recovery behavior for rows left tombstoned after a crash or partially completed remote deletion.
+4. After deletion is serialized safely, remove or constrain legacy whole-workspace `writeIndex` / `updateIndexRow` to explicit migration-only use.
+5. Harden the remaining concurrent duplicate-ingest file-placement edge case so two simultaneous requests for one identity cannot overwrite or orphan a local target before the exact catalog append decides the winner.
+6. Once every active JSON catalog writer shares the exact serialized boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
 
 ## Done criteria
 Per-media repair is complete when Electron IPC and Web HTTP call the same coordinator/transport contract, the shared Desktop/Web React UI uses that exact-media method, all regressions are CI-gated, repository tests/typecheck/build are green, and no existing workspace-wide control is mislabeled as exact-media repair.
