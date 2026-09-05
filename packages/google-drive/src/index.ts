@@ -36,7 +36,7 @@ export async function ensurePhotoSyncFolder(accessToken: string): Promise<string
 
 export async function listPhotoSyncFiles(accessToken: string, folderId: string): Promise<DriveFile[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-  const data = await googleFetch<{files: DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties)&pageSize=1000`, accessToken);
+  const data = await googleFetch<{files: DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties)`, accessToken);
   return data.files;
 }
 
@@ -63,7 +63,6 @@ export async function createResumableUploadSession(
   if (!location) throw new Error('Drive did not return a resumable upload session URI');
   return location;
 }
-
 
 export type DriveResumableUploadStatus =
   | { state: 'active'; committedBytes: number }
