@@ -7,17 +7,24 @@ export type RuntimeReplica = {
   [key: string]: unknown;
 };
 
+export type RuntimeDeletionClaim = {
+  state: 'deleting';
+  claimId: string;
+  startedAt: string;
+};
+
 export type RuntimeMediaIndexRow = MediaIndexIdentity & {
   videoProcessing?: string;
   videoError?: string;
   cloud?: RuntimeReplica;
   cloudReplicas?: RuntimeReplica[];
+  deletion?: RuntimeDeletionClaim;
   [key: string]: unknown;
 };
 
 export type RuntimeVideoPatch<T extends RuntimeMediaIndexRow> = Omit<
   Partial<T>,
-  'workspaceId' | 'key' | 'cloud' | 'cloudReplicas'
+  'workspaceId' | 'key' | 'cloud' | 'cloudReplicas' | 'deletion'
 >;
 
 export type MediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow> = {
@@ -25,6 +32,9 @@ export type MediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow> = {
   patchVideo(workspaceId: string, key: string, patch: RuntimeVideoPatch<T>): Promise<T | null>;
   upsertReplica(workspaceId: string, key: string, replica: RuntimeReplica): Promise<T | null>;
   syncReplicas(workspaceId: string, key: string, replicas: RuntimeReplica[]): Promise<T | null>;
+  claimDeletion(workspaceId: string, key: string, claimId: string, startedAt?: string): Promise<T | null>;
+  clearDeletion(workspaceId: string, key: string, claimId: string): Promise<T | null>;
+  removeClaimed(workspaceId: string, key: string, claimId: string): Promise<T | null>;
   remove(workspaceId: string, key: string): Promise<T | null>;
 };
 
@@ -74,6 +84,10 @@ function syncReplicaList(current: RuntimeReplica[], incoming: RuntimeReplica[]) 
  * Runtime-facing JSON catalog writer. The main process uses semantic operations
  * instead of whole-workspace read/replace snapshots, while the underlying
  * mutation repository keeps workspace + media identity serialized and retry-safe.
+ *
+ * A deletion claim is an authoritative tombstone. Once present, background video
+ * and replica writers are fail-closed for that row until the delete either commits
+ * or explicitly clears its own claim for retry/recovery.
  */
 export function createMediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow>(
   filePath: string,
@@ -81,8 +95,12 @@ export function createMediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow>(
   const repository = createMediaIndexMutationRepository<T>(filePath);
   return {
     ingest: row => repository.append(row),
-    patchVideo: (workspaceId, key, patch) => repository.patch(workspaceId, key, patch as Partial<T>),
+    patchVideo: (workspaceId, key, patch) => repository.patch(workspaceId, key, current => {
+      if (current.deletion) return current;
+      return { ...current, ...patch, workspaceId, key } as T;
+    }),
     upsertReplica: (workspaceId, key, replica) => repository.patch(workspaceId, key, current => {
+      if (current.deletion) return current;
       const cloudReplicas = upsertReplicaList(replicasOf(current), replica);
       return {
         ...current,
@@ -91,6 +109,7 @@ export function createMediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow>(
       } as T;
     }),
     syncReplicas: (workspaceId, key, replicas) => repository.patch(workspaceId, key, current => {
+      if (current.deletion) return current;
       const cloudReplicas = syncReplicaList(replicasOf(current), replicas);
       return {
         ...current,
@@ -98,6 +117,25 @@ export function createMediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow>(
         cloud: cloudReplicas[0],
       } as T;
     }),
+    claimDeletion: (workspaceId, key, claimId, startedAt = new Date().toISOString()) => repository.patch(workspaceId, key, current => {
+      if (current.deletion) return current;
+      return { ...current, deletion: { state: 'deleting', claimId, startedAt } } as T;
+    }),
+    clearDeletion: (workspaceId, key, claimId) => repository.patch(workspaceId, key, current => {
+      if (current.deletion?.claimId !== claimId) return current;
+      const next = { ...current } as T;
+      delete next.deletion;
+      return next;
+    }),
+    removeClaimed: async (workspaceId, key, claimId) => {
+      let ownsClaim = false;
+      const checked = await repository.patch(workspaceId, key, current => {
+        ownsClaim = current.deletion?.claimId === claimId;
+        return current;
+      });
+      if (!checked || !ownsClaim) return null;
+      return repository.remove(workspaceId, key);
+    },
     remove: (workspaceId, key) => repository.remove(workspaceId, key),
   };
 }
