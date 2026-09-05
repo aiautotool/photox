@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { OAuth2Client } from 'google-auth-library';
-import type { GooglePhotosMigrationLedger } from '@photosync/google-photos';
-import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
+import type { GooglePhotosMigrationLedger, MigrationTransferCheckpoint, PickedMediaItem } from '@photosync/google-photos';
+import { DesktopGooglePhotosMigrationService, verifyDriveMigrationCheckpoint } from './googlePhotosMigration.js';
 
 function fakeOauthClient(): OAuth2Client {
   const client: any = {
@@ -73,4 +73,66 @@ test('only the designated legacy workspace may claim unscoped Google Photos cred
   const migrated = migratedPayloads.find(payload => payload.id === 'legacy-account');
   assert.equal(migrated?.workspaceId, 'legacy-personal');
   assert.equal(migratedPayloads.some(payload => payload.id === 'foreign-account' && payload.workspaceId === 'legacy-personal'), false);
+});
+
+test('Drive migration verification reuses the durable completed checkpoint instead of starting a new upload', async () => {
+  const source: PickedMediaItem = { id: 'picker-media-1', mediaFile: { filename: 'IMG_0001.JPG', mimeType: 'image/jpeg', baseUrl: 'https://picker.invalid/session-bound' } };
+  const checkpoint: MigrationTransferCheckpoint = {
+    kind: 'google_drive_resumable_v1',
+    accountId: 'drive-account-1',
+    sessionUri: 'https://upload.invalid/session-1',
+    nextByte: 321,
+    totalBytes: 321,
+    targetId: 'drive-file-1',
+    updatedAt: '2026-09-05T04:00:00.000Z',
+  };
+  let calls = 0;
+  let receivedCheckpoint: MigrationTransferCheckpoint | undefined;
+  const result = await verifyDriveMigrationCheckpoint({
+    accountId: 'drive-account-1',
+    source,
+    response: new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-length': '321' } }),
+    checkpoint,
+    targetId: 'drive-file-1',
+    uploadToDrive: async input => {
+      calls += 1;
+      receivedCheckpoint = input.checkpoint;
+      assert.equal(input.accountId, 'drive-account-1');
+      assert.equal(input.source.id, 'picker-media-1');
+      return { targetId: input.checkpoint?.targetId, targetUrl: 'https://drive.invalid/file/drive-file-1' };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(receivedCheckpoint, checkpoint);
+  assert.equal(result.targetId, 'drive-file-1');
+});
+
+test('Drive migration verification fails closed on missing or mismatched durable target checkpoints', async () => {
+  const source: PickedMediaItem = { id: 'picker-media-2', mediaFile: { filename: 'IMG_0002.JPG', mimeType: 'image/jpeg', baseUrl: 'https://picker.invalid/session-bound' } };
+  const response = new Response(new Uint8Array([1]), { headers: { 'content-length': '1' } });
+  const unexpectedUpload = async () => { throw new Error('verification must reject before provider call'); };
+
+  await assert.rejects(() => verifyDriveMigrationCheckpoint({
+    accountId: 'drive-account-1', source, response, checkpoint: null, targetId: 'drive-file-2', uploadToDrive: unexpectedUpload,
+  }), /GOOGLE_DRIVE_MIGRATION_VERIFICATION_CHECKPOINT_MISSING/);
+
+  const mismatched: MigrationTransferCheckpoint = {
+    kind: 'google_drive_resumable_v1', accountId: 'drive-account-1', sessionUri: 'https://upload.invalid/session-2', nextByte: 1, totalBytes: 1,
+    targetId: 'different-drive-file', updatedAt: '2026-09-05T04:00:00.000Z',
+  };
+  await assert.rejects(() => verifyDriveMigrationCheckpoint({
+    accountId: 'drive-account-1', source, response, checkpoint: mismatched, targetId: 'drive-file-2', uploadToDrive: unexpectedUpload,
+  }), /GOOGLE_DRIVE_MIGRATION_VERIFICATION_CHECKPOINT_MISSING/);
+});
+
+test('Drive migration verification rejects provider target identity changes', async () => {
+  const source: PickedMediaItem = { id: 'picker-media-3', mediaFile: { filename: 'VID_0001.MOV', mimeType: 'video/quicktime', baseUrl: 'https://picker.invalid/session-bound' } };
+  const checkpoint: MigrationTransferCheckpoint = {
+    kind: 'google_drive_resumable_v1', accountId: 'drive-account-2', sessionUri: 'https://upload.invalid/session-3', nextByte: 10, totalBytes: 10,
+    targetId: 'drive-file-expected', updatedAt: '2026-09-05T04:00:00.000Z',
+  };
+  await assert.rejects(() => verifyDriveMigrationCheckpoint({
+    accountId: 'drive-account-2', source, response: new Response(new Uint8Array([1]), { headers: { 'content-length': '10' } }), checkpoint,
+    targetId: 'drive-file-expected', uploadToDrive: async () => ({ targetId: 'drive-file-other' }),
+  }), /GOOGLE_DRIVE_MIGRATION_TARGET_ID_MISMATCH/);
 });
