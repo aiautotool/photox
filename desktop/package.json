@@ -74,6 +74,9 @@
         "to": "cloudflared"
       }
     ],
+    "linux": {
+      "executableName": "photosync"
+    },
     "mac": {
       "category": "public.app-category.photography",
       "icon": "build/icon.icns",
