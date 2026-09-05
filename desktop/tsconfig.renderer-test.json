@@ -18,6 +18,8 @@
     "src/billingUi.ts",
     "src/billingUi.test.ts",
     "src/driveAllocationUi.ts",
-    "src/driveAllocationUi.test.ts"
+    "src/driveAllocationUi.test.ts",
+    "src/backupHealthUi.ts",
+    "src/backupHealthUi.test.ts"
   ]
 }
