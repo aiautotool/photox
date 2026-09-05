@@ -21,6 +21,7 @@ import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DesktopWorkspaceAuth } from './workspaceAuth.js';
 import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation, rendererDriveAccountInfo, type DriveRuntimeAllocation, type RendererDriveAccountInfo } from './driveRuntimeAllocation.js';
+import { createMediaIndexRuntimeWriter } from './mediaIndexRuntimeWriter.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -160,6 +161,7 @@ function stateDir(){ return path.join(app.getPath('userData'),'photosync-state')
 function incomingDir(){ return path.join(stateDir(),'incoming'); }
 function videoCacheDir(){ return path.join(stateDir(),'video-cache'); }
 function indexFile(){ return path.join(stateDir(),'media-index.json'); }
+function mediaIndexWriter(){ return createMediaIndexRuntimeWriter<MediaIndexRow>(indexFile()); }
 function pairFile(){ return path.join(stateDir(),'pair-code.txt'); }
 function driveAccountsDir(){ return path.join(stateDir(),'google-accounts'); }
 function googlePhotosAccountsDir(){ return path.join(stateDir(),'google-photos-accounts'); }
@@ -211,7 +213,7 @@ async function backupHealthSnapshot():Promise<BackupHealthSnapshot>{
   for(const row of rows){const video=isVideoFilename(row.filename);if(video)snapshot.videos+=1;else snapshot.photos+=1;const result=await evaluateRow(row);if(result.health==='safe')snapshot.safe+=1;else if(result.health==='at_risk')snapshot.atRisk+=1;else if(result.health==='critical')snapshot.critical+=1;else snapshot.unknown+=1;if(result.health!=='safe')snapshot.problems.push({key:row.key,filename:row.filename,health:result.health,reason:result.reasons.join(',')||'verification_required'})}
   return snapshot;
 }
-async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex(row.workspaceId);const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],workspaceId:row.workspaceId,cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all,row.workspaceId)}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:replicas})}
+async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){const updated=await mediaIndexWriter().syncReplicas(row.workspaceId,row.key,replicas);const authoritative=updated?.cloudReplicas as CloudDestination[]|undefined;if(authoritative){row.cloudReplicas=authoritative;row.cloud=authoritative[0]}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:authoritative||replicas})}
 function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').slice(0,220)||`media-${Date.now()}`; }
 
 async function hashFile(filePath:string){
@@ -233,14 +235,15 @@ async function streamNodeFile(req:IncomingMessage,res:ServerResponse,filePath:st
 
 async function processVideoRow(key:string,workspaceId=LEGACY_WORKSPACE_ID){
   const row=(await readIndex(workspaceId)).find(item=>item.key===key);if(!row||!isVideoFilename(row.filename))return;
-  await updateIndexRow(key,{videoProcessing:'processing',videoError:undefined},workspaceId);
+  const writer=mediaIndexWriter();
+  await writer.patchVideo(workspaceId,key,{videoProcessing:'processing',videoError:undefined});
   try{
     const processed=await processVideoFile(row.path,row.key,videoCacheDir());
-    await updateIndexRow(key,{...processed,mediaType:'video',mimeType:row.mimeType||mimeTypeForFilename(row.filename),videoProcessing:'ready',videoError:undefined},workspaceId);
+    await writer.patchVideo(workspaceId,key,{...processed,mediaType:'video',mimeType:row.mimeType||mimeTypeForFilename(row.filename),videoProcessing:'ready',videoError:undefined});
     notifyRenderer('photosync:media-processed',{key,...processed});
   }catch(error){
     const message=error instanceof Error?error.message:String(error);
-    await updateIndexRow(key,{videoProcessing:'error',videoError:message},workspaceId);
+    await writer.patchVideo(workspaceId,key,{videoProcessing:'error',videoError:message});
     console.error('Video processing failed',row.filename,error);
   }
 }
@@ -493,7 +496,7 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
     const stat=await fs.stat(tmp);
     if(stat.size!==declaredSize)throw new Error(`MEDIA_SIZE_MISMATCH:${declaredSize}:${stat.size}`);
     const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
-  await fs.rename(tmp,target); const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; rows.push(row); await writeIndex(rows,requestWorkspace);
+  await fs.rename(tmp,target); const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; try{await mediaIndexWriter().ingest(row)}catch(error){if(error instanceof Error&&error.message==='MEDIA_INDEX_DUPLICATE_KEY'){repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return}throw error}
   lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
   res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
   reservationCommitted=true;
