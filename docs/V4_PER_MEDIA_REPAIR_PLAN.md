@@ -21,12 +21,14 @@ Replace the shared Desktop/Web Problems-page Repair action that currently starts
 - Exact Desktop/Web repair reuses the authoritative Drive allocation projection (`driveRuntimeAllocation` + `chooseAccount`), so account eligibility continues to honor authoritative provider quota, actual remaining bytes, safety reserve and the persisted per-account allocation ratio rather than any fixed capacity.
 - Exact repair requires a valid source SHA-256, writes it as the Drive `photosyncSha256` app property, then reads the remote object back and verifies remote size + SHA-256 metadata before marking the replacement replica `VERIFIED`.
 - Exact repair media-index mutations now run through `mediaIndexSerializedStore.ts`, which serializes migrated writers in-process and retains compare-before-rename retry against legacy writers. Regression coverage proves concurrent serialized writers preserve both updates, legacy external changes are merged on retry, and malformed index shape fails closed.
+- Background Drive replica verification now also writes replica-health patches through `mediaIndexSerializedStore.ts` instead of maintaining its own independent compare/rename implementation. It still merges only replica fields into the latest workspace/media row and therefore cannot replace newer media metadata wholesale.
+- Concurrency regressions now exercise verifier-versus-legacy-ingest and verifier-versus-legacy-video-processing races. Both force an external write during the verifier mutation and verify the serialized retry preserves the newly ingested row / processed video metadata while still applying replica health state.
 - Shared Desktop/Web Problems UI now routes each row-level Repair action through `repairMedia(problem.key)` only. The existing `Sửa tất cả có thể` button intentionally remains mapped to the explicit workspace-wide repair sweep.
 - Renderer repair delegation is isolated behind `repairBackupProblem`, whose bridge contract exposes only `repairMedia`. Regression coverage proves the selected media key is normalized and forwarded exactly once and an empty key is rejected before any bridge call, preventing fallback to `retryCloud()`.
 
 ## Next integration batch
-1. Migrate replica verification, ingest and video-processing media-index mutations to the same serialized boundary so all high-frequency writers share one persistence contract.
-2. Add focused concurrency regressions for verifier-versus-ingest and verifier-versus-video-processing updates.
+1. Migrate the remaining main-process ingest, video-processing, workspace-row replacement/delete, and legacy replica upload mutations to the same serialized boundary. The verifier and exact Repair are already migrated.
+2. Add focused runtime mutation helpers so callers update one workspace/media identity without re-writing stale workspace snapshots.
 3. Once all JSON catalog writers share the boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
 
 ## Done criteria
