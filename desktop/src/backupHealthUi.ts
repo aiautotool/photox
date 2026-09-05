@@ -1,4 +1,4 @@
-import type { BackupHealthSnapshot, CloudUpload, LocalMedia } from './bridge.js';
+import type { BackupHealthSnapshot, CloudUpload, DesktopBridge, LocalMedia } from './bridge.js';
 
 export type BackupReplicaView = {
   state: CloudUpload['state'];
@@ -71,4 +71,13 @@ export function backupReplicaStatusLabel(state: CloudUpload['state']) {
   if (state === 'ERROR') return 'Lỗi';
   if (state === 'UPLOADING' || state === 'VERIFYING') return 'Đang xử lý';
   return 'Đang chờ';
+}
+
+export async function repairBackupProblem(
+  bridge: Pick<DesktopBridge, 'repairMedia'>,
+  key: string,
+) {
+  const normalizedKey = key.trim();
+  if (!normalizedKey) throw new Error('MEDIA_KEY_REQUIRED');
+  return bridge.repairMedia(normalizedKey);
 }
