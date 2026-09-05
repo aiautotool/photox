@@ -47,6 +47,20 @@ test('persisted Drive checksum mismatch is downgraded', async () => {
   assert.equal(updated.message, 'DRIVE_REPLICA_CHECKSUM_MISMATCH');
 });
 
+test('Drive source SHA-256 app property mismatch is downgraded', async () => {
+  const expectedSha256 = 'a'.repeat(64);
+  const result = await probeDriveReplica({
+    remoteFileId: 'file-1', expectedSizeBytes: 123, expectedSha256, now: () => NOW,
+    fetchRemote: async () => ({
+      id: 'file-1', name: 'photo.jpg', mimeType: 'image/jpeg', size: '123',
+      appProperties: { photosyncSha256: 'b'.repeat(64) },
+    }),
+  });
+  const updated = applyDriveReplicaProbe({ state: 'VERIFIED' as const, accountId: 'drive-a', remoteFileId: 'file-1' }, result);
+  assert.equal(updated.state, 'ERROR');
+  assert.equal(updated.message, 'DRIVE_REPLICA_SOURCE_HASH_MISMATCH');
+});
+
 test('transient provider failure preserves the last verified replica and schedules a later probe', async () => {
   const result = await probeDriveReplica({
     remoteFileId: 'file-1', expectedSizeBytes: 123, now: () => NOW,
