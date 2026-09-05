@@ -17,6 +17,29 @@ async function readSnapshot(filePath: string): Promise<string> {
   }
 }
 
+async function syncDirectory(directoryPath: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(directoryPath, 'r');
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!['EISDIR', 'EINVAL', 'EPERM', 'EACCES', 'ENOTSUP'].includes(String(code))) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function writeDurableTemp(tempPath: string, content: string): Promise<void> {
+  const handle = await fs.open(tempPath, 'wx', 0o600);
+  try {
+    await handle.writeFile(content, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Serializes media-index mutations inside this Electron process while retaining
  * optimistic compare-before-rename retries for legacy writers that have not yet
@@ -25,6 +48,9 @@ async function readSnapshot(filePath: string): Promise<string> {
  *
  * A missing index is treated as an empty catalog so first-run ingestion can use
  * the same mutation boundary instead of falling back to an unsafe direct write.
+ * Successful commits fsync the temporary file before rename and then best-effort
+ * fsync the parent directory, reducing the chance of a power-loss window where a
+ * rename is acknowledged but not durably recorded by the filesystem.
  */
 export async function mutateSerializedJsonArray<T>(
   filePath: string,
@@ -36,7 +62,8 @@ export async function mutateSerializedJsonArray<T>(
   const tempLabel = String(options.tempLabel || 'mutation').replace(/[^a-z0-9_-]/gi, '_');
 
   const task = previous.catch(() => undefined).then(async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const directoryPath = path.dirname(filePath);
+    await fs.mkdir(directoryPath, { recursive: true });
     for (let attempt = 0; attempt < retries; attempt += 1) {
       const before = await readSnapshot(filePath);
       const parsed = JSON.parse(before) as unknown;
@@ -45,14 +72,16 @@ export async function mutateSerializedJsonArray<T>(
       if (!Array.isArray(next)) throw new Error('MEDIA_INDEX_MUTATION_INVALID');
 
       const temp = `${filePath}.${process.pid}.${Date.now()}.${attempt}.${tempLabel}.tmp`;
-      await fs.writeFile(temp, JSON.stringify(next, null, 2), 'utf8');
-      const current = await readSnapshot(filePath);
-      if (current !== before) {
-        await fs.rm(temp, { force: true });
-        continue;
+      try {
+        await writeDurableTemp(temp, JSON.stringify(next, null, 2));
+        const current = await readSnapshot(filePath);
+        if (current !== before) continue;
+        await fs.rename(temp, filePath);
+        await syncDirectory(directoryPath);
+        return next;
+      } finally {
+        await fs.rm(temp, { force: true }).catch(() => undefined);
       }
-      await fs.rename(temp, filePath);
-      return next;
     }
     throw new Error('MEDIA_INDEX_CONCURRENT_WRITE_RETRY_EXHAUSTED');
   });
