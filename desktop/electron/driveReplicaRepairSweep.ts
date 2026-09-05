@@ -1,8 +1,9 @@
 import { app } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { OAuth2Client } from 'google-auth-library';
 import { getDriveFile } from '@photosync/google-drive';
 import { applyDriveReplicaProbe, probeDriveReplica, replicaNeedsRemoteVerification } from './driveReplicaHealth.js';
@@ -11,6 +12,7 @@ import type { SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 const LEGACY_WORKSPACE_ID = process.env.PHOTOX_WORKSPACE_ID || 'legacy-personal';
 const DEFAULT_VERIFY_INTERVAL_MS = 15 * 60_000;
 const MIN_VERIFY_INTERVAL_MS = 60_000;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type Replica = {
   state: 'QUEUED'|'UPLOADING'|'VERIFYING'|'VERIFIED'|'UPLOADED'|'BLOCKED'|'ERROR';
@@ -48,7 +50,7 @@ function oauthClient() {
   let secret = process.env.PHOTOSYNC_GOOGLE_DESKTOP_CLIENT_SECRET;
   if (!id || !secret) {
     try {
-      const configPath = app.isPackaged ? path.join(process.resourcesPath, 'google-oauth.json') : path.join(path.dirname(new URL(import.meta.url).pathname), '../google-oauth.json');
+      const configPath = app.isPackaged ? path.join(process.resourcesPath, 'google-oauth.json') : path.join(__dirname, '../google-oauth.json');
       const config = JSON.parse(readFileSync(configPath, 'utf8'));
       const installed = config.installed || config.web || {};
       id = installed.client_id;
@@ -80,19 +82,20 @@ async function writeIndexAtomic(rows: Row[]) {
 
 async function localMd5(filePath?: string) {
   if (!filePath) return undefined;
-  try {
-    const bytes = await fs.readFile(filePath);
-    return crypto.createHash('md5').update(bytes).digest('hex');
-  } catch {
-    return undefined;
-  }
+  return await new Promise<string | undefined>(resolve => {
+    const hash = crypto.createHash('md5');
+    const stream = createReadStream(filePath);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', () => resolve(undefined));
+  });
 }
 
 /**
- * Revalidates persisted Drive replicas. This intentionally only mutates a
- * replica after an authoritative remote probe. Definitive missing/integrity
+ * Revalidates persisted Drive replicas. Definitive remote missing/integrity
  * failures become ERROR so the existing one-minute repair sweep sees the asset
- * as under-replicated. Transient provider failures keep the last VERIFIED state.
+ * as under-replicated. Transient provider failures retain the last VERIFIED
+ * state and are retried after the configured verification interval.
  */
 export async function runDriveReplicaRepairSweep(nowMs = Date.now()) {
   let rows: Row[];
@@ -127,6 +130,7 @@ export async function runDriveReplicaRepairSweep(nowMs = Date.now()) {
         remoteFileId: replica.remoteFileId!,
         expectedSizeBytes: row.size,
         storedMd5: expectedMd5,
+        expectedSha256: row.sha256,
         fetchRemote: async remoteFileId => {
           const client = oauthClient();
           client.setCredentials(account.tokens as any);
@@ -135,11 +139,7 @@ export async function runDriveReplicaRepairSweep(nowMs = Date.now()) {
           if (JSON.stringify(client.credentials) !== JSON.stringify(account.tokens)) {
             await fs.writeFile(path.join(accountsDir(), `${account.id}.json`), JSON.stringify({ ...account, tokens: client.credentials }, null, 2), { encoding: 'utf8', mode: 0o600 });
           }
-          const remote = await getDriveFile(token.token, remoteFileId);
-          if (row.sha256 && remote.appProperties?.photosyncSha256 && remote.appProperties.photosyncSha256 !== row.sha256) {
-            return { ...remote, size: '-1' };
-          }
-          return remote;
+          return getDriveFile(token.token, remoteFileId);
         },
         now: () => new Date(nowMs),
       });
