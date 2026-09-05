@@ -26,6 +26,8 @@
     "electron/driveRuntimeAllocation.test.ts",
     "electron/googlePhotosMigration.ts",
     "electron/googlePhotosMigration.test.ts",
+    "electron/googlePhotosMigrationSpool.ts",
+    "electron/googlePhotosMigrationSpool.test.ts",
     "electron/mediaProcessing.ts",
     "electron/mediaProcessing.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
