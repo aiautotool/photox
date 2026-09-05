@@ -25,11 +25,14 @@ Replace the shared Desktop/Web Problems-page Repair action that currently starts
 - Concurrency regressions now exercise verifier-versus-legacy-ingest and verifier-versus-legacy-video-processing races. Both force an external write during the verifier mutation and verify the serialized retry preserves the newly ingested row / processed video metadata while still applying replica health state.
 - Shared Desktop/Web Problems UI now routes each row-level Repair action through `repairMedia(problem.key)` only. The existing `Sửa tất cả có thể` button intentionally remains mapped to the explicit workspace-wide repair sweep.
 - Renderer repair delegation is isolated behind `repairBackupProblem`, whose bridge contract exposes only `repairMedia`. Regression coverage proves the selected media key is normalized and forwarded exactly once and an empty key is rejected before any bridge call, preventing fallback to `retryCloud()`.
+- Added `mediaIndexMutationRepository.ts` as the exact-identity JSON catalog mutation boundary for the remaining runtime writers. It provides serialized append/patch/remove operations keyed by `workspaceId + media key`, prevents a patch from moving rows across tenant/media identity, rejects duplicate identities, and supports first-run creation when `media-index.json` does not yet exist.
+- Repository regression coverage verifies first-run initialization, concurrent ingest + video/cloud patch preservation, tenant-isolated patch/remove for identical keys, identity immutability, and duplicate-key fail-closed behavior. The tests are included in the Electron CI gate.
 
 ## Next integration batch
-1. Migrate the remaining main-process ingest, video-processing, workspace-row replacement/delete, and legacy replica upload mutations to the same serialized boundary. The verifier and exact Repair are already migrated.
-2. Add focused runtime mutation helpers so callers update one workspace/media identity without re-writing stale workspace snapshots.
-3. Once all JSON catalog writers share the boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
+1. Wire main-process ingest, video-processing, legacy replica upload and delete paths to `mediaIndexMutationRepository.ts` so callers stop submitting whole workspace snapshots. The verifier and exact Repair are already serialized; the repository now provides the focused mutation API needed for the remaining paths.
+2. Remove or constrain legacy whole-workspace `writeIndex` replacement after all active runtime writers use exact identity mutations; keep only an explicit migration-only path if still required.
+3. Add concurrency regressions at the main-runtime integration layer for ingest-vs-video, ingest-vs-replica and delete-vs-background verification.
+4. Once all JSON catalog writers share the boundary, move the durable catalog to SQLite transactions and keep a one-time migration path from existing `media-index.json` state.
 
 ## Done criteria
 Per-media repair is complete when Electron IPC and Web HTTP call the same coordinator/transport contract, the shared Desktop/Web React UI uses that exact-media method, all regressions are CI-gated, repository tests/typecheck/build are green, and no existing workspace-wide control is mislabeled as exact-media repair.
