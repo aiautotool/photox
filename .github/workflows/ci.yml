@@ -24,3 +24,7 @@ jobs:
           }
       - run: npm run typecheck
       - run: npm run build
+      - name: Smoke test packaged Desktop renderer
+        env:
+          PHOTOX_DESKTOP_SMOKE: '1'
+        run: xvfb-run -a npm --workspace @photosync/desktop run smoke:packaged-renderer
