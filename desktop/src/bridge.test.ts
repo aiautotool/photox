@@ -129,6 +129,32 @@ test('Web bridge maps workspace device/session APIs and sends CSRF on revokes', 
   }
 });
 
+test('Web bridge maps exact media repair to POST with CSRF and URL-safe key', async () => {
+  const originalFetch=globalThis.fetch;
+  const originalDocument=globalThis.document;
+  Object.defineProperty(globalThis,'document',{configurable:true,writable:true,value:{cookie:'photox_csrf=csrf-repair'}});
+  let received:{url:string;method:string;csrf:string|null;authorization:string|null}|undefined;
+  globalThis.fetch=(async(input:string|URL|Request,init?:RequestInit)=>{
+    const headers=new Headers(init?.headers);
+    received={url:String(input),method:String(init?.method||'GET').toUpperCase(),csrf:headers.get('x-csrf-token'),authorization:headers.get('authorization')};
+    return new Response(JSON.stringify({workspaceId:'workspace-a',key:'folder/a b.jpg',status:'queued',verifiedReplicas:0,targetReplicas:2}),{status:200,headers:{'content-type':'application/json'}});
+  }) as typeof fetch;
+  try{
+    const bridge=createHttpDesktopBridge({baseUrl:'https://photox.example',accessToken:'member-access'});
+    const result=await bridge.repairMedia('folder/a b.jpg');
+    assert.deepEqual(result,{workspaceId:'workspace-a',key:'folder/a b.jpg',status:'queued',verifiedReplicas:0,targetReplicas:2});
+    assert.deepEqual(received,{
+      url:'https://photox.example/api/web/v1/media/folder%2Fa%20b.jpg/repair',
+      method:'POST',
+      csrf:'csrf-repair',
+      authorization:'Bearer member-access',
+    });
+  }finally{
+    globalThis.fetch=originalFetch;
+    Object.defineProperty(globalThis,'document',{configurable:true,writable:true,value:originalDocument});
+  }
+});
+
 test('Web bridge refreshes and reconnects WebSocket with the rotated access token', async () => {
   const originalFetch = globalThis.fetch;
   const originalWebSocket = globalThis.WebSocket;

@@ -6,6 +6,7 @@ export type TunnelState = { connected:boolean; relayUrl:string; desktopId:string
 export type DriveAllocationSnapshot={providerTotalBytes:number|null;providerFreeBytes:number;providerUsedBytes:number|null;allocationRatio:number;allocationLimitBytes:number|null;safetyReserveBytes:number;appUsedBytes:number;ratioRemainingBytes:number|null;providerRemainingAfterReserveBytes:number;availableBytes:number};
 export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable';allocation:DriveAllocationSnapshot };
 export type DriveAllocationUpdateInput={maxUsageRatio?:number;safetyReserveBytes?:number};
+export type MediaRepairResult={workspaceId:string;key:string;status:'queued'|'already_safe';verifiedReplicas:number;targetReplicas:number};
 export type GooglePhotosAccount={id:string;email:string;capabilities:('picker'|'append')[];status:'ready'|'unavailable'};
 export type WorkspaceDevice={id:string;workspaceId:string;userId:string;name:string;platform:'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';kind:'desktop'|'mobile'|'web'|'service';createdAt:number;lastSeenAt?:number;revokedAt?:number};
 export type WorkspaceSessionSummary={sessionId:string;subject:string;deviceId?:string;scopes:string[];expiresAt:number;createdAt:number;lastUsedAt?:number};
@@ -37,6 +38,7 @@ export interface DesktopBridge {
   updateGoogleDriveAllocation(accountId:string,input:DriveAllocationUpdateInput):Promise<DriveAccount>;
   removeGoogleAccount(accountId:string):Promise<DesktopStatus>;
   retryCloud():Promise<DesktopStatus>;
+  repairMedia(key:string):Promise<MediaRepairResult>;
   createWebLoginLink():Promise<{url:string;expiresAt:number}>;
   getWorkspaceOverview():Promise<WorkspaceOverviewSnapshot>;
   getWorkspaceSubscription():Promise<WorkspaceSubscriptionSnapshot>;
@@ -188,6 +190,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     updateGoogleDriveAllocation:(accountId,input)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}/allocation`,{method:'PATCH',body:JSON.stringify(input)}),
     removeGoogleAccount:(accountId)=>json(`/api/web/v1/google-drive/accounts/${encodeURIComponent(accountId)}`,{method:'DELETE'}),
     retryCloud:()=>json('/api/web/v1/cloud/retry',{method:'POST'}),
+    repairMedia:(key)=>json(`/api/web/v1/media/${encodeURIComponent(key)}/repair`,{method:'POST'}),
     createWebLoginLink:async()=>{throw new Error('WEB_LOGIN_LINK_DESKTOP_ONLY');},
     getWorkspaceOverview:()=>json('/api/web/v1/workspace'),
     getWorkspaceSubscription:()=>json('/api/web/v1/workspace/subscription'),
