@@ -33,6 +33,25 @@ function itemFilename(sourceMediaId: string) {
   return `${scopeId(sourceMediaId)}.bin`;
 }
 
+function validOptionalString(value: unknown) {
+  return value === undefined || typeof value === 'string';
+}
+
+function validSpoolItem(value: unknown): value is MigrationSpoolItem {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.sourceMediaId === 'string'
+    && item.sourceMediaId.length > 0
+    && Number.isSafeInteger(item.sizeBytes)
+    && (item.sizeBytes as number) >= 0
+    && typeof item.sha256 === 'string'
+    && /^[a-f0-9]{64}$/.test(item.sha256)
+    && validOptionalString(item.filename)
+    && validOptionalString(item.mimeType)
+    && validOptionalString(item.createTime)
+    && validOptionalString(item.type);
+}
+
 export class GooglePhotosMigrationSpool {
   constructor(private readonly rootDir: string, private readonly workspaceId: string) {}
 
@@ -50,7 +69,10 @@ export class GooglePhotosMigrationSpool {
     const staged: MigrationSpoolItem[] = [];
 
     try {
+      const uniqueIds = new Set<string>();
       for (const item of items) {
+        if (!item.id || uniqueIds.has(item.id)) throw new Error('MIGRATION_SPOOL_INVALID_SOURCE');
+        uniqueIds.add(item.id);
         const response = await download(item);
         if (!response.ok) throw new Error(`MIGRATION_SPOOL_DOWNLOAD_${response.status}`);
         const targetPath = path.join(jobDir, itemFilename(item.id));
@@ -154,6 +176,8 @@ export class GooglePhotosMigrationSpool {
     let parsed: MigrationSpoolManifest;
     try { parsed = JSON.parse(raw) as MigrationSpoolManifest; } catch { throw new Error('MIGRATION_SPOOL_INVALID'); }
     if (parsed.version !== 1 || parsed.workspaceId !== this.workspaceId || parsed.jobId !== jobId || !Array.isArray(parsed.items)) throw new Error('MIGRATION_SPOOL_INVALID');
+    const ids = new Set<string>();
+    if (parsed.items.some(item => !validSpoolItem(item) || ids.has(item.sourceMediaId) || !ids.add(item.sourceMediaId))) throw new Error('MIGRATION_SPOOL_INVALID');
     return parsed;
   }
 }
