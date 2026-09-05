@@ -88,6 +88,63 @@ test('account-less retry markers are replaced instead of accumulating', async ()
   }
 });
 
+test('syncReplicas preserves concurrent account progress from the authoritative row', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const writer = createMediaIndexRuntimeWriter<Row>(file);
+    await writer.ingest({
+      workspaceId: 'w1',
+      key: 'photo',
+      filename: 'photo.jpg',
+      cloudReplicas: [{ state: 'UPLOADING', accountId: 'drive-a', remoteFileId: 'a-old' }],
+    });
+
+    const staleSnapshot = [{ state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'a-new' }];
+    await writer.upsertReplica('w1', 'photo', { state: 'VERIFIED', accountId: 'drive-b', remoteFileId: 'b-new' });
+    const committed = await writer.syncReplicas('w1', 'photo', staleSnapshot);
+
+    assert.equal(committed?.cloudReplicas?.find(replica => replica.accountId === 'drive-a')?.remoteFileId, 'a-new');
+    assert.equal(committed?.cloudReplicas?.find(replica => replica.accountId === 'drive-b')?.remoteFileId, 'b-new');
+    const [row] = JSON.parse(await fs.readFile(file, 'utf8')) as Row[];
+    assert.equal(row.cloudReplicas?.length, 2);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncReplicas clears stale queue marker once caller snapshot has provider state only', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const writer = createMediaIndexRuntimeWriter<Row>(file);
+    await writer.ingest({ workspaceId: 'w1', key: 'photo', filename: 'photo.jpg' });
+    await writer.upsertReplica('w1', 'photo', { state: 'QUEUED', message: 'waiting for capacity' });
+    const committed = await writer.syncReplicas('w1', 'photo', [
+      { state: 'VERIFIED', accountId: 'drive-a', remoteFileId: 'a' },
+    ]);
+    assert.equal(committed?.cloudReplicas?.some(replica => !replica.accountId), false);
+    assert.equal(committed?.cloudReplicas?.[0]?.state, 'VERIFIED');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncReplicas keeps only the newest transient marker from a caller snapshot', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const writer = createMediaIndexRuntimeWriter<Row>(file);
+    await writer.ingest({ workspaceId: 'w1', key: 'photo', filename: 'photo.jpg' });
+    const committed = await writer.syncReplicas('w1', 'photo', [
+      { state: 'QUEUED', message: 'older' },
+      { state: 'QUEUED', message: 'newer' },
+    ]);
+    const pending = committed?.cloudReplicas?.filter(replica => !replica.accountId) ?? [];
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.message, 'newer');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('remove stays tenant isolated when identical keys exist in two workspaces', async () => {
   const { dir, file } = await fixture();
   try {
