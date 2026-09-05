@@ -41,6 +41,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - `/api/v1/thumbnail/:key` serves generated thumbnails.
 - `/api/v1/playback/:key` serves compatibility playback when present, otherwise safely falls back to original/cloud source.
 - `/api/v1/library` exposes processed metadata, thumbnail availability and playback availability to mobile.
+- Mobile grids prefer processed `thumbnailUri` for remote video/media and fall back to the original URI only when a thumbnail is unavailable.
+- Mobile video viewer exposes real `expo-video` loading/error state, keeps the processed thumbnail as a poster while loading, and retries failed playback with asynchronous source replacement.
 - Processing failures do not reject or delete the already-ingested original.
 - FFmpeg/FFprobe binaries are packaged via installer dependencies and unpacked from Electron ASAR.
 
@@ -88,10 +90,10 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [ ] Regenerate and commit root `package-lock.json` after native dependency changes.
 - [ ] Latest CI must pass install, SDK tests, full typecheck and desktop production build.
 - [ ] Device-test image-filter native module on supported iOS/Android builds.
-- [ ] Make mobile grid prefer processed `thumbnailUri` for remote videos; metadata and endpoint are already available.
+- [x] Mobile grid prefers processed `thumbnailUri` for remote videos; metadata and endpoint are already available.
 
 ### P0 — Video UX and acceptance
-- [ ] Explicit player loading/error/retry UI.
+- [x] Explicit player loading/error/retry UI backed by `expo-video` player status and asynchronous source retry.
 - [ ] Verify iPhone MOV/HEVC acceptance path on a real generated sample/device: ingest → ffprobe → thumbnail → duration → compatibility playback → seek/audio/fullscreen.
 - [ ] Add video-processing regression tests around MOV/HEVC and corrupt video.
 
