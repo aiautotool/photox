@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildBackupProblemViews, backupReplicaStatusLabel } from './backupHealthUi.js';
+import { buildBackupProblemViews, backupReplicaStatusLabel, repairBackupProblem } from './backupHealthUi.js';
 import type { BackupHealthSnapshot, CloudUpload, LocalMedia } from './bridge.js';
 
 const health: BackupHealthSnapshot = {
@@ -61,4 +61,30 @@ test('renderer labels replica states without exposing fake success', () => {
   assert.equal(backupReplicaStatusLabel('ERROR'), 'Lỗi');
   assert.equal(backupReplicaStatusLabel('VERIFYING'), 'Đang xử lý');
   assert.equal(backupReplicaStatusLabel('QUEUED'), 'Đang chờ');
+});
+
+test('row repair delegates only to exact-media repair and never needs workspace retry', async () => {
+  const calls: string[] = [];
+  const bridge = {
+    async repairMedia(key: string) {
+      calls.push(key);
+      return { workspaceId: 'workspace-a', key, status: 'queued' as const, verifiedReplicas: 1, targetReplicas: 2 };
+    },
+  };
+  const result = await repairBackupProblem(bridge, ' device:asset ');
+  assert.deepEqual(calls, ['device:asset']);
+  assert.equal(result.key, 'device:asset');
+  assert.equal(result.status, 'queued');
+});
+
+test('row repair rejects an empty media key before reaching the bridge', async () => {
+  let called = false;
+  const bridge = {
+    async repairMedia(key: string) {
+      called = true;
+      return { workspaceId: 'workspace-a', key, status: 'queued' as const, verifiedReplicas: 0, targetReplicas: 2 };
+    },
+  };
+  await assert.rejects(() => repairBackupProblem(bridge, '   '), /MEDIA_KEY_REQUIRED/);
+  assert.equal(called, false);
 });
