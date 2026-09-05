@@ -1,3 +1,5 @@
+import './rendererDiagnostics.js';
+import './desktopRendererSmoke.js';
 import './main.js';
 import './driveReplicaRepairSweep.js';
 import './internetTunnel.js';
