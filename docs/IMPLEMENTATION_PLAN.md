@@ -38,6 +38,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Video index stores width, height, duration, rotation, fps, bitrate, container, video codec, audio codec and processing/error state.
 - JPEG video thumbnail generation is integrated.
 - Compatibility playback derivative is generated as MP4 H.264/AAC when the original container/codec/audio is not broadly compatible.
+- MOV and HEVC compatibility decisions now have regression coverage; corrupt inputs fail closed at probe with stable renderer-safe error codes/messages rather than exposing raw FFprobe stderr or local paths.
 - `/api/v1/thumbnail/:key` serves generated thumbnails.
 - `/api/v1/playback/:key` serves compatibility playback when present, otherwise safely falls back to original/cloud source.
 - `/api/v1/library` exposes processed metadata, thumbnail availability and playback availability to mobile.
@@ -95,7 +96,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 ### P0 — Video UX and acceptance
 - [x] Explicit player loading/error/retry UI backed by `expo-video` player status and asynchronous source retry.
 - [ ] Verify iPhone MOV/HEVC acceptance path on a real generated sample/device: ingest → ffprobe → thumbnail → duration → compatibility playback → seek/audio/fullscreen.
-- [ ] Add video-processing regression tests around MOV/HEVC and corrupt video.
+- [x] Add video-processing regression tests around MOV/HEVC and corrupt video, including fail-closed probe errors that do not serialize raw local paths/FFprobe stderr.
 
 ### P1 — Viewer
 - [ ] Asset-indexed viewer state.
