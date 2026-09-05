@@ -1,4 +1,3 @@
-import { useEvent, useEventListener } from 'expo';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Dimensions, Pressable, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
 import { Image } from 'expo-image';
@@ -19,16 +18,20 @@ function clamp(v:number,min:number,max:number){return Math.max(min,Math.min(max,
 function VideoStage({asset}:{asset:DisplayAsset}){
   const source=useMemo(()=>({uri:asset.uri,headers:asset.requestHeaders}),[asset.uri,asset.requestHeaders]);
   const player=useVideoPlayer(source,p=>{p.loop=false;p.play();});
-  const {status}=useEvent(player,'statusChange',{status:player.status});
+  const [status,setStatus]=useState(player.status);
   const [errorMessage,setErrorMessage]=useState<string|null>(null);
   const [retrying,setRetrying]=useState(false);
 
-  useEffect(()=>{setErrorMessage(null);setRetrying(false);},[asset.id]);
-  useEventListener(player,'statusChange',event=>{
-    if(event.status==='error')setErrorMessage(event.error?.message||'Không thể phát video này.');
-    else if(event.status==='readyToPlay')setErrorMessage(null);
-    if(event.status!=='loading')setRetrying(false);
-  });
+  useEffect(()=>{setErrorMessage(null);setRetrying(false);setStatus(player.status);},[asset.id,player]);
+  useEffect(()=>{
+    const subscription=player.addListener('statusChange',event=>{
+      setStatus(event.status);
+      if(event.status==='error')setErrorMessage(event.error?.message||'Không thể phát video này.');
+      else if(event.status==='readyToPlay')setErrorMessage(null);
+      if(event.status!=='loading')setRetrying(false);
+    });
+    return()=>subscription.remove();
+  },[player]);
 
   async function retry(){
     if(retrying)return;
