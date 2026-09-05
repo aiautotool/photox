@@ -23,6 +23,7 @@ import {
   type MigrationTransferCheckpoint,
   type PickedMediaItem,
 } from '@photosync/google-photos';
+import { GooglePhotosMigrationSpool } from './googlePhotosMigrationSpool.js';
 
 export type GooglePhotosCapability = 'picker' | 'append';
 export type GooglePhotosAccountInfo = { id: string; email: string; capabilities: GooglePhotosCapability[]; status: 'ready' | 'unavailable' };
@@ -30,7 +31,7 @@ type SavedGooglePhotosAccount = { id: string; workspaceId: string; email: string
 export type MigrationSnapshot = { job: GooglePhotosMigrationJob; items: GooglePhotosMigrationItem[] };
 export type DriveMigrationDestination = (input: { accountId: string; source: PickedMediaItem; response: Response; signal?: AbortSignal; onBytes?: (bytes: number) => void; checkpoint?: MigrationTransferCheckpoint; onCheckpoint?: (checkpoint: MigrationTransferCheckpoint | null) => Promise<void> }) => Promise<{ targetId?: string; targetUrl?: string }>;
 export interface DesktopGooglePhotosMigrationOptions {
-  accountsDir: string; workspaceId: string; legacyWorkspaceId?: string; oauthPort?: number; oauthClient: (redirectUri?: string) => OAuth2Client;
+  accountsDir: string; spoolDir?: string; workspaceId: string; legacyWorkspaceId?: string; oauthPort?: number; oauthClient: (redirectUri?: string) => OAuth2Client;
   openExternal: (url: string) => Promise<unknown> | unknown; ledger: GooglePhotosMigrationLedger; uploadToDrive: DriveMigrationDestination;
   onUpdated?: (snapshot: MigrationSnapshot) => void;
 }
@@ -42,7 +43,11 @@ export class DesktopGooglePhotosMigrationService {
   private readonly paused = new Set<string>();
   private readonly cancelled = new Set<string>();
   private readonly running = new Map<string, Promise<GooglePhotosMigrationJob>>();
-  constructor(private readonly options: DesktopGooglePhotosMigrationOptions) { this.oauthPort = options.oauthPort ?? 53683; }
+  private readonly spool: GooglePhotosMigrationSpool;
+  constructor(private readonly options: DesktopGooglePhotosMigrationOptions) {
+    this.oauthPort = options.oauthPort ?? 53683;
+    this.spool = new GooglePhotosMigrationSpool(options.spoolDir ?? path.join(options.accountsDir, '..', 'google-photos-migration-spool'), options.workspaceId);
+  }
 
   async listAccounts(): Promise<GooglePhotosAccountInfo[]> {
     const result: GooglePhotosAccountInfo[] = [];
@@ -100,9 +105,14 @@ export class DesktopGooglePhotosMigrationService {
     const job = await this.requireJob(jobId); if (!job.sourcePickerSessionId) throw new Error('GOOGLE_PHOTOS_PICKER_SESSION_MISSING');
     const account = await this.requireAccount(job.sourceAccountId, 'picker'); const token = await this.accessToken(account);
     const session = await getPickingSession(token, job.sourcePickerSessionId); if (!session.mediaItemsSet) throw new Error('GOOGLE_PHOTOS_PICKER_NOT_FINISHED');
-    const items = migrationItemsFromPicker(job.id, await listAllPickedMedia(token, job.sourcePickerSessionId)); await this.options.ledger.putItems(items);
-    const totalBytes = items.reduce((sum, item) => sum + (item.sizeBytes ?? 0), 0) || undefined;
+    const selected = await listAllPickedMedia(token, job.sourcePickerSessionId);
+    const staged = await this.spool.stage(job.id, selected, downloadPickedMedia);
+    const sizes = new Map(staged.map(item => [item.sourceMediaId, item.sizeBytes]));
+    const items = migrationItemsFromPicker(job.id, selected).map(item => ({ ...item, sizeBytes: sizes.get(item.sourceMediaId) ?? item.sizeBytes }));
+    await this.options.ledger.putItems(items);
+    const totalBytes = staged.reduce((sum, item) => sum + item.sizeBytes, 0) || undefined;
     await this.options.ledger.updateJob(job.id, { state: 'queued', totalItems: items.length, totalBytes, updatedAt: new Date().toISOString() });
+    await deletePickingSession(token, job.sourcePickerSessionId).catch(() => undefined);
     return this.emit(job.id);
   }
 
@@ -126,12 +136,11 @@ export class DesktopGooglePhotosMigrationService {
   }
 
   private async runInternal(jobId: string) {
-    const job = await this.requireJob(jobId); if (!job.sourcePickerSessionId) throw new Error('GOOGLE_PHOTOS_PICKER_SESSION_MISSING');
-    const sourceAccount = await this.requireAccount(job.sourceAccountId, 'picker'); const sourceToken = await this.accessToken(sourceAccount);
-    const selected = await listAllPickedMedia(sourceToken, job.sourcePickerSessionId); const sources = new Map(selected.map(item => [item.id, item]));
+    const job = await this.requireJob(jobId);
+    const sources = await this.spool.sourceMap(jobId);
     const runner = new GooglePhotosMigrationRunner(this.options.ledger, {
       transfer: async ({ job: currentJob, source, signal, onBytes, checkpoint, onCheckpoint }) => {
-        const response = await downloadPickedMedia(source); const contentLength = Number(response.headers.get('content-length') || 0);
+        const response = await this.spool.response(currentJob.id, source.id); const contentLength = Number(response.headers.get('content-length') || 0);
         if (currentJob.target === 'google_drive') return this.options.uploadToDrive({ accountId: currentJob.targetAccountId, source, response, signal, onBytes, checkpoint, onCheckpoint });
         const destinationToken = await this.accessToken(await this.requireAccount(currentJob.targetAccountId, 'append'));
         let uploadToken: string;
@@ -148,7 +157,7 @@ export class DesktopGooglePhotosMigrationService {
       verify: async ({ job: currentJob, targetId }) => { if (!targetId) throw new Error('MIGRATION_DESTINATION_NOT_VERIFIED'); if (currentJob.target === 'google_photos') return; },
     });
     const result = await runner.run(jobId, sources, { workspaceId: this.options.workspaceId, shouldPause: () => this.paused.has(jobId), shouldCancel: () => this.cancelled.has(jobId) }); await this.emit(jobId);
-    if (['completed', 'completed_with_errors', 'cancelled'].includes(result.state)) await deletePickingSession(sourceToken, job.sourcePickerSessionId).catch(() => undefined);
+    if (result.state === 'completed') await this.spool.remove(jobId);
     return result;
   }
 
