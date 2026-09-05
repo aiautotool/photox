@@ -79,6 +79,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Restart recovery for items with a durable destination `targetId` resumes verification only instead of retransferring; verification failures retain target identity/checkpoint for retry, preventing avoidable duplicate append-only uploads after a process restart.
 - [x] Picker-selected media is staged into a workspace/job-scoped durable local spool before the Picker session is deleted; queued/restarted transfers read the spool instead of session-bound Picker URLs.
 - [x] Migration spool records size + SHA-256, never persists Picker `baseUrl`, rejects duplicate/malformed manifest items, verifies bytes before transfer, cleans partial staging on failure, and is covered by Electron regression tests.
+- [x] Google Drive migration completion now performs a second provider verification from the durable resumable checkpoint/target ID after the runner enters `verifying`; restart verification reuses that checkpoint so it checks the existing remote object rather than starting another upload, and target/checkpoint identity mismatches fail closed.
+- [x] Terminal migration cancellation now removes the durable spool; `completed_with_errors` intentionally retains it so failed items can still be retried.
 - [ ] Complete live OAuth/provider E2E verification with real accounts.
 
 ### Desktop/Web shared product
