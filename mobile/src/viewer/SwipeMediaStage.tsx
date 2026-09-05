@@ -1,5 +1,6 @@
+import { useEvent, useEventListener } from 'expo';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Dimensions, StyleSheet, View, type GestureResponderEvent } from 'react-native';
+import { ActivityIndicator, Dimensions, Pressable, StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
 import { Image } from 'expo-image';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import type { DisplayAsset } from '../sync/mobileSync';
@@ -18,7 +19,33 @@ function clamp(v:number,min:number,max:number){return Math.max(min,Math.min(max,
 function VideoStage({asset}:{asset:DisplayAsset}){
   const source=useMemo(()=>({uri:asset.uri,headers:asset.requestHeaders}),[asset.uri,asset.requestHeaders]);
   const player=useVideoPlayer(source,p=>{p.loop=false;p.play();});
-  return <VideoView player={player} style={StyleSheet.absoluteFill} nativeControls contentFit="contain" allowsFullscreen allowsPictureInPicture/>;
+  const {status}=useEvent(player,'statusChange',{status:player.status});
+  const [errorMessage,setErrorMessage]=useState<string|null>(null);
+  const [retrying,setRetrying]=useState(false);
+
+  useEffect(()=>{setErrorMessage(null);setRetrying(false);},[asset.id]);
+  useEventListener(player,'statusChange',event=>{
+    if(event.status==='error')setErrorMessage(event.error?.message||'Không thể phát video này.');
+    else if(event.status==='readyToPlay')setErrorMessage(null);
+    if(event.status!=='loading')setRetrying(false);
+  });
+
+  async function retry(){
+    if(retrying)return;
+    setRetrying(true);setErrorMessage(null);
+    try{await player.replaceAsync(source);player.play();}
+    catch(error){setRetrying(false);setErrorMessage(error instanceof Error?error.message:String(error));}
+  }
+
+  const loading=status==='idle'||status==='loading'||retrying;
+  const failed=status==='error'||Boolean(errorMessage);
+
+  return <View style={s.videoStage}>
+    {asset.thumbnailUri&&<Image source={{uri:asset.thumbnailUri,headers:asset.requestHeaders}} style={StyleSheet.absoluteFill} contentFit="contain"/>}
+    <VideoView player={player} style={StyleSheet.absoluteFill} nativeControls contentFit="contain" allowsFullscreen allowsPictureInPicture/>
+    {loading&&!failed&&<View style={s.playerOverlay} pointerEvents="none"><ActivityIndicator size="large" color="#fff"/><Text style={s.playerMessage}>Đang tải video…</Text></View>}
+    {failed&&<View style={s.playerOverlay}><Text style={s.playerErrorTitle}>Không phát được video</Text><Text style={s.playerErrorBody} numberOfLines={3}>{errorMessage||'Video chưa sẵn sàng hoặc kết nối đã bị gián đoạn.'}</Text><Pressable accessibilityRole="button" onPress={()=>void retry()} style={s.retryButton} disabled={retrying}><Text style={s.retryText}>{retrying?'Đang thử lại…':'Thử lại'}</Text></Pressable></View>}
+  </View>;
 }
 
 function ZoomablePhoto({asset,onPrevious,onNext}:{asset:DisplayAsset;onPrevious():void;onNext():void}){
@@ -90,4 +117,13 @@ export function SwipeMediaStage({assets,current,onChange}:{assets:DisplayAsset[]
   </View>;
 }
 
-const s=StyleSheet.create({root:{flex:1,width:'100%',backgroundColor:'#070707'}});
+const s=StyleSheet.create({
+  root:{flex:1,width:'100%',backgroundColor:'#070707'},
+  videoStage:{flex:1,width:'100%',backgroundColor:'#070707'},
+  playerOverlay:{...StyleSheet.absoluteFillObject,alignItems:'center',justifyContent:'center',paddingHorizontal:28,backgroundColor:'#0009'},
+  playerMessage:{marginTop:12,color:'#fff',fontSize:14,fontWeight:'600'},
+  playerErrorTitle:{color:'#fff',fontSize:19,fontWeight:'800',textAlign:'center'},
+  playerErrorBody:{marginTop:8,color:'#d6d6d6',fontSize:13,lineHeight:19,textAlign:'center'},
+  retryButton:{marginTop:18,minWidth:112,height:42,borderRadius:21,backgroundColor:'#fff',alignItems:'center',justifyContent:'center',paddingHorizontal:20},
+  retryText:{color:'#111',fontWeight:'800',fontSize:14},
+});
