@@ -63,6 +63,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Cloud-only assets can already be downloaded to the device; viewer keeps the original-download path even when compatibility playback uses a derivative.
 - Added authenticated `DELETE /api/v1/media/:key`: managed Google Drive replicas are deleted first; local original/thumbnail/playback and catalog row are removed only after replica deletion succeeds.
 - Mobile viewer exposes `Xóa khỏi cloud` with destructive confirmation and removes the deleted asset from local PhotoX metadata.
+- Shared Desktop/Web Problems UI now drills into each under-replicated item with unique verified-account count, pending/failed replicas, provider messages, local-original availability and truthful replica state. Repair is disabled when no local original can seed a replacement, and the action invokes the existing real workspace repair sweep without marking the item safe until verification succeeds.
 
 ## SaaS V4 priority progress
 ### Google Drive allocation
@@ -140,7 +141,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [x] Periodically verify persisted Google Drive replica existence and integrity against authoritative remote metadata before allowing stale VERIFIED state to remain trusted indefinitely; definitive missing/size/SHA-256/MD5 mismatches are downgraded for repair while transient outages defer without duplicating uploads.
 - [x] Merge background verifier mutations onto the latest media-index row/replica snapshot instead of replacing a stale whole-index snapshot; tenant/replica identity regressions cover preservation of concurrent metadata and non-resurrection of removed replicas.
 - [ ] Migrate all media-index writers to one serialized persistence layer or SQLite transaction boundary; optimistic verifier retries reduce the current race but do not replace a single-writer/transactional store.
-- [ ] Under-replicated/failed/missing UI drill-down and repair actions.
+- [x] Under-replicated/failed/missing UI drill-down with per-media replica/account/provider details and guarded Repair action backed by the existing real repair sweep.
+- [ ] Add per-media repair scheduling if Repair should enqueue only the selected asset; the current action intentionally invokes the workspace repair sweep and may repair other eligible media at the same time.
 - [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
 ## CI notes
