@@ -123,7 +123,7 @@ export function SwipeMediaStage({assets,current,onChange}:{assets:DisplayAsset[]
 const s=StyleSheet.create({
   root:{flex:1,width:'100%',backgroundColor:'#070707'},
   videoStage:{flex:1,width:'100%',backgroundColor:'#070707'},
-  playerOverlay:{...StyleSheet.absoluteFillObject,alignItems:'center',justifyContent:'center',paddingHorizontal:28,backgroundColor:'#0009'},
+  playerOverlay:{position:'absolute',left:0,right:0,top:0,bottom:0,alignItems:'center',justifyContent:'center',paddingHorizontal:28,backgroundColor:'#0009'},
   playerMessage:{marginTop:12,color:'#fff',fontSize:14,fontWeight:'600'},
   playerErrorTitle:{color:'#fff',fontSize:19,fontWeight:'800',textAlign:'center'},
   playerErrorBody:{marginTop:8,color:'#d6d6d6',fontSize:13,lineHeight:19,textAlign:'center'},
