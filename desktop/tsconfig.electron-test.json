@@ -32,6 +32,8 @@
     "electron/googlePhotosMigrationSpool.test.ts",
     "electron/mediaIndexReplicaMerge.ts",
     "electron/mediaIndexReplicaMerge.test.ts",
+    "electron/mediaIndexSerializedStore.ts",
+    "electron/mediaIndexSerializedStore.test.ts",
     "electron/mediaProcessing.ts",
     "electron/mediaProcessing.test.ts",
     "electron/mediaRepairCoordinator.ts",

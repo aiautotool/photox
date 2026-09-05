@@ -20,12 +20,12 @@ Replace the shared Desktop/Web Problems-page Repair action that currently starts
 - Web regressions are CI-gated and prove encoded keys preserve exact identity, identical keys stay scoped to their authenticated workspace, and CSRF/viewer failures do not reach the repair scheduler.
 - Exact Desktop/Web repair reuses the authoritative Drive allocation projection (`driveRuntimeAllocation` + `chooseAccount`), so account eligibility continues to honor authoritative provider quota, actual remaining bytes, safety reserve and the persisted per-account allocation ratio rather than any fixed capacity.
 - Exact repair requires a valid source SHA-256, writes it as the Drive `photosyncSha256` app property, then reads the remote object back and verifies remote size + SHA-256 metadata before marking the replacement replica `VERIFIED`.
-- Exact media-index mutation is scoped to the requested workspace/key and uses compare-before-rename retry to reduce lost updates while the broader single-writer/transactional media-index migration remains pending.
+- Exact repair media-index mutations now run through `mediaIndexSerializedStore.ts`, which serializes migrated writers in-process and retains compare-before-rename retry against legacy writers. Regression coverage proves concurrent serialized writers preserve both updates, legacy external changes are merged on retry, and malformed index shape fails closed.
 
 ## Next integration batch
 1. Replace the Problems-page row Repair button with `bridge.repairMedia(problem.key)`. Keep `Sửa tất cả có thể` mapped to the explicit workspace sweep.
 2. Add renderer regression proving row Repair invokes only the selected key and does not fall back to `retryCloud()`.
-3. Continue the broader media-index persistence migration toward a serialized writer or SQLite transaction so exact repair, ingest, video processing and replica verification share one transactional mutation boundary.
+3. Migrate replica verification, ingest and video-processing media-index mutations to the same serialized boundary, then move the durable catalog to SQLite transactions once all call sites share a single persistence contract.
 
 ## Done criteria
 Per-media repair is complete only when Electron IPC and Web HTTP both call the same coordinator/transport contract, the shared Desktop/Web React UI uses that exact-media method, all regressions are CI-gated, repository tests/typecheck/build are green, and no existing workspace-wide control is mislabeled as exact-media repair.

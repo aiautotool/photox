@@ -10,6 +10,7 @@ import { createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getS
 import { SqlitePhotoXStore, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { loadWorkspaceDriveAccounts } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation } from './driveRuntimeAllocation.js';
+import { mutateSerializedJsonArray } from './mediaIndexSerializedStore.js';
 import { MediaRepairCoordinator } from './mediaRepairCoordinator.js';
 import { repairMediaFromPrincipal, type MediaRepairAuditEvent, type MediaRepairPrincipal } from './mediaRepairTransport.js';
 import { mimeTypeForFilename } from './mediaProcessing.js';
@@ -18,7 +19,6 @@ const LEGACY_WORKSPACE_ID = process.env.PHOTOX_WORKSPACE_ID || 'legacy-personal'
 const LEGACY_OWNER_USER_ID = process.env.PHOTOX_OWNER_USER_ID || 'legacy-owner';
 const LEGACY_DESKTOP_DEVICE_ID = `desktop_${crypto.createHash('sha256').update(os.hostname()).digest('hex').slice(0, 20)}`;
 const TARGET_CLOUD_REPLICAS = 2;
-const INDEX_WRITE_RETRIES = 5;
 const OAUTH_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${OAUTH_PORT}/oauth2callback`;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,23 +104,17 @@ async function readRows(): Promise<RepairRow[]> {
 
 async function mutateExactRow(workspaceId: string, key: string, mutate: (row: RepairRow) => RepairRow) {
   const resolved = await paths();
-  for (let attempt = 0; attempt < INDEX_WRITE_RETRIES; attempt += 1) {
-    const before = await fs.readFile(resolved.indexFile, 'utf8');
-    const rows = migrateLegacyWorkspaceRows(JSON.parse(before) as any[], LEGACY_WORKSPACE_ID).rows as RepairRow[];
+  let mutated: RepairRow | undefined;
+  await mutateSerializedJsonArray<any>(resolved.indexFile, rawRows => {
+    const rows = migrateLegacyWorkspaceRows(rawRows as any[], LEGACY_WORKSPACE_ID).rows as RepairRow[];
     const index = rows.findIndex(row => (row.workspaceId || LEGACY_WORKSPACE_ID) === workspaceId && row.key === key);
     if (index < 0) throw new Error('MEDIA_REPAIR_NOT_FOUND');
-    rows[index] = { ...mutate({ ...rows[index] }), workspaceId };
-    const temp = `${resolved.indexFile}.${process.pid}.${Date.now()}.${attempt}.repair.tmp`;
-    await fs.writeFile(temp, JSON.stringify(rows, null, 2), 'utf8');
-    const current = await fs.readFile(resolved.indexFile, 'utf8');
-    if (current !== before) {
-      await fs.rm(temp, { force: true });
-      continue;
-    }
-    await fs.rename(temp, resolved.indexFile);
-    return rows[index];
-  }
-  throw new Error('MEDIA_INDEX_CONCURRENT_WRITE_RETRY_EXHAUSTED');
+    mutated = { ...mutate({ ...rows[index] }), workspaceId };
+    rows[index] = mutated;
+    return rows;
+  }, { tempLabel: 'repair' });
+  if (!mutated) throw new Error('MEDIA_REPAIR_NOT_FOUND');
+  return mutated;
 }
 
 async function oauthClient() {
