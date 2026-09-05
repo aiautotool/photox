@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   updateGoogleDriveAllocation: (accountId: string, input: unknown) => ipcRenderer.invoke('photosync:google-drive-allocation-update', accountId, input),
   removeGoogleAccount: (accountId: string) => ipcRenderer.invoke('photosync:remove-google-account', accountId),
   retryCloud: () => ipcRenderer.invoke('photosync:retry-cloud'),
+  repairMedia: (key: string) => ipcRenderer.invoke('photosync:repair-media', key),
   createWebLoginLink: () => ipcRenderer.invoke('photosync:web-login-link'),
   getWorkspaceOverview: () => ipcRenderer.invoke('photosync:workspace-overview'),
   getWorkspaceSubscription: () => ipcRenderer.invoke('photosync:workspace-subscription'),
