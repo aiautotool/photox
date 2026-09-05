@@ -8,12 +8,12 @@ import { OAuth2Client } from 'google-auth-library';
 import { getDriveFile } from '@photosync/google-drive';
 import { applyDriveReplicaProbe, probeDriveReplica, replicaNeedsRemoteVerification } from './driveReplicaHealth.js';
 import { applyReplicaHealthPatches, type ReplicaHealthPatch } from './mediaIndexReplicaMerge.js';
+import { mutateSerializedJsonArray } from './mediaIndexSerializedStore.js';
 import type { SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 
 const LEGACY_WORKSPACE_ID = process.env.PHOTOX_WORKSPACE_ID || 'legacy-personal';
 const DEFAULT_VERIFY_INTERVAL_MS = 15 * 60_000;
 const MIN_VERIFY_INTERVAL_MS = 60_000;
-const INDEX_WRITE_RETRIES = 5;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type Replica = {
@@ -76,31 +76,18 @@ async function loadAccounts(): Promise<SavedDriveAccountRecord[]> {
 }
 
 /**
- * The verifier can run while ingestion/video processing/repair mutate the same
- * JSON index in the main process. Re-read the latest snapshot and merge only
- * replica-health fields, then use an optimistic compare-before-rename retry so
- * a stale verifier snapshot does not replace newer media metadata wholesale.
+ * Merge only replica-health fields into the latest index snapshot through the
+ * shared serialized boundary. This prevents the verifier from replacing newer
+ * ingestion/video-processing/repair metadata and still retries if a legacy
+ * writer changes the file outside the boundary while the mutation is pending.
  */
 async function writeReplicaHealthPatches(patches: ReplicaHealthPatch[]) {
   if (!patches.length) return;
-  const target = indexFile();
-  for (let attempt = 0; attempt < INDEX_WRITE_RETRIES; attempt += 1) {
-    const before = await fs.readFile(target, 'utf8');
-    const latest = (JSON.parse(before) as Row[]).map(row => ({ ...row, workspaceId: row.workspaceId || LEGACY_WORKSPACE_ID }));
-    const merged = applyReplicaHealthPatches(latest, patches);
-    if (!merged.applied) return;
-
-    const temp = `${target}.${process.pid}.${Date.now()}.${attempt}.replica-health.tmp`;
-    await fs.writeFile(temp, JSON.stringify(merged.rows, null, 2), 'utf8');
-    const current = await fs.readFile(target, 'utf8');
-    if (current !== before) {
-      await fs.rm(temp, { force: true });
-      continue;
-    }
-    await fs.rename(temp, target);
-    return;
-  }
-  throw new Error('MEDIA_INDEX_CONCURRENT_WRITE_RETRY_EXHAUSTED');
+  await mutateSerializedJsonArray<Row>(indexFile(), latest => {
+    const normalized = latest.map(row => ({ ...row, workspaceId: row.workspaceId || LEGACY_WORKSPACE_ID }));
+    const merged = applyReplicaHealthPatches(normalized, patches);
+    return merged.applied ? merged.rows : normalized;
+  }, { tempLabel: 'replica-health' });
 }
 
 async function localMd5(filePath?: string) {
