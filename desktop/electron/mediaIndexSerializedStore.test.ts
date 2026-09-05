@@ -105,6 +105,44 @@ test('replica verifier mutation preserves concurrent legacy video-processing met
   }
 });
 
+test('failed mutation leaves no temporary media-index files behind', async () => {
+  const { dir, file } = await fixture([{ key: 'a' }]);
+  try {
+    await assert.rejects(
+      () => mutateSerializedJsonArray(file, () => { throw new Error('EXPECTED_MUTATION_FAILURE'); }, { tempLabel: 'failure-cleanup' }),
+      /EXPECTED_MUTATION_FAILURE/,
+    );
+    const names = await fs.readdir(dir);
+    assert.deepEqual(names, ['media-index.json']);
+    const rows = JSON.parse(await fs.readFile(file, 'utf8')) as Array<Record<string, unknown>>;
+    assert.deepEqual(rows, [{ key: 'a' }]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('retry exhaustion cleans durable temp files and preserves the external winner', async () => {
+  const { dir, file } = await fixture([{ key: 'a', version: 0 }]);
+  try {
+    let version = 0;
+    await assert.rejects(
+      () => mutateSerializedJsonArray<Record<string, unknown>>(file, async rows => {
+        version += 1;
+        await fs.writeFile(file, JSON.stringify([{ key: 'a', version }], null, 2), 'utf8');
+        return rows.map(row => ({ ...row, serialized: true }));
+      }, { retries: 2, tempLabel: 'retry-cleanup' }),
+      /MEDIA_INDEX_CONCURRENT_WRITE_RETRY_EXHAUSTED/,
+    );
+    const names = await fs.readdir(dir);
+    assert.deepEqual(names, ['media-index.json']);
+    const [row] = JSON.parse(await fs.readFile(file, 'utf8')) as Array<Record<string, unknown>>;
+    assert.equal(row.version, 2);
+    assert.equal(row.serialized, undefined);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('invalid media-index JSON shape fails closed', async () => {
   const { dir, file } = await fixture([]);
   try {
