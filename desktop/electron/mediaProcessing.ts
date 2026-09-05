@@ -19,6 +19,34 @@ export type VideoProcessingResult = {
   playbackPath?: string;
 };
 
+export type VideoProcessingPhase = 'probe' | 'thumbnail' | 'transcode';
+export type VideoProcessingErrorCode = 'VIDEO_PROBE_FAILED' | 'VIDEO_THUMBNAIL_FAILED' | 'VIDEO_TRANSCODE_FAILED';
+
+const ERROR_CODE_BY_PHASE: Record<VideoProcessingPhase, VideoProcessingErrorCode> = {
+  probe: 'VIDEO_PROBE_FAILED',
+  thumbnail: 'VIDEO_THUMBNAIL_FAILED',
+  transcode: 'VIDEO_TRANSCODE_FAILED',
+};
+
+/**
+ * Stable, renderer-safe processing error. Raw ffmpeg/ffprobe stderr can contain
+ * local filesystem paths and command details, so callers should persist only
+ * this message/code and keep the original cause server-side for diagnostics.
+ */
+export class VideoProcessingError extends Error {
+  readonly code: VideoProcessingErrorCode;
+  readonly phase: VideoProcessingPhase;
+  readonly originalCause: unknown;
+
+  constructor(phase: VideoProcessingPhase, cause: unknown) {
+    super(`Video processing failed during ${phase}.`);
+    this.name = 'VideoProcessingError';
+    this.code = ERROR_CODE_BY_PHASE[phase];
+    this.phase = phase;
+    this.originalCause = cause;
+  }
+}
+
 function unpacked(binaryPath: string) {
   return binaryPath.replace('app.asar', 'app.asar.unpacked');
 }
@@ -47,10 +75,19 @@ export function isVideoFilename(filename: string) {
   return /\.(mp4|mov|m4v|avi|mkv|webm)$/i.test(filename);
 }
 
-function needsCompatibilityTranscode(metadata: VideoMetadata) {
+/**
+ * Desktop/Web playback is normalized to MP4/H.264/AAC. MOV containers, HEVC,
+ * and any other non-compatible stream therefore get a generated playback copy
+ * while the original media remains untouched.
+ */
+export function needsCompatibilityTranscode(metadata: VideoMetadata) {
   return metadata.container !== 'mp4'
     || metadata.videoCodec !== 'h264'
     || (metadata.hasAudio && metadata.audioCodec !== 'aac');
+}
+
+function processingError(phase: VideoProcessingPhase, cause: unknown): VideoProcessingError {
+  return cause instanceof VideoProcessingError ? cause : new VideoProcessingError(phase, cause);
 }
 
 export async function processVideoFile(inputPath: string, assetKey: string, outputDir: string): Promise<VideoProcessingResult> {
@@ -61,13 +98,30 @@ export async function processVideoFile(inputPath: string, assetKey: string, outp
     commandTimeoutMs: 120_000,
   });
   const source = { uri: inputPath, assetId: assetKey, mimeType: mimeTypeForFilename(inputPath) };
-  const metadata = await adapter.probe(source);
+
+  let metadata: VideoMetadata;
+  try {
+    metadata = await adapter.probe(source);
+  } catch (error) {
+    throw processingError('probe', error);
+  }
+
   const safeThumbnailTime = Math.max(0, Math.min(1000, Math.floor(metadata.durationMs * 0.1), Math.max(0, metadata.durationMs - 1)));
-  const thumbnail = await adapter.createThumbnail(source, { timeMs: safeThumbnailTime, maxWidth: 640, quality: 0.84 });
+  let thumbnail;
+  try {
+    thumbnail = await adapter.createThumbnail(source, { timeMs: safeThumbnailTime, maxWidth: 640, quality: 0.84 });
+  } catch (error) {
+    throw processingError('thumbnail', error);
+  }
+
   let playbackPath: string | undefined;
   if (needsCompatibilityTranscode(metadata)) {
-    const playback = await adapter.transcode(source, { container: 'mp4', videoCodec: 'h264', audioCodec: 'aac', maxWidth: 1920 });
-    playbackPath = playback.uri;
+    try {
+      const playback = await adapter.transcode(source, { container: 'mp4', videoCodec: 'h264', audioCodec: 'aac', maxWidth: 1920 });
+      playbackPath = playback.uri;
+    } catch (error) {
+      throw processingError('transcode', error);
+    }
   }
   return {
     width: metadata.width,
