@@ -32,6 +32,7 @@ export interface WebEdgeHandlers {
   revokeWorkspaceSession?(principal:WebPrincipal,sessionId:string):Promise<unknown>;
   revokeWorkspaceDevice?(principal:WebPrincipal,deviceId:string):Promise<unknown>;
   updateGoogleDriveAllocation?(principal:WebPrincipal,accountId:string,body:unknown):Promise<unknown>;
+  repairMedia?(principal:WebPrincipal,key:string):Promise<unknown>;
   appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
@@ -289,12 +290,13 @@ export class PhotoXWebEdgeServer {
     if(url.pathname.startsWith('/api/web/v1/')){
       try{
         const signed=this.signedMediaPrincipal(url);
-        const required:MediaApiScope[]=signed?['media:download']:url.pathname.startsWith('/api/web/v1/media/')||url.pathname.startsWith('/api/web/v1/playback/')||url.pathname.startsWith('/api/web/v1/thumbnail/')?['media:download']:['media:read'];
+        const streamRoute=/^\/api\/web\/v1\/(media|playback|thumbnail)\/[^/]+$/.test(url.pathname);
+        const required:MediaApiScope[]=signed?['media:download']:streamRoute?['media:download']:['media:read'];
         const principal=signed??await this.authorize(req,required);
         await this.api(req,res,url,principal);return;
       }catch(error){
         const message=error instanceof Error?error.message:String(error);
-        this.json(res,message.includes('ROLE_FORBIDDEN')?403:message.includes('NOT_FOUND')?404:401,{error:message});return;
+        this.json(res,message.includes('ROLE_FORBIDDEN')||message.includes('FORBIDDEN')?403:message.includes('NOT_FOUND')?404:401,{error:message});return;
       }
     }
     await this.static(req,res,url.pathname);
@@ -359,6 +361,21 @@ export class PhotoXWebEdgeServer {
     if(m==='POST'&&p==='/api/web/v1/migrations'){const b=await this.body(req);return mutate('member',{action:'web.migration.create',targetType:'migration',metadata:{sourceAccountId:b.sourceAccountId,target:b.target,targetAccountId:b.targetAccountId}},()=>this.handlers.createMigration(b));}
     match=/^\/api\/web\/v1\/migrations\/([^/]+)$/.exec(p);if(m==='GET'&&match)return read(()=>this.handlers.getMigration(decodeURIComponent(match![1])));
     match=/^\/api\/web\/v1\/migrations\/([^/]+)\/(selection|run|pause|resume|cancel|retry)$/.exec(p);if(m==='POST'&&match){const id=decodeURIComponent(match[1]);const op=match[2];return mutate('member',{action:`web.migration.${op}`,targetType:'migration',targetId:id},()=>op==='selection'?this.handlers.materializeMigration(id):op==='run'?this.handlers.runMigration(id):op==='pause'?this.handlers.pauseMigration(id):op==='resume'?this.handlers.resumeMigration(id):op==='cancel'?this.handlers.cancelMigration(id):this.handlers.retryMigration(id));}
+    match=/^\/api\/web\/v1\/media\/([^/]+)\/repair$/.exec(p);if(m==='POST'&&match){
+      if(!this.requireRole(principal,'member')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
+      const key=decodeURIComponent(match[1]);
+      try{
+        const value=this.handlers.repairMedia
+          ?await this.handlers.repairMedia(principal,key)
+          :await (await import('./mediaRepairDesktopRuntime.js')).repairMediaForPrincipal(principal,key,'web',(_actor,event)=>this.handlers.appendAudit(principal,event));
+        this.json(res,200,value);
+      }catch(error){
+        const message=error instanceof Error?error.message:String(error);
+        const status=message.includes('FORBIDDEN')?403:message.includes('NOT_FOUND')?404:message.includes('KEY_REQUIRED')?400:message.includes('LOCAL_ORIGINAL_UNAVAILABLE')?409:500;
+        this.json(res,status,{error:message});
+      }
+      return;
+    }
     match=/^\/api\/web\/v1\/(media|playback|thumbnail)\/([^/]+)$/.exec(p);if(m==='GET'&&match){const variant=match[1]==='media'?'original':match[1] as 'playback'|'thumbnail';await this.handlers.streamMedia(req,res,decodeURIComponent(match[2]),variant,principal.workspaceId);return;}
     this.json(res,404,{error:'NOT_FOUND'});
   }
