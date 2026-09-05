@@ -53,6 +53,8 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Google Drive multi-account support and replication service.
 - Telegram/provider packages and SDK layers.
 - Backup health calculation and repair sweep structure.
+- Persisted Google Drive replicas are now periodically re-verified against authoritative remote metadata. Missing objects, size mismatch, source SHA-256 app-property mismatch, or MD5 mismatch are downgraded so the existing repair sweep replenishes under-replicated assets; transient provider failures retain last-known VERIFIED state and are retried instead of causing duplicate repair uploads.
+- Remote verification is workspace/account scoped, records `remoteCheckedAt` and the provider MD5 baseline, defaults to a 15-minute cadence, and is configurable with `PHOTOX_REPLICA_VERIFY_INTERVAL_MS` (minimum one minute).
 
 ## Backup UI and cloud management restoration
 - Detailed mobile upload progress restored using real native upload byte callbacks: current filename, uploaded bytes, total bytes, remaining bytes and queue count.
@@ -134,7 +136,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 ### P2 — Sync/storage hardening
 - [ ] Persist upload chunks/jobs and resume from acknowledged byte offsets after restart/network interruption.
 - [ ] Network-change/Wi-Fi/charging policy enforcement and tests.
-- [ ] Verify remote object existence/checksum before every replica is considered healthy.
+- [x] Periodically verify persisted Google Drive replica existence and integrity against authoritative remote metadata before allowing stale VERIFIED state to remain trusted indefinitely; definitive missing/size/SHA-256/MD5 mismatches are downgraded for repair while transient outages defer without duplicating uploads.
 - [ ] Under-replicated/failed/missing UI drill-down and repair actions.
 - [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
