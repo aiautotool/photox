@@ -24,7 +24,20 @@ jobs:
           }
       - run: npm run typecheck
       - run: npm run build
-      - name: Smoke test packaged Desktop renderer
+      - name: Smoke test built Desktop renderer
         env:
           PHOTOX_DESKTOP_SMOKE: '1'
         run: xvfb-run -a npm --workspace @photosync/desktop run smoke:packaged-renderer
+      - name: Package Desktop app directory
+        working-directory: desktop
+        run: npx electron-builder --linux dir --x64 --publish never
+      - name: Smoke test electron-builder packaged Desktop app
+        shell: bash
+        env:
+          PHOTOX_DESKTOP_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          APP="$(find desktop/release/linux-unpacked -maxdepth 1 -type f -perm -111 ! -name 'chrome-sandbox' ! -name 'chrome_crashpad_handler' | head -n 1)"
+          test -n "$APP"
+          echo "Packaged executable: $APP"
+          xvfb-run -a "$APP" --no-sandbox
