@@ -1,7 +1,7 @@
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const PHOTOSYNC_FOLDER = 'PhotoSync';
 
-export type DriveFile = { id: string; name: string; mimeType: string; size?: string; createdTime?: string; modifiedTime?: string; md5Checksum?: string; parents?: string[]; webViewLink?: string };
+export type DriveFile = { id: string; name: string; mimeType: string; size?: string; createdTime?: string; modifiedTime?: string; md5Checksum?: string; parents?: string[]; webViewLink?: string; appProperties?: Record<string,string> };
 export type DriveQuota = { limit?: string; usage?: string; usageInDrive?: string; usageInDriveTrash?: string };
 
 async function googleFetch<T>(url: string, accessToken: string, init: RequestInit = {}): Promise<T> {
@@ -36,19 +36,19 @@ export async function ensurePhotoSyncFolder(accessToken: string): Promise<string
 
 export async function listPhotoSyncFiles(accessToken: string, folderId: string): Promise<DriveFile[]> {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-  const data = await googleFetch<{files: DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink)`, accessToken);
+  const data = await googleFetch<{files: DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties)&pageSize=1000`, accessToken);
   return data.files;
 }
 
 export function getDriveFile(accessToken: string, fileId: string): Promise<DriveFile> {
-  return googleFetch<DriveFile>(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink`, accessToken);
+  return googleFetch<DriveFile>(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties`, accessToken);
 }
 
 export async function createResumableUploadSession(
   accessToken: string,
   input: { name: string; mimeType: string; sizeBytes: number; folderId: string; appProperties?: Record<string,string> },
 ): Promise<string> {
-  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,size,createdTime,webViewLink', {
+  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,size,createdTime,webViewLink,md5Checksum,appProperties', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
