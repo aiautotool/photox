@@ -61,8 +61,8 @@ test('Web edge authenticates one-time ticket, workspace overview, CSRF, device/s
   let revokedSession = '';
   const handlers: WebEdgeHandlers = {
     authorizeAccessToken: async (token) => {
-      assert.equal(token, 'access-token');
-      return { ...principal, scopes: [...principal.scopes] };
+      assert.ok(token === 'access-token' || token === 'member-token');
+      return { ...principal, workspaceRole: token === 'member-token' ? 'member' : principal.workspaceRole, scopes: [...principal.scopes] };
     },
     createWebSession: async () => ({ accessToken: 'access-token', refreshToken: 'refresh-token', accessExpiresAt: Date.now() + 60_000, sessionId: 'session-a' }),
     refreshSession: async (refreshToken) => {
@@ -106,6 +106,10 @@ test('Web edge authenticates one-time ticket, workspace overview, CSRF, device/s
     listLocalMedia: async () => [{ key: 'video/test.mp4' }],
     listCloudUploads: async () => [],
     getBackupHealth: async () => ({ healthy: true }),
+    getMediaCatalogOperationsDiagnostics: async (actor) => {
+      if(actor.workspaceRole!=='admin'&&actor.workspaceRole!=='owner')throw new Error('ROLE_FORBIDDEN');
+      return {kind:'sqlite',schemaVersion:1,migrationStatus:'ALREADY_IMPORTED',rowCount:7,importedRowCount:5,backupAvailable:true};
+    },
     openLibrary: async () => ({ opened: true }),
     addGoogleAccount: async () => ({ ok: true }),
     listGoogleAccounts: async () => [],
@@ -183,6 +187,16 @@ test('Web edge authenticates one-time ticket, workspace overview, CSRF, device/s
     assert.equal(workspaceSnapshot.workspace.plan, 'personal');
     assert.equal(workspaceSnapshot.membership.role, 'admin');
     assert.equal(workspaceSnapshot.quota.managedStorage.percent, 10);
+
+    const catalog = await fetch(`${origin}/api/web/v1/operations/media-catalog`, { headers: { origin, authorization: 'Bearer access-token' } });
+    assert.equal(catalog.status, 200);
+    const catalogSnapshot = await catalog.json() as Record<string, unknown>;
+    assert.equal(catalogSnapshot.kind, 'sqlite');
+    assert.equal(catalogSnapshot.rowCount, 7);
+    assert.equal('backupPath' in catalogSnapshot, false);
+    assert.equal('sourceSha256' in catalogSnapshot, false);
+    const memberCatalog = await fetch(`${origin}/api/web/v1/operations/media-catalog`, { headers: { origin, authorization: 'Bearer member-token' } });
+    assert.equal(memberCatalog.status, 403);
 
     const devices = await fetch(`${origin}/api/web/v1/devices`, { headers: { origin, authorization: 'Bearer access-token' } });
     assert.equal(devices.status, 200);

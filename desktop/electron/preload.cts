@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   listLocalMedia: () => ipcRenderer.invoke('photosync:list-local'),
   listCloudUploads: () => ipcRenderer.invoke('photosync:list-cloud-uploads'),
   getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),
+  getMediaCatalogDiagnostics: () => ipcRenderer.invoke('photosync:media-catalog-diagnostics'),
   openLibrary: () => ipcRenderer.invoke('photosync:open-library'),
   openExternal: (url: string) => ipcRenderer.invoke('photosync:open-external', url),
   addGoogleAccount: () => ipcRenderer.invoke('photosync:add-google'),

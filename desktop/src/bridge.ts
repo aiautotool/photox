@@ -23,6 +23,7 @@ export type MigrationJob={id:string;workspaceId:string;sourceAccountId:string;so
 export type MigrationItem={id:string;jobId:string;sourceMediaId:string;filename:string;mimeType?:string;sizeBytes?:number;state:string;attempts:number;transferredBytes:number;targetId?:string;targetUrl?:string;error?:string;createdAt:string;updatedAt:string};
 export type MigrationSnapshot={job:MigrationJob;items:MigrationItem[]};
 export type BackupHealthSnapshot = {total:number;safe:number;atRisk:number;critical:number;unknown:number;photos:number;videos:number;totalBytes:number;problems:{key:string;filename:string;health:'at_risk'|'critical'|'unknown';reason:string}[]};
+export type MediaCatalogDiagnostics={kind:'sqlite';schemaVersion:number;migrationStatus:string;rowCount:number;importedRowCount:number;backupAvailable:boolean;backupPath?:string;sourceSha256?:string};
 
 export interface DesktopBridge {
   platform:string;
@@ -31,6 +32,7 @@ export interface DesktopBridge {
   listLocalMedia():Promise<LocalMedia[]>;
   listCloudUploads():Promise<CloudUpload[]>;
   getBackupHealth():Promise<BackupHealthSnapshot>;
+  getMediaCatalogDiagnostics():Promise<MediaCatalogDiagnostics>;
   openLibrary():Promise<void>;
   openExternal(url:string):Promise<void>;
   addGoogleAccount():Promise<DesktopStatus>;
@@ -183,6 +185,7 @@ export function createHttpDesktopBridge(config:WebBridgeConfig):DesktopBridge {
     listLocalMedia:()=>json('/api/web/v1/library'),
     listCloudUploads:()=>json('/api/web/v1/cloud/uploads'),
     getBackupHealth:()=>json('/api/web/v1/backup/health'),
+    getMediaCatalogDiagnostics:()=>json('/api/web/v1/operations/media-catalog'),
     openLibrary:async()=>{await json('/api/web/v1/library/open',{method:'POST'});},
     openExternal:async(url)=>{const parsed=new URL(url);if(parsed.protocol!=='https:')throw new Error('WEB_EXTERNAL_URL_REJECTED');window.open(parsed.toString(),'_blank','noopener,noreferrer');},
     addGoogleAccount:()=>json('/api/web/v1/google-drive/accounts/connect',{method:'POST'}),

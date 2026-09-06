@@ -25,6 +25,7 @@ import { openActiveMediaCatalogBackend, type ActiveMediaCatalogBackend } from '.
 import { createMediaProviderOperationGate } from './mediaProviderOperationGate.js';
 import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';
+import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWeb } from './mediaCatalogOperationsTransport.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -708,6 +709,7 @@ async function startWebEdge(){
     revokeSession:sessionId=>requireWorkspaceAuth().revoke(sessionId),
     appendAudit:async(principal,event)=>{requireWorkspaceRepository().appendAudit({workspaceId:principal.workspaceId,actorUserId:principal.subject,actorDeviceId:principal.deviceId,action:event.action,targetType:event.targetType,targetId:event.targetId,metadata:{...(event.metadata||{}),sessionId:principal.sessionId,role:principal.workspaceRole,source:'web'}});},
     getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
+    getMediaCatalogOperationsDiagnostics:principal=>mediaCatalogDiagnosticsForWeb(requireMediaCatalog(),{workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole}),
     listLocalMedia,listCloudUploads,getBackupHealth:backupHealthSnapshot,openLibrary:()=>shell.openPath(libraryDir()),addGoogleAccount:connectGoogle,listGoogleAccounts:listDriveAccounts,removeGoogleAccount:removeDriveAccount,
     retryCloud:async()=>{await retryQueuedCloud();return desktopStatus();},listGooglePhotosAccounts:()=>migrations().listAccounts(),connectGooglePhotosAccount:capability=>migrations().connectAccount(capability),removeGooglePhotosAccount:accountId=>migrations().removeAccount(accountId),
     listMigrations:()=>migrations().listJobs(),getMigration:jobId=>migrations().getSnapshot(jobId),createMigration:input=>migrations().createSelection(input),materializeMigration:jobId=>migrations().materializeSelection(jobId),
@@ -724,6 +726,7 @@ function createWindow(){const win=new BrowserWindow({width:1500,height:940,minWi
 
 ipcMain.handle('photosync:status',()=>desktopStatus());
 ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());
+ipcMain.handle('photosync:media-catalog-diagnostics',()=>mediaCatalogDiagnosticsForDesktopOperator(requireMediaCatalog()));
 ipcMain.handle('photosync:list-local',()=>listLocalMedia());
 ipcMain.handle('photosync:list-cloud-uploads',()=>listCloudUploads());
 ipcMain.handle('photosync:open-library',()=>shell.openPath(libraryDir()));
