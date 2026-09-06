@@ -16,10 +16,21 @@ export type ResumableIngestCommitInput = {
   sha256: string;
 };
 
+export type ResumableQuotaReservation = {
+  reservationId: string;
+};
+
+export type ResumableQuotaReservationHooks = {
+  reserve(input: { principal: ResumableIngestPrincipal; expectedBytes: number; assetId: string }): Promise<ResumableQuotaReservation>;
+  commit(input: { principal: ResumableIngestPrincipal; reservationId: string; expectedBytes: number; key: string }): Promise<void>;
+  release(input: { principal: ResumableIngestPrincipal; reservationId: string; expectedBytes: number; reason: 'duplicate' | 'expired' | 'create_failed' }): Promise<void>;
+};
+
 export type ResumableIngestLifecycleDependencies<T> = {
   store: ResumableMediaIngestStore;
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   commit(input: ResumableIngestCommitInput): Promise<T>;
+  quota?: ResumableQuotaReservationHooks;
 };
 
 function requiredIdentity(value: string, code: string) {
@@ -51,12 +62,28 @@ function binding(principal: ResumableIngestPrincipal) {
   };
 }
 
+function quotaReservationId(session: ResumableMediaSession) {
+  return session.quotaReservationId ? requiredIdentity(session.quotaReservationId, 'UPLOAD_QUOTA_RESERVATION_INVALID') : undefined;
+}
+
 export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLifecycleDependencies<T>) {
   const coordinator = createMediaIngestCommitCoordinator();
 
-  async function create(principal: ResumableIngestPrincipal, input: Omit<CreateResumableMediaSessionInput, 'workspaceId' | 'deviceId'>) {
+  async function create(principal: ResumableIngestPrincipal, input: Omit<CreateResumableMediaSessionInput, 'workspaceId' | 'deviceId' | 'quotaReservationId'>) {
     const actor = binding(principal);
-    return deps.store.create({ ...input, ...actor });
+    let reservation: ResumableQuotaReservation | undefined;
+    if (deps.quota) {
+      reservation = await deps.quota.reserve({ principal: actor, expectedBytes: input.expectedBytes, assetId: input.assetId });
+      requiredIdentity(reservation.reservationId, 'UPLOAD_QUOTA_RESERVATION_REQUIRED');
+    }
+    try {
+      return await deps.store.create({ ...input, ...actor, quotaReservationId: reservation?.reservationId });
+    } catch (error) {
+      if (reservation && deps.quota) {
+        await deps.quota.release({ principal: actor, reservationId: reservation.reservationId, expectedBytes: input.expectedBytes, reason: 'create_failed' });
+      }
+      throw error;
+    }
   }
 
   async function status(principal: ResumableIngestPrincipal, sessionId: string) {
@@ -89,11 +116,32 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
       }),
     });
 
+    const reservationId = quotaReservationId(complete.session);
+    if (reservationId && deps.quota) {
+      if (outcome.status === 'duplicate') {
+        await deps.quota.release({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, reason: 'duplicate' });
+      } else {
+        await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
+      }
+    }
     await deps.store.remove(sessionId);
     return outcome.status === 'duplicate'
       ? { state: 'ALREADY_RECEIVED' as const, key, sha256: authoritativeSha256 }
       : { state: 'COMMITTED' as const, key, sha256: authoritativeSha256, value: outcome.value };
   }
 
-  return { create, status, appendChunk, finalize, pendingFinalizations: coordinator.pending };
+  async function cleanupExpired() {
+    return deps.store.cleanupExpired(async session => {
+      const reservationId = quotaReservationId(session);
+      if (!reservationId || !deps.quota) return;
+      await deps.quota.release({
+        principal: { workspaceId: session.workspaceId, deviceId: session.deviceId },
+        reservationId,
+        expectedBytes: session.expectedBytes,
+        reason: 'expired',
+      });
+    });
+  }
+
+  return { create, status, appendChunk, finalize, cleanupExpired, pendingFinalizations: coordinator.pending };
 }
