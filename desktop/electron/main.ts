@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, type MediaReplica, type StorageAccount } from '@photosync/core';
+import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
@@ -26,6 +26,7 @@ import { createMediaProviderOperationGate } from './mediaProviderOperationGate.j
 import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';
 import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWeb } from './mediaCatalogOperationsTransport.js';
+import { prepareLegacyMediaIndexForSqlite } from './legacyMediaIndexPreparation.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -198,18 +199,8 @@ function lanAddress(){
 }
 
 async function prepareLegacyIndexForSqlite():Promise<void>{
-  try{
-    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];
-    const migrated=migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID);
-    if(!migrated.migrated)return;
-    await fs.mkdir(stateDir(),{recursive:true});
-    const tmp=`${indexFile()}.${crypto.randomUUID()}.migrating`;
-    await fs.writeFile(tmp,`${JSON.stringify(migrated.rows,null,2)}\n`,'utf8');
-    await fs.rename(tmp,indexFile());
-  }catch(error){
-    if((error as NodeJS.ErrnoException).code==='ENOENT')return;
-    throw error;
-  }
+  const result=await prepareLegacyMediaIndexForSqlite({indexPath:indexFile(),workspaceId:LEGACY_WORKSPACE_ID});
+  if(result.removedStaleTemps)console.info('PhotoX removed stale legacy media-index migration temps',result.removedStaleTemps);
 }
 async function readAllIndex():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
 async function readAllIndexForRecovery():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
