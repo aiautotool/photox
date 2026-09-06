@@ -25,7 +25,7 @@ replacement = """async function deleteManagedMedia(key:string,workspaceId=LEGACY
     // A tombstone left by an interrupted delete is resumable. Inside the exact
     // provider-operation gate there cannot be another live upload/delete for the
     // same workspace + media identity, so continuing the prior claim is safe.
-    const claimId=claimed.deletion?.claimId||requestedClaimId;
+    const claimId=(claimed as MediaIndexRow&{deletion?:{claimId:string}}).deletion?.claimId||requestedClaimId;
     const row=claimed as MediaIndexRow;
     const accounts=new Map((await savedDriveAccounts(workspaceId)).map(account=>[account.id,account]));const failures:string[]=[];
     for(const replica of replicasOf(row).filter(replica=>replica.remoteFileId)){
