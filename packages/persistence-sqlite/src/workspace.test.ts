@@ -42,7 +42,6 @@ describe('SqliteWorkspaceRepository', () => {
     store.close();
   });
 
-
   it('atomically reserves media bytes and rolls back rejected quota writes', () => {
     const { store, repo } = setup();
     repo.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'user-a' });
@@ -51,6 +50,46 @@ describe('SqliteWorkspaceRepository', () => {
     expect(() => repo.reserveMediaWrite('ws-a', 60, { maxManagedStorageBytes: 200, maxMonthlyIngressBytes: 300 })).toThrow('WORKSPACE_MANAGED_STORAGE_QUOTA_EXCEEDED');
     expect(repo.getUsage('ws-a')).toMatchObject({ managedStorageBytes: 150, monthlyIngressBytes: 250 });
     expect(repo.releaseMediaReservation('ws-a', 50)).toMatchObject({ managedStorageBytes: 100, monthlyIngressBytes: 200 });
+    store.close();
+  });
+
+  it('persists idempotent media reservation ownership for resumable sessions', () => {
+    const { store, repo } = setup();
+    repo.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'user-a' });
+    const input={reservationId:'reservation-a',workspaceId:'ws-a',deviceId:'phone-a',assetId:'asset-a',bytes:64,limits:{maxManagedStorageBytes:1000,maxMonthlyIngressBytes:1000},now:Date.UTC(2026,8,7)};
+    const first=repo.createMediaReservation(input);
+    const repeated=repo.createMediaReservation(input);
+    expect(first).toMatchObject({id:'reservation-a',workspaceId:'ws-a',deviceId:'phone-a',assetId:'asset-a',bytes:64,state:'reserved'});
+    expect(repeated).toEqual(first);
+    expect(repo.getUsage('ws-a')).toMatchObject({managedStorageBytes:64,monthlyIngressBytes:64});
+    expect(()=>repo.createMediaReservation({...input,assetId:'asset-b'})).toThrow('MEDIA_RESERVATION_ID_CONFLICT');
+    store.close();
+  });
+
+  it('commits a durable media reservation exactly once without changing usage twice', () => {
+    const { store, repo } = setup();
+    repo.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'user-a' });
+    repo.createMediaReservation({reservationId:'reservation-a',workspaceId:'ws-a',deviceId:'phone-a',assetId:'asset-a',bytes:80,limits:{maxManagedStorageBytes:1000,maxMonthlyIngressBytes:1000}});
+    expect(repo.commitMediaReservation('ws-a','reservation-a','phone-a:asset-a')).toMatchObject({state:'committed',mediaKey:'phone-a:asset-a'});
+    expect(repo.commitMediaReservation('ws-a','reservation-a','phone-a:asset-a')).toMatchObject({state:'committed',mediaKey:'phone-a:asset-a'});
+    expect(repo.getUsage('ws-a')).toMatchObject({managedStorageBytes:80,monthlyIngressBytes:80});
+    expect(()=>repo.commitMediaReservation('ws-a','reservation-a','other:key')).toThrow('MEDIA_RESERVATION_COMMIT_CONFLICT');
+    expect(()=>repo.releaseMediaReservationById('ws-a','reservation-a','duplicate')).toThrow('MEDIA_RESERVATION_ALREADY_COMMITTED');
+    store.close();
+  });
+
+  it('releases a reservation idempotently and does not subtract prior-month ingress from the new month', () => {
+    const { store, repo } = setup();
+    const august=Date.UTC(2026,7,31,23,59);
+    const september=Date.UTC(2026,8,1,0,1);
+    repo.ensureLegacyPersonalWorkspace({ workspaceId: 'ws-a', ownerUserId: 'user-a', now:august });
+    repo.createMediaReservation({reservationId:'reservation-a',workspaceId:'ws-a',deviceId:'phone-a',assetId:'asset-a',bytes:90,limits:{maxManagedStorageBytes:1000,maxMonthlyIngressBytes:1000},now:august});
+    expect(repo.getUsage('ws-a')).toMatchObject({managedStorageBytes:90,monthlyIngressBytes:90});
+    repo.ensureMonthlyIngressPeriod('ws-a',september);
+    expect(repo.getUsage('ws-a')).toMatchObject({managedStorageBytes:90,monthlyIngressBytes:0});
+    expect(repo.releaseMediaReservationById('ws-a','reservation-a','expired',september)).toMatchObject({state:'released',releaseReason:'expired'});
+    expect(repo.releaseMediaReservationById('ws-a','reservation-a','expired',september)).toMatchObject({state:'released',releaseReason:'expired'});
+    expect(repo.getUsage('ws-a')).toMatchObject({managedStorageBytes:0,monthlyIngressBytes:0});
     store.close();
   });
 
@@ -81,6 +120,7 @@ describe('SqliteWorkspaceRepository', () => {
     expect(repo.listAudit('ws-b')).toHaveLength(1);
     store.close();
   });
+
   it('resets monthly ingress at UTC month boundary without reducing managed storage', () => {
     const {store,repo}=setup();
     const august=Date.UTC(2026,7,20);
@@ -92,5 +132,4 @@ describe('SqliteWorkspaceRepository', () => {
     expect(after.managedStorageBytes).toBe(100); expect(after.monthlyIngressBytes).toBe(0);
     store.close();
   });
-
 });
