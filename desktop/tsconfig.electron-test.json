@@ -40,6 +40,8 @@
     "electron/mediaCatalogOperationsTransport.test.ts",
     "electron/mediaCatalogOfflineExport.ts",
     "electron/mediaCatalogOfflineExport.test.ts",
+    "electron/mediaCatalogOfflineRestore.ts",
+    "electron/mediaCatalogOfflineRestore.test.ts",
     "electron/mediaIndexMutationRepository.ts",
     "electron/mediaIndexMutationRepository.test.ts",
     "electron/mediaIndexReplicaMerge.ts",
