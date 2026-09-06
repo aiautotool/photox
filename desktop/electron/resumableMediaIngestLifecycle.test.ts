@@ -116,3 +116,79 @@ test('failed commit retains verified session so finalize can be retried', async 
   assert.equal(attempts, 1);
   assert.equal((await lifecycle.status(principal, session.sessionId)).acknowledgedBytes, 6);
 });
+
+test('quota reservation id survives restart and is committed only after media commit', async t => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-resumable-quota-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const events: string[] = [];
+  const quota = {
+    reserve: async () => { events.push('reserve'); return { reservationId: 'quota-1' }; },
+    commit: async ({ reservationId }: { reservationId: string }) => { events.push(`commit:${reservationId}`); },
+    release: async ({ reservationId, reason }: { reservationId: string; reason: string }) => { events.push(`release:${reservationId}:${reason}`); },
+  };
+  const first = createResumableMediaIngestLifecycle({
+    store: new ResumableMediaIngestStore({ rootDir }),
+    quota,
+    exists: async () => false,
+    commit: async () => ({ ok: true }),
+  });
+  const session = await first.create(principal, createInput);
+  assert.equal(session.quotaReservationId, 'quota-1');
+  await first.appendChunk(principal, { sessionId: session.sessionId, offset: 0, chunk: Buffer.from('abcdef') });
+
+  const restarted = createResumableMediaIngestLifecycle({
+    store: new ResumableMediaIngestStore({ rootDir }),
+    quota,
+    exists: async () => false,
+    commit: async () => { events.push('media-commit'); return { ok: true }; },
+  });
+  assert.equal((await restarted.status(principal, session.sessionId)).quotaReservationId, 'quota-1');
+  const sha256 = crypto.createHash('sha256').update('abcdef').digest('hex');
+  await restarted.finalize(principal, { sessionId: session.sessionId, sha256 });
+  assert.deepEqual(events, ['reserve', 'media-commit', 'commit:quota-1']);
+});
+
+test('duplicate finalize releases durable quota reservation instead of committing it', async t => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-resumable-quota-duplicate-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const events: string[] = [];
+  const lifecycle = createResumableMediaIngestLifecycle({
+    store: new ResumableMediaIngestStore({ rootDir }),
+    quota: {
+      reserve: async () => ({ reservationId: 'quota-dup' }),
+      commit: async () => { events.push('commit'); },
+      release: async ({ reason }) => { events.push(`release:${reason}`); },
+    },
+    exists: async () => true,
+    commit: async () => { throw new Error('SHOULD_NOT_COMMIT'); },
+  });
+  const session = await lifecycle.create(principal, createInput);
+  await lifecycle.appendChunk(principal, { sessionId: session.sessionId, offset: 0, chunk: Buffer.from('abcdef') });
+  const sha256 = crypto.createHash('sha256').update('abcdef').digest('hex');
+  const result = await lifecycle.finalize(principal, { sessionId: session.sessionId, sha256 });
+  assert.equal(result.state, 'ALREADY_RECEIVED');
+  assert.deepEqual(events, ['release:duplicate']);
+});
+
+test('expired cleanup releases quota reservation before deleting session', async t => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-resumable-quota-expired-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let now = 1_700_000_000_000;
+  const events: string[] = [];
+  const store = new ResumableMediaIngestStore({ rootDir, now: () => now, defaultTtlMs: 1000 });
+  const lifecycle = createResumableMediaIngestLifecycle({
+    store,
+    quota: {
+      reserve: async () => ({ reservationId: 'quota-expired' }),
+      commit: async () => { events.push('commit'); },
+      release: async ({ reason }) => { events.push(`release:${reason}`); },
+    },
+    exists: async () => false,
+    commit: async () => ({ ok: true }),
+  });
+  const session = await lifecycle.create(principal, createInput);
+  now += 1001;
+  assert.equal(await lifecycle.cleanupExpired(), 1);
+  assert.deepEqual(events, ['release:expired']);
+  await assert.rejects(() => store.get(session.sessionId), /UPLOAD_SESSION_NOT_FOUND/);
+});
