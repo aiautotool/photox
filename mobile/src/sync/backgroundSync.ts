@@ -2,7 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import { loadPairedDesktop } from './pairing';
 import { loadDevicePhotos, pingLaptop, syncAssetsToLaptop } from './mobileSync';
-import { loadFailedAssets, loadSyncedAssetIds } from './syncLedger';
+import { isFailedAssetRetryDue, loadFailedAssets, loadFailedRetryState, loadSyncedAssetIds } from './syncLedger';
 
 const TASK = 'photosync-background-sync-v1';
 
@@ -11,8 +11,13 @@ export async function runPairedSync() {
   if (!target) return false;
   await pingLaptop(target);
   const assets = await loadDevicePhotos(300);
-  const [synced, failed] = await Promise.all([loadSyncedAssetIds(), loadFailedAssets()]);
-  const pending = assets.filter(asset => !synced.has(asset.id) && !failed[asset.id]);
+  const [synced, failed, retryState] = await Promise.all([
+    loadSyncedAssetIds(),
+    loadFailedAssets(),
+    loadFailedRetryState(),
+  ]);
+  const now = Date.now();
+  const pending = assets.filter(asset => !synced.has(asset.id) && (!failed[asset.id] || isFailedAssetRetryDue(retryState[asset.id], now)));
   if (!pending.length) return true;
   const result = await syncAssetsToLaptop(target, pending);
   if (result.failed) throw new Error(`Background sync failed for ${result.failed} file(s): ${result.lastError || 'unknown error'}`);
