@@ -18,8 +18,18 @@ export type OfflineMediaCatalogRestoreResult = {
   backupPath: string;
 };
 
+type RestoreTestKillPoint = 'backup-created' | 'transaction-started' | 'commit-complete';
+
 function sha256(content: Buffer | string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+function maybePauseAtTestKillPoint(point: RestoreTestKillPoint): void {
+  if (process.env.NODE_ENV !== 'test') return;
+  if (process.env.PHOTOX_TEST_MEDIA_CATALOG_RESTORE_KILLPOINT !== point) return;
+  process.stdout.write(`READY:${point}\n`);
+  const barrier = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(barrier, 0, 0);
 }
 
 function parseRows<T extends SqliteMediaIndexIdentity & Record<string, unknown>>(content: Buffer): T[] {
@@ -89,6 +99,7 @@ export function restoreMediaCatalogOffline<T extends SqliteMediaIndexIdentity & 
   try {
     const catalog = new SqliteMediaIndexCatalog<T>(store);
     catalog.exportLegacyJson(backupPath);
+    maybePauseAtTestKillPoint('backup-created');
 
     store.db.exec('BEGIN IMMEDIATE');
     try {
@@ -96,7 +107,9 @@ export function restoreMediaCatalogOffline<T extends SqliteMediaIndexIdentity & 
       const insert = store.db.prepare('INSERT INTO photox_media_index(workspace_id,media_key,row_json,updated_at) VALUES(?,?,?,?)');
       const restoredAt = new Date().toISOString();
       for (const row of rows) insert.run(row.workspaceId, row.key, JSON.stringify(row), restoredAt);
+      maybePauseAtTestKillPoint('transaction-started');
       store.db.exec('COMMIT');
+      maybePauseAtTestKillPoint('commit-complete');
     } catch (error) {
       store.db.exec('ROLLBACK');
       throw error;
