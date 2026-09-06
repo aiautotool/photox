@@ -30,6 +30,8 @@
     "electron/googlePhotosMigration.test.ts",
     "electron/googlePhotosMigrationSpool.ts",
     "electron/googlePhotosMigrationSpool.test.ts",
+    "electron/legacyMediaIndexPreparation.ts",
+    "electron/legacyMediaIndexPreparation.test.ts",
     "electron/mediaCatalogAuthorityLease.ts",
     "electron/mediaCatalogAuthorityIntegration.test.ts",
     "electron/mediaCatalogBackend.ts",
