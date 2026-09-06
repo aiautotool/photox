@@ -61,6 +61,8 @@
     "electron/mediaProviderOperationGate.test.ts",
     "electron/mediaProcessing.ts",
     "electron/mediaProcessing.test.ts",
+    "electron/mediaRepairCatalog.ts",
+    "electron/mediaRepairCatalog.test.ts",
     "electron/mediaRepairCoordinator.ts",
     "electron/mediaRepairCoordinator.test.ts",
     "electron/mediaRepairTransport.ts",
