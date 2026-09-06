@@ -35,13 +35,13 @@ jobs:
           "    if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);\n    if(m==='GET'&&p==='/api/web/v1/operations/media-catalog'){\n      if(!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}\n      if(!this.handlers.getMediaCatalogOperationsDiagnostics){this.json(res,503,{error:'MEDIA_CATALOG_OPERATIONS_UNAVAILABLE'});return;}\n      return read(()=>Promise.resolve(this.handlers.getMediaCatalogOperationsDiagnostics!(principal)));\n    }\n    if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);")
           replace('desktop/electron/main.ts',
           "import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';",
-          "import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';\nimport { getLocalMediaCatalogOperationsDiagnostics, getWebMediaCatalogOperationsDiagnostics } from './mediaCatalogOperationsTransport.js';")
+          "import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';\nimport { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWeb } from './mediaCatalogOperationsTransport.js';")
           replace('desktop/electron/main.ts',
           "    getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),",
-          "    getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),\n    getMediaCatalogOperationsDiagnostics:principal=>getWebMediaCatalogOperationsDiagnostics({backend:requireMediaCatalog(),session:{workspaceId:principal.workspaceId,role:principal.workspaceRole??'viewer'}}),")
+          "    getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),\n    getMediaCatalogOperationsDiagnostics:principal=>mediaCatalogDiagnosticsForWeb(requireMediaCatalog(),{workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole}),")
           replace('desktop/electron/main.ts',
           "ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());",
-          "ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());\nipcMain.handle('photosync:media-catalog-diagnostics',()=>getLocalMediaCatalogOperationsDiagnostics({backend:requireMediaCatalog()}));")
+          "ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());\nipcMain.handle('photosync:media-catalog-diagnostics',()=>mediaCatalogDiagnosticsForDesktopOperator(requireMediaCatalog()));")
           replace('desktop/electron/preload.cts',
           "  getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),",
           "  getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),\n  getMediaCatalogDiagnostics: () => ipcRenderer.invoke('photosync:media-catalog-diagnostics'),")
