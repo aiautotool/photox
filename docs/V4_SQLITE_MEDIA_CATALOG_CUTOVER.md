@@ -20,8 +20,9 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - Catalog health is now live rather than a startup snapshot: `rowCount` is read from current SQLite authority after ingest/delete, preventing stale Admin/Operations diagnostics.
 - `mediaCatalogOperationsTransport.ts` defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256.
 - Production transports expose authenticated Web `GET /api/web/v1/operations/media-catalog` and trusted Desktop IPC/preload diagnostics through the shared `DesktopBridge` contract.
-- Desktop runtime and offline operator export now share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export, operator export blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
+- Desktop runtime and offline operator recovery tools share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export/restore, offline operator ownership blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
 - `mediaCatalogOfflineExport.ts` wraps the existing atomic SQLite→JSON export with that authority lease and refuses a missing SQLite database instead of creating an empty catalog. `catalog:export` provides an explicit CLI surface. The resulting JSON is a recovery/rollback artifact only; runtime remains SQLite-only.
+- `mediaCatalogOfflineRestore.ts` consumes only a SHA-256-verified offline export while holding the same authority lease. Before mutation it exports the current authoritative rows to a pre-restore JSON backup, then replaces only `photox_media_index` rows in one SQLite transaction while preserving schema/migration metadata. JSON never becomes a live writer and the SQLite database file remains the sole runtime authority.
 
 ## Offline operator export
 With PhotoX Desktop fully stopped, run:
@@ -30,12 +31,27 @@ With PhotoX Desktop fully stopped, run:
 npm --workspace @photosync/desktop run catalog:export -- --sqlite "/path/to/photosync-state/media-catalog.sqlite" --out "/safe/path/photox-media-catalog-rollback.json"
 ```
 
-The command fails if Desktop currently owns the media catalog. Keep the exported JSON outside the active state directory when possible. Do not replace `media-index.json` while PhotoX is running and do not use this artifact as a second live writer.
+Record the `sha256` emitted by the command together with the export artifact. Keep the exported JSON outside the active state directory when possible. Do not replace `media-index.json` while PhotoX is running and do not use this artifact as a second live writer.
+
+## Offline operator restore
+With PhotoX Desktop fully stopped, restore a previously exported artifact only when its recorded SHA-256 is available:
+
+```bash
+npm --workspace @photosync/desktop run catalog:restore -- \
+  --sqlite "/path/to/photosync-state/media-catalog.sqlite" \
+  --from "/safe/path/photox-media-catalog-rollback.json" \
+  --sha256 "<sha256-from-catalog-export>" \
+  --backup "/safe/path/pre-restore-current-catalog.json"
+```
+
+The restore command verifies the source hash and tenant/media-key uniqueness before taking authority or mutating SQLite. While holding exclusive authority it writes a pre-restore backup of the current SQLite rows, replaces the media rows transactionally, verifies the restored rows, closes SQLite, then releases the authority lease. If Desktop is running, the command fails rather than racing it. A missing/corrupt source, SHA mismatch, duplicate identity, missing/corrupt SQLite database, or malformed authority lock fails closed.
+
+After a successful restore, start PhotoX normally. SQLite remains the sole active runtime catalog; the JSON source and pre-restore backup remain offline recovery artifacts only.
 
 ## Active cutover work
 1. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are regression-covered.
 2. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
-3. Add an explicit documented restore procedure that consumes a verified offline export only while Desktop is stopped; restore must preserve SQLite as the sole runtime authority after restart.
+3. Add process-level acceptance around operator restore interruption and stale lease reclamation so an OS kill during recovery is explicitly characterized and recoverable.
 4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.
 
 ## Non-negotiable product constraints carried through cutover
