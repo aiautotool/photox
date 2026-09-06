@@ -22,6 +22,20 @@ export interface WorkspaceAuditEvent {
   createdAt: number;
 }
 
+export interface WorkspaceMediaReservation {
+  id: string;
+  workspaceId: string;
+  deviceId: string;
+  assetId: string;
+  bytes: number;
+  ingressPeriod: string;
+  state: 'reserved' | 'committed' | 'released';
+  mediaKey?: string;
+  releaseReason?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 const ZERO_USAGE: WorkspaceUsage = {
   managedStorageBytes: 0,
   monthlyIngressBytes: 0,
@@ -83,6 +97,21 @@ export class SqliteWorkspaceRepository {
         updated_at INTEGER NOT NULL,
         FOREIGN KEY(workspace_id) REFERENCES photox_workspaces(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS photox_workspace_media_reservations (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        ingress_period TEXT NOT NULL,
+        state TEXT NOT NULL,
+        media_key TEXT,
+        release_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(workspace_id) REFERENCES photox_workspaces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_photox_media_reservations_workspace_state ON photox_workspace_media_reservations(workspace_id,state,updated_at);
       CREATE TABLE IF NOT EXISTS photox_workspace_audit (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -219,6 +248,96 @@ export class SqliteWorkspaceRepository {
     };
   }
 
+  private mediaReservationRow(row: Record<string, unknown> | undefined): WorkspaceMediaReservation | null {
+    return row ? {
+      id: String(row.id), workspaceId: String(row.workspace_id), deviceId: String(row.device_id), assetId: String(row.asset_id), bytes: Number(row.bytes),
+      ingressPeriod: String(row.ingress_period), state: String(row.state) as WorkspaceMediaReservation['state'],
+      mediaKey: row.media_key == null ? undefined : String(row.media_key), releaseReason: row.release_reason == null ? undefined : String(row.release_reason),
+      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+    } : null;
+  }
+
+  getMediaReservation(workspaceId: string, reservationId: string): WorkspaceMediaReservation | null {
+    return this.mediaReservationRow(this.store.db.prepare('SELECT * FROM photox_workspace_media_reservations WHERE workspace_id=? AND id=?').get(workspaceId, reservationId) as Record<string, unknown> | undefined);
+  }
+
+  createMediaReservation(input: {
+    reservationId?: string;
+    workspaceId: string;
+    deviceId: string;
+    assetId: string;
+    bytes: number;
+    limits: { maxManagedStorageBytes: number | null; maxMonthlyIngressBytes: number | null };
+    now?: number;
+  }): WorkspaceMediaReservation {
+    const reservationId=String(input.reservationId||randomUUID()).trim();
+    const workspaceId=String(input.workspaceId||'').trim();
+    const deviceId=String(input.deviceId||'').trim();
+    const assetId=String(input.assetId||'').trim();
+    if(!reservationId)throw new Error('MEDIA_RESERVATION_ID_REQUIRED');
+    if(!workspaceId)throw new Error('WORKSPACE_SCOPE_REQUIRED');
+    if(!deviceId)throw new Error('DEVICE_SCOPE_REQUIRED');
+    if(!assetId)throw new Error('ASSET_ID_REQUIRED');
+    if (!Number.isFinite(input.bytes) || input.bytes <= 0) throw new Error('INVALID_MEDIA_RESERVATION_BYTES');
+    const now=input.now??Date.now();
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing=this.getMediaReservation(workspaceId,reservationId);
+      if(existing){
+        if(existing.deviceId!==deviceId||existing.assetId!==assetId||existing.bytes!==input.bytes)throw new Error('MEDIA_RESERVATION_ID_CONFLICT');
+        this.store.db.exec('COMMIT');
+        return existing;
+      }
+      const usage = this.ensureMonthlyIngressPeriod(workspaceId, now);
+      const nextManaged = usage.managedStorageBytes + input.bytes;
+      const nextIngress = usage.monthlyIngressBytes + input.bytes;
+      if (input.limits.maxManagedStorageBytes !== null && nextManaged > input.limits.maxManagedStorageBytes) throw new Error('WORKSPACE_MANAGED_STORAGE_QUOTA_EXCEEDED');
+      if (input.limits.maxMonthlyIngressBytes !== null && nextIngress > input.limits.maxMonthlyIngressBytes) throw new Error('WORKSPACE_MONTHLY_INGRESS_QUOTA_EXCEEDED');
+      this.setUsage(workspaceId,{...usage,managedStorageBytes:nextManaged,monthlyIngressBytes:nextIngress},now);
+      const ingressPeriod=this.usagePeriod(now);
+      this.store.db.prepare(`INSERT INTO photox_workspace_media_reservations(id,workspace_id,device_id,asset_id,bytes,ingress_period,state,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(reservationId,workspaceId,deviceId,assetId,input.bytes,ingressPeriod,'reserved',now,now);
+      this.store.db.exec('COMMIT');
+      return this.getMediaReservation(workspaceId,reservationId)!;
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  commitMediaReservation(workspaceId: string, reservationId: string, mediaKey: string, now = Date.now()): WorkspaceMediaReservation {
+    const key=String(mediaKey||'').trim();if(!key)throw new Error('MEDIA_KEY_REQUIRED');
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try{
+      const current=this.getMediaReservation(workspaceId,reservationId);if(!current)throw new Error('MEDIA_RESERVATION_NOT_FOUND');
+      if(current.state==='released')throw new Error('MEDIA_RESERVATION_ALREADY_RELEASED');
+      if(current.state==='committed'){
+        if(current.mediaKey!==key)throw new Error('MEDIA_RESERVATION_COMMIT_CONFLICT');
+        this.store.db.exec('COMMIT');return current;
+      }
+      this.store.db.prepare(`UPDATE photox_workspace_media_reservations SET state='committed',media_key=?,updated_at=? WHERE workspace_id=? AND id=? AND state='reserved'`).run(key,now,workspaceId,reservationId);
+      this.store.db.exec('COMMIT');return this.getMediaReservation(workspaceId,reservationId)!;
+    }catch(error){this.store.db.exec('ROLLBACK');throw error;}
+  }
+
+  releaseMediaReservationById(workspaceId: string, reservationId: string, reason: string, now = Date.now()): WorkspaceMediaReservation {
+    const releaseReason=String(reason||'').trim()||'released';
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try{
+      const current=this.getMediaReservation(workspaceId,reservationId);if(!current)throw new Error('MEDIA_RESERVATION_NOT_FOUND');
+      if(current.state==='committed')throw new Error('MEDIA_RESERVATION_ALREADY_COMMITTED');
+      if(current.state==='released'){this.store.db.exec('COMMIT');return current;}
+      const usage=this.ensureMonthlyIngressPeriod(workspaceId,now);
+      const sameIngressPeriod=current.ingressPeriod===this.usagePeriod(now);
+      this.setUsage(workspaceId,{
+        ...usage,
+        managedStorageBytes:Math.max(0,usage.managedStorageBytes-current.bytes),
+        monthlyIngressBytes:sameIngressPeriod?Math.max(0,usage.monthlyIngressBytes-current.bytes):usage.monthlyIngressBytes,
+      },now);
+      this.store.db.prepare(`UPDATE photox_workspace_media_reservations SET state='released',release_reason=?,updated_at=? WHERE workspace_id=? AND id=? AND state='reserved'`).run(releaseReason,now,workspaceId,reservationId);
+      this.store.db.exec('COMMIT');return this.getMediaReservation(workspaceId,reservationId)!;
+    }catch(error){this.store.db.exec('ROLLBACK');throw error;}
+  }
 
   reserveMediaWrite(workspaceId: string, bytes: number, limits: { maxManagedStorageBytes: number | null; maxMonthlyIngressBytes: number | null }, now = Date.now()): WorkspaceUsage {
     if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('INVALID_MEDIA_RESERVATION_BYTES');
