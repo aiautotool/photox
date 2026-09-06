@@ -79,7 +79,11 @@ export function openActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow>(
     if (migration.status !== 'SOURCE_MISSING') {
       if (!marker) throw new Error('MEDIA_CATALOG_MIGRATION_MARKER_MISSING');
       if (marker.version !== 1) throw new Error(`MEDIA_CATALOG_MIGRATION_MARKER_UNSUPPORTED:${marker.version}`);
-      if (marker.importedCount !== rows.length) {
+      // Runtime rows may legitimately be added after the one-time import. The
+      // imported count is therefore a lower bound, not an equality check. Fewer
+      // rows than the durable marker claims means data disappeared and activation
+      // must fail closed.
+      if (marker.importedCount > rows.length) {
         throw new Error(`MEDIA_CATALOG_MIGRATION_COUNT_MISMATCH:${marker.importedCount}:${rows.length}`);
       }
       if (migration.sourceSha256 && marker.sourceSha256 !== migration.sourceSha256) {
