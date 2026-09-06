@@ -61,7 +61,7 @@ test('persists server-authoritative acknowledged offset across store restart', a
 
 test('rejects stale, skipped, oversized and overrun chunks without moving acknowledged offset', async () => {
   await withTempStore(async ({ store }) => {
-    const created = await store.create(input);
+    const created = await store.create({ ...input, expectedBytes: 5 });
     await store.appendChunk({ sessionId: created.sessionId, workspaceId: input.workspaceId, deviceId: input.deviceId, offset: 0, chunk: Uint8Array.from([1, 2]) });
 
     await assert.rejects(
@@ -78,11 +78,8 @@ test('rejects stale, skipped, oversized and overrun chunks without moving acknow
     );
     await assert.rejects(
       store.appendChunk({ sessionId: created.sessionId, workspaceId: input.workspaceId, deviceId: input.deviceId, offset: 2, chunk: Uint8Array.from([1, 2, 3, 4]) }),
-      /UPLOAD_INCOMPLETE|UPLOAD_EXCEEDS_EXPECTED_BYTES/,
-    ).catch(async error => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/UPLOAD_EXCEEDS_EXPECTED_BYTES/.test(message)) throw error;
-    });
+      /UPLOAD_EXCEEDS_EXPECTED_BYTES/,
+    );
 
     const status = await store.get(created.sessionId, { workspaceId: input.workspaceId, deviceId: input.deviceId });
     assert.equal(status.acknowledgedBytes, 2);
