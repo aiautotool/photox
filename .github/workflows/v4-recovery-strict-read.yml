@@ -1,0 +1,50 @@
+name: V4 recovery strict read
+on:
+  push:
+    branches: [v4]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - name: Patch strict recovery catalog read
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('desktop/electron/main.ts')
+          s=p.read_text()
+          if 'readAllIndexForRecovery' in s:
+              print('already patched')
+              raise SystemExit(0)
+          old="async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}"
+          new="""async function readAllIndexForRecovery():Promise<MediaIndexRow[]>{
+  try{
+    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];
+    return migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID).rows;
+  }catch(error){
+    if((error as NodeJS.ErrnoException).code==='ENOENT')return [];
+    throw error;
+  }
+}
+async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}"""
+          if old not in s:
+              raise SystemExit('readIndex anchor missing')
+          s=s.replace(old,new,1)
+          s=s.replace("ingestRecoveryJournal().recover(await readAllIndex())","ingestRecoveryJournal().recover(await readAllIndexForRecovery())",1)
+          s=s.replace("recoverDeletionTombstones(await readAllIndex(),row=>deleteManagedMedia(row.key,row.workspaceId))","recoverDeletionTombstones(await readAllIndexForRecovery(),row=>deleteManagedMedia(row.key,row.workspaceId))",1)
+          p.write_text(s)
+      - name: Commit strict-read hardening
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add desktop/electron/main.ts
+          git commit -m "fix(v4): fail closed on corrupt recovery catalog"
+          git push origin HEAD:v4
