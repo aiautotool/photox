@@ -6,7 +6,7 @@ permissions:
   contents: write
 jobs:
   wire:
-    if: ${{ !startsWith(github.event.head_commit.message, 'feat(v4): wire catalog diagnostics transports') }}
+    if: "${{ !startsWith(github.event.head_commit.message, 'feat(v4): wire catalog diagnostics transports') }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,15 +27,12 @@ jobs:
                   raise SystemExit(f'patch anchor missing: {path}: {old[:80]!r}')
               p.write_text(text.replace(old,new,1))
 
-          # Web edge: authenticated admin/owner diagnostics handler + route.
           replace('desktop/electron/webEdgeServer.ts',
           "  repairMedia?(principal:WebPrincipal,key:string):Promise<unknown>;\n  appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;",
           "  repairMedia?(principal:WebPrincipal,key:string):Promise<unknown>;\n  getMediaCatalogOperationsDiagnostics?(principal:WebPrincipal):Promise<unknown>|unknown;\n  appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;")
           replace('desktop/electron/webEdgeServer.ts',
           "    if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);\n    if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);",
           "    if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);\n    if(m==='GET'&&p==='/api/web/v1/operations/media-catalog'){\n      if(!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}\n      if(!this.handlers.getMediaCatalogOperationsDiagnostics){this.json(res,503,{error:'MEDIA_CATALOG_OPERATIONS_UNAVAILABLE'});return;}\n      return read(()=>Promise.resolve(this.handlers.getMediaCatalogOperationsDiagnostics!(principal)));\n    }\n    if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);")
-
-          # Main: use existing policy boundary for Web and trusted local IPC.
           replace('desktop/electron/main.ts',
           "import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';",
           "import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';\nimport { getLocalMediaCatalogOperationsDiagnostics, getWebMediaCatalogOperationsDiagnostics } from './mediaCatalogOperationsTransport.js';")
@@ -45,13 +42,9 @@ jobs:
           replace('desktop/electron/main.ts',
           "ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());",
           "ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());\nipcMain.handle('photosync:media-catalog-diagnostics',()=>getLocalMediaCatalogOperationsDiagnostics({backend:requireMediaCatalog()}));")
-
-          # Preload trusted local bridge.
           replace('desktop/electron/preload.cts',
           "  getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),",
           "  getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),\n  getMediaCatalogDiagnostics: () => ipcRenderer.invoke('photosync:media-catalog-diagnostics'),")
-
-          # Shared DesktopBridge: Web uses redacted route; Desktop preload uses trusted local IPC.
           replace('desktop/src/bridge.ts',
           "export type BackupHealthSnapshot = {total:number;safe:number;atRisk:number;critical:number;unknown:number;photos:number;videos:number;totalBytes:number;problems:{key:string;filename:string;health:'at_risk'|'critical'|'unknown';reason:string}[]};",
           "export type BackupHealthSnapshot = {total:number;safe:number;atRisk:number;critical:number;unknown:number;photos:number;videos:number;totalBytes:number;problems:{key:string;filename:string;health:'at_risk'|'critical'|'unknown';reason:string}[]};\nexport type MediaCatalogDiagnostics={kind:'sqlite';schemaVersion:number;migrationStatus:string;rowCount:number;importedRowCount:number;backupAvailable:boolean;backupPath?:string;sourceSha256?:string};")
@@ -61,8 +54,6 @@ jobs:
           replace('desktop/src/bridge.ts',
           "    getBackupHealth:()=>json('/api/web/v1/backup/health'),",
           "    getBackupHealth:()=>json('/api/web/v1/backup/health'),\n    getMediaCatalogDiagnostics:()=>json('/api/web/v1/operations/media-catalog'),")
-
-          # Web integration test: admin gets redacted diagnostics; member gets 403.
           replace('desktop/electron/webEdgeServer.test.ts',
           "    authorizeAccessToken: async (token) => {\n      assert.equal(token, 'access-token');\n      return { ...principal, scopes: [...principal.scopes] };\n    },",
           "    authorizeAccessToken: async (token) => {\n      assert.ok(token === 'access-token' || token === 'member-token');\n      return { ...principal, workspaceRole: token === 'member-token' ? 'member' : principal.workspaceRole, scopes: [...principal.scopes] };\n    },")
@@ -72,21 +63,13 @@ jobs:
           replace('desktop/electron/webEdgeServer.test.ts',
           "    assert.equal(workspaceSnapshot.quota.managedStorage.percent, 10);\n\n    const devices =",
           "    assert.equal(workspaceSnapshot.quota.managedStorage.percent, 10);\n\n    const catalog = await fetch(`${origin}/api/web/v1/operations/media-catalog`, { headers: { origin, authorization: 'Bearer access-token' } });\n    assert.equal(catalog.status, 200);\n    const catalogSnapshot = await catalog.json() as Record<string, unknown>;\n    assert.equal(catalogSnapshot.kind, 'sqlite');\n    assert.equal(catalogSnapshot.rowCount, 7);\n    assert.equal('backupPath' in catalogSnapshot, false);\n    assert.equal('sourceSha256' in catalogSnapshot, false);\n    const memberCatalog = await fetch(`${origin}/api/web/v1/operations/media-catalog`, { headers: { origin, authorization: 'Bearer member-token' } });\n    assert.equal(memberCatalog.status, 403);\n\n    const devices =")
-
-          # Bridge HTTP adapter test: ensure shared Web bridge reaches operations route.
-          p=Path('desktop/src/bridge.test.ts'); text=p.read_text()
-          anchor="assert.equal(bridge.platform, 'web');"
-          if anchor not in text: raise SystemExit('bridge test anchor missing')
-          text=text.replace(anchor, anchor+"\n  await bridge.getMediaCatalogDiagnostics();\n  assert.ok(requests.some(request=>request.url.endsWith('/api/web/v1/operations/media-catalog')));",1)
+          p=Path('docs/V4_SQLITE_MEDIA_CATALOG_CUTOVER.md'); text=p.read_text()
+          completed="- Production transports now expose the policy boundary: authenticated Web `GET /api/web/v1/operations/media-catalog` is admin/owner-only and returns only the redacted workspace shape, while trusted Desktop IPC/preload exposes local operator diagnostics. The shared `DesktopBridge` HTTP adapter uses the same Web route, and integration coverage verifies both redaction and 403 role denial."
+          marker="- `mediaCatalogOperationsTransport.ts` now defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256. Regression tests cover role denial, missing workspace identity, redaction, trusted local recovery metadata, and live post-ingest counts."
+          if completed not in text:
+              text=text.replace(marker,marker+'\n'+completed,1)
+          text=text.replace("1. Wire `mediaCatalogOperationsTransport.ts` into the actual authenticated Web route and Desktop IPC/preload bridge. The Web route must pass the authenticated principal, remain admin/owner-only, and must never return operator-only filesystem/SHA fields; local Desktop operator diagnostics may use the trusted shape.\n2. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are now regression-covered.\n3. Add explicit operator rollback/export tooling around the existing atomic SQLite-to-JSON export and document when the preserved pre-cutover backup may be used. Runtime must remain SQLite-only; rollback is an offline/operator action, never dual-write.\n4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.","1. Add explicit offline operator rollback/export tooling around the existing atomic SQLite-to-JSON export. It must refuse to run while the Desktop SQLite authority is active and must never introduce dual-write behavior.\n2. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are now regression-covered.\n3. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.\n4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.",1)
           p.write_text(text)
-
-          # Plan progression.
-          replace('docs/V4_SQLITE_MEDIA_CATALOG_CUTOVER.md',
-          "- `mediaCatalogOperationsTransport.ts` now defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256. Regression tests cover role denial, missing workspace identity, redaction, trusted local recovery metadata, and live post-ingest counts.",
-          "- `mediaCatalogOperationsTransport.ts` now defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256. Regression tests cover role denial, missing workspace identity, redaction, trusted local recovery metadata, and live post-ingest counts.\n- Production transports now expose the policy boundary: authenticated Web `GET /api/web/v1/operations/media-catalog` is admin/owner-only and returns only the redacted workspace shape, while trusted Desktop IPC/preload exposes local operator diagnostics. The shared `DesktopBridge` HTTP adapter uses the same Web route, and integration coverage verifies both redaction and 403 role denial.")
-          replace('docs/V4_SQLITE_MEDIA_CATALOG_CUTOVER.md',
-          "1. Wire `mediaCatalogOperationsTransport.ts` into the actual authenticated Web route and Desktop IPC/preload bridge. The Web route must pass the authenticated principal, remain admin/owner-only, and must never return operator-only filesystem/SHA fields; local Desktop operator diagnostics may use the trusted shape.\n2. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are now regression-covered.\n3. Add explicit operator rollback/export tooling around the existing atomic SQLite-to-JSON export and document when the preserved pre-cutover backup may be used. Runtime must remain SQLite-only; rollback is an offline/operator action, never dual-write.\n4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.",
-          "1. Add explicit offline operator rollback/export tooling around the existing atomic SQLite-to-JSON export. It must refuse to run while the Desktop SQLite authority is active and must never introduce dual-write behavior.\n2. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are now regression-covered.\n3. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.\n4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.")
       - run: npm install
       - name: Tests
         run: npm test
@@ -111,6 +94,6 @@ jobs:
           set -euo pipefail
           git config user.name "PhotoX V4 Automation"
           git config user.email "actions@users.noreply.github.com"
-          git add desktop/electron/webEdgeServer.ts desktop/electron/main.ts desktop/electron/preload.cts desktop/electron/webEdgeServer.test.ts desktop/src/bridge.ts desktop/src/bridge.test.ts docs/V4_SQLITE_MEDIA_CATALOG_CUTOVER.md
+          git add desktop/electron/webEdgeServer.ts desktop/electron/main.ts desktop/electron/preload.cts desktop/electron/webEdgeServer.test.ts desktop/src/bridge.ts docs/V4_SQLITE_MEDIA_CATALOG_CUTOVER.md
           git commit -m "feat(v4): wire catalog diagnostics transports"
           git push origin HEAD:v4
