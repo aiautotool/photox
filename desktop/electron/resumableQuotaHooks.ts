@@ -1,9 +1,22 @@
 import { entitlementsForPlan } from '@photosync/core';
-import type { SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import type { ResumableIngestPrincipal, ResumableQuotaReservationHooks } from './resumableMediaIngestLifecycle.js';
 
-type WorkspaceQuotaRepository = Pick<SqliteWorkspaceRepository,
-  'getWorkspace' | 'getMediaReservation' | 'createMediaReservation' | 'commitMediaReservation' | 'releaseMediaReservationById'>;
+type WorkspaceQuotaReservation = {
+  id:string;
+  workspaceId:string;
+  deviceId:string;
+  assetId:string;
+  bytes:number;
+  state:'reserved'|'committed'|'released';
+};
+
+type WorkspaceQuotaRepository = {
+  getWorkspace(workspaceId:string):{plan:Parameters<typeof entitlementsForPlan>[0]}|null;
+  getMediaReservation(workspaceId:string,reservationId:string):WorkspaceQuotaReservation|null;
+  createMediaReservation(input:{workspaceId:string;deviceId:string;assetId:string;bytes:number;limits:{maxManagedStorageBytes:number|null;maxMonthlyIngressBytes:number|null}}):WorkspaceQuotaReservation;
+  commitMediaReservation(workspaceId:string,reservationId:string,key:string):unknown;
+  releaseMediaReservationById(workspaceId:string,reservationId:string,reason:string):unknown;
+};
 
 function binding(repo: WorkspaceQuotaRepository, principal: ResumableIngestPrincipal, reservationId: string, expectedBytes: number) {
   const reservation=repo.getMediaReservation(principal.workspaceId,reservationId);
