@@ -46,6 +46,13 @@ jobs:
           if old not in s: raise SystemExit('shutdown anchor missing')
           s=s.replace(old,new,1)
           p.write_text(s)
+
+          p=Path('desktop/electron/mediaIndexRuntimeWiring.test.ts')
+          s=p.read_text()
+          old="assert.match(source, /createMediaIndexRuntimeWriter<MediaIndexRow>\\(indexFile\\(\\)\\)/);"
+          new="assert.match(source, /function mediaIndexWriter\\(\\)\\{ return requireMediaCatalog\\(\\)\\.writer; \\}/);\n  assert.doesNotMatch(source, /createMediaIndexRuntimeWriter<MediaIndexRow>\\(indexFile\\(\\)\\)/);"
+          if old not in s: raise SystemExit('runtime wiring test anchor missing')
+          p.write_text(s.replace(old,new,1))
           PY
       - name: Add production wiring regression
         run: |
@@ -54,10 +61,8 @@ jobs:
           import test from 'node:test';
           import fs from 'node:fs';
           import path from 'node:path';
-          import { fileURLToPath } from 'node:url';
 
-          const here=path.dirname(fileURLToPath(import.meta.url));
-          const source=fs.readFileSync(path.resolve(here,'../../electron/main.ts'),'utf8');
+          const source=fs.readFileSync(path.resolve('electron/main.ts'),'utf8');
 
           test('Desktop production lifecycle activates sqlite before recovery and uses it as sole runtime authority',()=>{
             assert.match(source,/openActiveMediaCatalogBackend<MediaIndexRow>/);
@@ -82,6 +87,6 @@ jobs:
           if git diff --quiet; then exit 0; fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add desktop/electron/main.ts desktop/electron/mediaCatalogProductionWiring.test.ts
+          git add desktop/electron/main.ts desktop/electron/mediaIndexRuntimeWiring.test.ts desktop/electron/mediaCatalogProductionWiring.test.ts
           git commit -m "feat(v4): activate sqlite media catalog in desktop lifecycle"
           git push origin HEAD:v4
