@@ -1,0 +1,41 @@
+name: V4 recovery plan update
+on:
+  push:
+    branches: [v4]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - name: Update V4 recovery plan
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          p=Path('docs/V4_PER_MEDIA_REPAIR_PLAN.md')
+          s=p.read_text()
+          marker='- Dead `writeIndex` / `updateIndexRow` whole-workspace runtime helpers and the now-unused `replaceWorkspaceRows` import have been removed from `main.ts`. Legacy workspace tagging remains only in the explicit `readAllIndex()` migration/bootstrap path, so active runtime writers now share exact serialized mutation boundaries.\n'
+          additions='''- Restart-safe ingest recovery is now durable: `mediaStartupRecovery.ts` writes and fsyncs an ingest journal before final file placement, validates temporary/final paths stay inside PhotoX-managed roots, and clears the journal only after the exact catalog append commits. Startup keeps a catalog-committed target, rolls back an uncommitted crash-left target/tmp pair, and leaves malformed/path-escaping journal entries untouched for operator inspection rather than risking deletion outside managed roots.\n- Restart deletion recovery now enumerates authoritative deletion tombstones and resumes each exact `workspaceId + media key` through the existing `deleteManagedMedia` provider-operation gate. Already-removed Drive/local objects remain idempotent, failures are isolated per asset, and failed tombstones remain durable for the next retry instead of blocking the entire startup sequence.\n- Startup recovery uses a strict catalog read path: only `ENOENT` means an empty catalog. JSON parse errors and other I/O failures abort recovery fail-closed, preventing a temporarily corrupt/unreadable catalog from being mistaken for an empty catalog and causing valid media files to be rolled back.\n'''
+          if additions.strip() not in s:
+              if marker not in s: raise SystemExit('completed marker missing')
+              s=s.replace(marker,marker+additions,1)
+          old='''## Next integration batch\n1. Add restart-level acceptance coverage for crash-left deletion tombstones, partial provider deletion and crash-left ingest targets, beyond the current in-process idempotent runtime semantics.\n2. Design and implement the one-time `media-index.json` → SQLite transactional catalog migration while preserving workspace isolation, exact media identity, deletion tombstones, replica state and rollback/export safety.\n3. Move active media reads/writes to the SQLite repository behind the same runtime writer contract, then keep JSON only as an import/rollback artifact rather than an active catalog.\n4. Add catalog migration/recovery observability, schema/version checks and operator-safe rollback/export before treating persistence as production-complete.\n5. After the catalog cutover, resume the broader SaaS queue with provider/job durability, Telegram provider integration, sharing/search/editor UX and deployment/update hardening without regressing the three P0 requirements.\n'''
+          new='''## Next integration batch\n1. Design and implement the one-time `media-index.json` → SQLite transactional catalog migration while preserving workspace isolation, exact media identity, deletion tombstones, replica state and rollback/export safety.\n2. Add schema/version metadata plus an idempotent import marker so a crash during migration can restart without duplicating or dropping media; retain the original JSON as a read-only rollback/export artifact until post-cutover validation succeeds.\n3. Move active media reads/writes behind a SQLite catalog repository while preserving the existing `mediaIndexRuntimeWriter` semantic contract, then stop using JSON as an active catalog.\n4. Add migration/recovery observability and process-level hard-crash acceptance around journal replay, tombstone replay and SQLite cutover, including corrupt-catalog fail-closed cases.\n5. After the catalog cutover, resume the broader SaaS queue with provider/job durability, Telegram provider integration, sharing/search/editor UX and deployment/update hardening without regressing the three P0 requirements.\n'''
+          if old in s: s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+      - name: Commit plan update
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/V4_PER_MEDIA_REPAIR_PLAN.md
+          git commit -m "docs(v4): track restart-safe media recovery"
+          git push origin HEAD:v4
