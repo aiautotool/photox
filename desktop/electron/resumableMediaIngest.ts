@@ -14,6 +14,7 @@ export type ResumableMediaSession = {
   createdAt: number;
   expectedBytes: number;
   acknowledgedBytes: number;
+  quotaReservationId?: string;
   createdAtIso: string;
   updatedAtIso: string;
   expiresAtIso: string;
@@ -28,6 +29,7 @@ export type CreateResumableMediaSessionInput = {
   mediaType: 'photo' | 'video';
   createdAt: number;
   expectedBytes: number;
+  quotaReservationId?: string;
   ttlMs?: number;
 };
 
@@ -45,6 +47,11 @@ function assertIdentity(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized || normalized.length > 512) throw new Error(`INVALID_${field.toUpperCase()}`);
   return normalized;
+}
+
+function assertOptionalIdentity(value: string | undefined, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  return assertIdentity(value, field);
 }
 
 function assertPositiveSafeInteger(value: number, field: string): number {
@@ -86,6 +93,7 @@ function isSession(value: unknown): value is ResumableMediaSession {
     && Number.isSafeInteger(row.acknowledgedBytes)
     && Number(row.acknowledgedBytes) >= 0
     && Number(row.acknowledgedBytes) <= Number(row.expectedBytes)
+    && (row.quotaReservationId === undefined || typeof row.quotaReservationId === 'string')
     && typeof row.createdAtIso === 'string'
     && typeof row.updatedAtIso === 'string'
     && typeof row.expiresAtIso === 'string';
@@ -138,6 +146,7 @@ export class ResumableMediaIngestStore {
     const filename = assertIdentity(input.filename, 'filename');
     const mimeType = assertIdentity(input.mimeType, 'mime_type');
     const expectedBytes = assertPositiveSafeInteger(input.expectedBytes, 'expected_bytes');
+    const quotaReservationId = assertOptionalIdentity(input.quotaReservationId, 'quota_reservation_id');
     if (!Number.isFinite(input.createdAt)) throw new Error('INVALID_CREATED_AT');
     const ttlMs = assertPositiveSafeInteger(input.ttlMs ?? this.defaultTtlMs, 'ttl_ms');
     const now = this.now();
@@ -153,6 +162,7 @@ export class ResumableMediaIngestStore {
       createdAt: input.createdAt,
       expectedBytes,
       acknowledgedBytes: 0,
+      quotaReservationId,
       createdAtIso: new Date(now).toISOString(),
       updatedAtIso: new Date(now).toISOString(),
       expiresAtIso: new Date(now + ttlMs).toISOString(),
@@ -227,20 +237,22 @@ export class ResumableMediaIngestStore {
     ]);
   }
 
-  async cleanupExpired(): Promise<number> {
+  async cleanupExpired(beforeRemove?: (session: ResumableMediaSession) => Promise<void>): Promise<number> {
     await this.ensureRoot();
     const names = await fs.readdir(this.rootDir);
     let removed = 0;
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const sessionId = name.slice(0, -5);
+      let session: ResumableMediaSession | undefined;
       try {
-        const session = await this.readSessionUnchecked(sessionId);
+        session = await this.readSessionUnchecked(sessionId);
         if (Date.parse(session.expiresAtIso) > this.now()) continue;
       } catch (error) {
         if (error instanceof Error && error.message === 'UPLOAD_SESSION_OFFSET_CORRUPT') continue;
         if (error instanceof Error && error.message === 'UPLOAD_SESSION_METADATA_INVALID') continue;
       }
+      if (session && beforeRemove) await beforeRemove(session);
       await this.remove(sessionId);
       removed += 1;
     }
