@@ -7,6 +7,7 @@ import {
 import type { RuntimeMediaIndexRow } from './mediaIndexRuntimeWriter.js';
 import { createMediaIndexRuntimeWriter, type MediaIndexRuntimeWriter } from './mediaIndexRuntimeWriter.js';
 import { createSqliteMediaIndexMutationRepository } from './mediaIndexSqliteRepository.js';
+import { acquireMediaCatalogAuthorityLease } from './mediaCatalogAuthorityLease.js';
 
 export type MediaCatalogBackendHealth = {
   kind: 'sqlite';
@@ -34,6 +35,7 @@ export type OpenMediaCatalogBackendOptions = {
   sqlitePath: string;
   legacyJsonPath: string;
   backupPath?: string;
+  authorityLeasePath?: string;
 };
 
 function assertCatalogRows<T extends RuntimeMediaIndexRow>(rows: T[]): void {
@@ -55,6 +57,10 @@ function assertCatalogRows<T extends RuntimeMediaIndexRow>(rows: T[]): void {
 /**
  * Opens the Desktop/Web media catalog at a single authority boundary.
  *
+ * The process authority lease is acquired before SQLite opens. Offline recovery
+ * tooling takes the same lease, which prevents export from racing active runtime
+ * writes and prevents Desktop from starting while an offline export is running.
+ *
  * The legacy JSON file is imported exactly once by SqliteMediaIndexCatalog. The
  * backend is not returned until the migration marker and imported row count have
  * been validated. Runtime callers therefore never enter a JSON+SQLite dual-write
@@ -67,7 +73,16 @@ export function openActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow>(
   if (!options.sqlitePath) throw new Error('MEDIA_CATALOG_SQLITE_PATH_REQUIRED');
   if (!options.legacyJsonPath) throw new Error('MEDIA_CATALOG_LEGACY_PATH_REQUIRED');
 
-  const store = new SqlitePhotoXStore({ path: options.sqlitePath });
+  const authorityLeasePath = options.authorityLeasePath ?? `${options.sqlitePath}.authority.lock`;
+  const authorityLease = acquireMediaCatalogAuthorityLease(authorityLeasePath, 'desktop-runtime');
+  let store: SqlitePhotoXStore;
+  try {
+    store = new SqlitePhotoXStore({ path: options.sqlitePath });
+  } catch (error) {
+    authorityLease.release();
+    throw error;
+  }
+
   try {
     const catalog = new SqliteMediaIndexCatalog<T>(store);
     const backupPath = options.backupPath
@@ -103,6 +118,7 @@ export function openActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow>(
       backupPath: marker?.backupPath ?? migration.backupPath,
       sourceSha256: marker?.sourceSha256 ?? migration.sourceSha256,
     };
+    let closed = false;
 
     return {
       kind: 'sqlite',
@@ -114,10 +130,16 @@ export function openActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow>(
       get: (workspaceId, key) => catalog.get(workspaceId, key),
       listWorkspace: workspaceId => catalog.listWorkspace(workspaceId),
       listAll: () => catalog.listAll(),
-      close: () => store.close(),
+      close: () => {
+        if (closed) return;
+        store.close();
+        authorityLease.release();
+        closed = true;
+      },
     };
   } catch (error) {
     store.close();
+    authorityLease.release();
     throw error;
   }
 }

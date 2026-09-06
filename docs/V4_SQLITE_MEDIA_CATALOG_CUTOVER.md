@@ -18,13 +18,24 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - Restart-boundary regressions now cover a durable pre-import backup with no marker, process restart after import commit but before runtime backend activation, corrupt SQLite fail-closed behavior, and newer-than-supported media catalog schema rejection. These complement the existing already-imported/source-changed/fresh-install/data-loss guards.
 - `mediaCatalogDiagnostics.ts` defines a role-safe diagnostics contract. Workspace-visible diagnostics expose backend/schema/migration/count/backup-availability only; trusted operator diagnostics may additionally expose the local backup path and source SHA-256. Tests prevent filesystem paths or source fingerprints from leaking through the workspace-safe shape.
 - Catalog health is now live rather than a startup snapshot: `rowCount` is read from current SQLite authority after ingest/delete, preventing stale Admin/Operations diagnostics.
-- `mediaCatalogOperationsTransport.ts` now defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256. Regression tests cover role denial, missing workspace identity, redaction, trusted local recovery metadata, and live post-ingest counts.
-- Production transports now expose the policy boundary: authenticated Web `GET /api/web/v1/operations/media-catalog` is admin/owner-only and returns only the redacted workspace shape, while trusted Desktop IPC/preload exposes local operator diagnostics. The shared `DesktopBridge` HTTP adapter uses the same Web route, and integration coverage verifies both redaction and 403 role denial.
+- `mediaCatalogOperationsTransport.ts` defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256.
+- Production transports expose authenticated Web `GET /api/web/v1/operations/media-catalog` and trusted Desktop IPC/preload diagnostics through the shared `DesktopBridge` contract.
+- Desktop runtime and offline operator export now share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export, operator export blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
+- `mediaCatalogOfflineExport.ts` wraps the existing atomic SQLite→JSON export with that authority lease and refuses a missing SQLite database instead of creating an empty catalog. `catalog:export` provides an explicit CLI surface. The resulting JSON is a recovery/rollback artifact only; runtime remains SQLite-only.
+
+## Offline operator export
+With PhotoX Desktop fully stopped, run:
+
+```bash
+npm --workspace @photosync/desktop run catalog:export -- --sqlite "/path/to/photosync-state/media-catalog.sqlite" --out "/safe/path/photox-media-catalog-rollback.json"
+```
+
+The command fails if Desktop currently owns the media catalog. Keep the exported JSON outside the active state directory when possible. Do not replace `media-index.json` while PhotoX is running and do not use this artifact as a second live writer.
 
 ## Active cutover work
-1. Add explicit offline operator rollback/export tooling around the existing atomic SQLite-to-JSON export. It must refuse to run while the Desktop SQLite authority is active and must never introduce dual-write behavior.
-2. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are now regression-covered.
-3. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
+1. Extend restart/crash-boundary integration coverage around production lifecycle orchestration itself: interrupted legacy workspace-ID preparation and real process termination/power-loss acceptance. Backend-level pre-import/post-commit/corrupt/too-new boundaries are regression-covered.
+2. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
+3. Add an explicit documented restore procedure that consumes a verified offline export only while Desktop is stopped; restore must preserve SQLite as the sole runtime authority after restart.
 4. After restart/crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.
 
 ## Non-negotiable product constraints carried through cutover
@@ -34,4 +45,4 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - Workspace/tenant identity must remain authoritative at every catalog operation; identical media keys in different workspaces must never collide.
 
 ## Exit criteria for SQLite authority
-SQLite is now the sole active Desktop media catalog at the production lifecycle boundary. Release acceptance still requires repository tests, Desktop integration tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging, and packaged Desktop smoke to remain green on the final branch head. Platform-signed installers and real process-kill/power-loss acceptance remain separately reportable as NOT VERIFIED until run in the required platform/signing environment.
+SQLite is the sole active Desktop media catalog at the production lifecycle boundary. Release acceptance still requires repository tests, Desktop integration tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging, and packaged Desktop smoke to remain green on the final branch head. Platform-signed installers and real process-kill/power-loss acceptance remain separately reportable as NOT VERIFIED until run in the required platform/signing environment.

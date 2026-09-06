@@ -9,6 +9,7 @@
     "electron:dev": "wait-on http://localhost:5173 && tsc -p tsconfig.electron.json && electron . --photox-dev-server=http://localhost:5173",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "test": "tsc -p tsconfig.electron-test.json && tsc -p tsconfig.renderer-test.json && node --test dist-electron-test/*.test.js dist-renderer-test/*.test.js",
+    "catalog:export": "npm run build && node dist-electron/mediaCatalogOfflineExportCli.js",
     "smoke:packaged-renderer": "electron . --no-sandbox",
     "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64 --publish never",
@@ -17,7 +18,7 @@
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@ffprobe-installer/ffprobe": "^1.1.2",
     "@photosync/core": "*",
     "@photosync/google-drive": "*",
     "@photosync/google-photos": "*",
