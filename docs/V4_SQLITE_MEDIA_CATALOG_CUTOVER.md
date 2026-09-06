@@ -21,6 +21,8 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - Catalog health is live rather than a startup snapshot: `rowCount` is read from current SQLite authority after ingest/delete, preventing stale Admin/Operations diagnostics.
 - `mediaCatalogOperationsTransport.ts` defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256.
 - Production transports expose authenticated Web `GET /api/web/v1/operations/media-catalog` and trusted Desktop IPC/preload diagnostics through the shared `DesktopBridge` contract.
+- Shared Desktop/Web React renderer now includes a real Media Catalog Operations drawer backed by `DesktopBridge.getMediaCatalogDiagnostics()`. Web role denial hides the surface, successful Web diagnostics receive a second renderer-level redaction pass, and local Desktop operators may expand recovery-only metadata. The drawer refreshes live diagnostics without adding mutation controls or mock actions.
+- Renderer regressions explicitly cover Web redaction, trusted Desktop recovery metadata, and Web 403/`ROLE_FORBIDDEN` detection; the tests are included in `tsconfig.renderer-test.json` and therefore run in repository CI.
 - Desktop runtime and offline operator recovery tools share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export/restore, offline operator ownership blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
 - CI includes a real child-process authority-holder termination regression: a live `operator-restore` process blocks Desktop authority, abrupt process termination leaves the expected stale lease, and the next process reclaims it only after the old PID is gone.
 - Offline restore regressions are explicitly part of `tsconfig.electron-test.json`; successful restore, Desktop-authority blocking, SHA verification, duplicate tenant identity rejection, corrupt SQLite handling, and lease release on open failure are no longer orphaned tests outside the repository gate.
@@ -53,8 +55,8 @@ The restore command verifies the source hash and tenant/media-key uniqueness bef
 After a successful restore, start PhotoX normally. SQLite remains the sole active runtime catalog; the JSON source and pre-restore backup remain offline recovery artifacts only.
 
 ## Active cutover work
-1. Wire the diagnostics contract into the shared Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
-2. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
+1. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
+2. Add renderer-level integration coverage for the Operations drawer lifecycle when a suitable DOM test harness is available; current pure view-model tests and production build/smoke gates cover redaction and compilation, while transport integration remains separately covered in Electron/Web tests.
 3. Run real OS/power-loss acceptance on supported release platforms; CI process-kill coverage proves transactional semantics but does not replace physical power-loss testing.
 
 ## Non-negotiable product constraints carried through cutover
