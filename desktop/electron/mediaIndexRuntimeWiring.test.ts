@@ -11,4 +11,9 @@ test('desktop main routes ingest, video, and replica writes through exact runtim
   assert.match(source, /mediaIndexWriter\(\)\.syncReplicas\(row\.workspaceId,row\.key,replicas\)/);
   assert.doesNotMatch(source, /rows\.push\(row\);\s*await writeIndex\(rows,requestWorkspace\)/);
   assert.doesNotMatch(source, /await updateIndexRow\(key,\{videoProcessing:/);
+  assert.match(source, /createMediaProviderOperationGate\(\)/);
+  assert.match(source, /mediaProviderOperationGate\.run\(row\.workspaceId,row\.key,/);
+  assert.match(source, /writer\.claimDeletion\(workspaceId,key,requestedClaimId\)/);
+  assert.match(source, /writer\.removeClaimed\(workspaceId,key,claimId\)/);
+  assert.doesNotMatch(source, /rows\.splice\(index,1\);await writeIndex\(rows,workspaceId\)/);
 });
