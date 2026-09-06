@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@ffprobe-installer/ffprobe": "^1.1.2",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "@photosync/core": "*",
     "@photosync/google-drive": "*",
     "@photosync/google-photos": "*",
