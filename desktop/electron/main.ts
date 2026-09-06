@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, replaceWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
+import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
@@ -198,12 +198,6 @@ async function readAllIndex():Promise<MediaIndexRow[]>{
   }catch{return []}
 }
 async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}
-async function writeIndex(rows:MediaIndexRow[],workspaceId=LEGACY_WORKSPACE_ID){
-  const normalized=rows.map(row=>({...row,workspaceId}));
-  const all=await readAllIndex();const merged=replaceWorkspaceRows(all,workspaceId,normalized);
-  await fs.mkdir(stateDir(),{recursive:true});await fs.writeFile(indexFile(),JSON.stringify(merged,null,2),'utf8');
-}
-async function updateIndexRow(key:string,patch:Partial<MediaIndexRow>,workspaceId=LEGACY_WORKSPACE_ID){const rows=await readIndex(workspaceId);const index=rows.findIndex(row=>row.key===key);if(index<0)return null;rows[index]={...rows[index],...patch,workspaceId};await writeIndex(rows,workspaceId);return rows[index]}
 function replicasOf(row:MediaIndexRow){if(row.cloudReplicas?.length)return row.cloudReplicas;if(row.cloud)return [row.cloud];return []}
 function isVerified(replica:CloudDestination){return replica.state==='VERIFIED'||replica.state==='UPLOADED'}
 async function evaluateRow(row:MediaIndexRow){
