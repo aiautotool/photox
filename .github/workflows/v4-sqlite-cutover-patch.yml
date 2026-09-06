@@ -1,0 +1,87 @@
+name: v4 sqlite cutover patch
+on:
+  push:
+    branches: [v4]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Patch Desktop media catalog lifecycle
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('desktop/electron/main.ts')
+          s=p.read_text()
+          s=s.replace("import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';", "import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, type MediaReplica, type StorageAccount } from '@photosync/core';")
+          s=s.replace("import { createMediaIndexRuntimeWriter } from './mediaIndexRuntimeWriter.js';", "import { openActiveMediaCatalogBackend, type ActiveMediaCatalogBackend } from './mediaCatalogBackend.js';")
+          old="""let workspaceAuth:DesktopWorkspaceAuth|null=null;\n"""
+          new="""let workspaceAuth:DesktopWorkspaceAuth|null=null;\nlet mediaCatalogBackend:ActiveMediaCatalogBackend<MediaIndexRow>|null=null;\n"""
+          if old not in s: raise SystemExit('variable anchor missing')
+          s=s.replace(old,new,1)
+          old="""function indexFile(){ return path.join(stateDir(),'media-index.json'); }\nfunction mediaIndexWriter(){ return createMediaIndexRuntimeWriter<MediaIndexRow>(indexFile()); }\nfunction pairFile(){ return path.join(stateDir(),'pair-code.txt'); }\n"""
+          new="""function indexFile(){ return path.join(stateDir(),'media-index.json'); }\nfunction mediaCatalogDbFile(){ return path.join(stateDir(),'media-catalog.sqlite'); }\nfunction requireMediaCatalog(){if(!mediaCatalogBackend)throw new Error('MEDIA_CATALOG_NOT_READY');return mediaCatalogBackend;}\nfunction mediaIndexWriter(){ return requireMediaCatalog().writer; }\nfunction pairFile(){ return path.join(stateDir(),'pair-code.txt'); }\n"""
+          if old not in s: raise SystemExit('writer anchor missing')
+          s=s.replace(old,new,1)
+          old="""async function readAllIndex():Promise<MediaIndexRow[]>{\n  try{\n    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];\n    const migrated=migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID);\n    if(migrated.migrated){await fs.mkdir(stateDir(),{recursive:true});await fs.writeFile(indexFile(),JSON.stringify(migrated.rows,null,2),'utf8');}\n    return migrated.rows;\n  }catch{return []}\n}\nasync function readAllIndexForRecovery():Promise<MediaIndexRow[]>{\n  try{\n    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];\n    return migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID).rows;\n  }catch(error){\n    if((error as NodeJS.ErrnoException).code==='ENOENT')return [];\n    throw error;\n  }\n}\nasync function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}\n"""
+          new="""async function prepareLegacyIndexForSqlite():Promise<void>{\n  try{\n    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];\n    const migrated=migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID);\n    if(!migrated.migrated)return;\n    await fs.mkdir(stateDir(),{recursive:true});\n    const tmp=`${indexFile()}.${crypto.randomUUID()}.migrating`;\n    await fs.writeFile(tmp,`${JSON.stringify(migrated.rows,null,2)}\\n`,'utf8');\n    await fs.rename(tmp,indexFile());\n  }catch(error){\n    if((error as NodeJS.ErrnoException).code==='ENOENT')return;\n    throw error;\n  }\n}\nasync function readAllIndex():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}\nasync function readAllIndexForRecovery():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}\nasync function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return requireMediaCatalog().listWorkspace(workspaceId)}\n"""
+          if old not in s: raise SystemExit('read anchor missing')
+          s=s.replace(old,new,1)
+          old="""app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());"""
+          new="""app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});await prepareLegacyIndexForSqlite();mediaCatalogBackend=openActiveMediaCatalogBackend<MediaIndexRow>({sqlitePath:mediaCatalogDbFile(),legacyJsonPath:indexFile()});console.info('PhotoX media catalog authority',mediaCatalogBackend.health);const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());"""
+          if old not in s: raise SystemExit('startup anchor missing')
+          s=s.replace(old,new,1)
+          old="""app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});"""
+          new="""app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;mediaCatalogBackend?.close();mediaCatalogBackend=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});"""
+          if old not in s: raise SystemExit('shutdown anchor missing')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+      - name: Add production wiring regression
+        run: |
+          cat > desktop/electron/mediaCatalogProductionWiring.test.ts <<'EOF'
+          import assert from 'node:assert/strict';
+          import test from 'node:test';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { fileURLToPath } from 'node:url';
+
+          const here=path.dirname(fileURLToPath(import.meta.url));
+          const source=fs.readFileSync(path.resolve(here,'../../electron/main.ts'),'utf8');
+
+          test('Desktop production lifecycle activates sqlite before recovery and uses it as sole runtime authority',()=>{
+            assert.match(source,/openActiveMediaCatalogBackend<MediaIndexRow>/);
+            assert.match(source,/function mediaIndexWriter\(\)\{ return requireMediaCatalog\(\)\.writer; \}/);
+            assert.match(source,/readAllIndex\(\):Promise<MediaIndexRow\[]>\{return requireMediaCatalog\(\)\.listAll\(\)\}/);
+            assert.match(source,/readIndex\(workspaceId=LEGACY_WORKSPACE_ID\):Promise<MediaIndexRow\[]>\{return requireMediaCatalog\(\)\.listWorkspace\(workspaceId\)\}/);
+            assert.doesNotMatch(source,/createMediaIndexRuntimeWriter<MediaIndexRow>\(indexFile\(\)\)/);
+            const open=source.indexOf('mediaCatalogBackend=openActiveMediaCatalogBackend<MediaIndexRow>');
+            const recover=source.indexOf('ingestRecoveryJournal().recover(await readAllIndexForRecovery())');
+            assert.ok(open>=0&&recover>open,'SQLite authority must activate before ingest recovery');
+            assert.match(source,/mediaCatalogBackend\?\.close\(\);mediaCatalogBackend=null/);
+          });
+          EOF
+      - name: Validate impacted apps and repository
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add desktop/electron/main.ts desktop/electron/mediaCatalogProductionWiring.test.ts
+          git commit -m "feat(v4): activate sqlite media catalog in desktop lifecycle"
+          git push origin HEAD:v4
