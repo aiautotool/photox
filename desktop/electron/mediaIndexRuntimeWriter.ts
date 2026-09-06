@@ -1,4 +1,4 @@
-import { createMediaIndexMutationRepository, type MediaIndexIdentity } from './mediaIndexMutationRepository.js';
+import { createMediaIndexMutationRepository, type MediaIndexIdentity, type MediaIndexMutationRepository } from './mediaIndexMutationRepository.js';
 
 export type RuntimeReplica = {
   state: string;
@@ -37,6 +37,10 @@ export type MediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow> = {
   removeClaimed(workspaceId: string, key: string, claimId: string): Promise<T | null>;
   remove(workspaceId: string, key: string): Promise<T | null>;
 };
+
+export type MediaIndexRuntimeWriterBackend<T extends RuntimeMediaIndexRow> =
+  | string
+  | MediaIndexMutationRepository<T>;
 
 function replicasOf(row: RuntimeMediaIndexRow): RuntimeReplica[] {
   if (row.cloudReplicas?.length) return row.cloudReplicas;
@@ -81,18 +85,22 @@ function syncReplicaList(current: RuntimeReplica[], incoming: RuntimeReplica[]) 
 }
 
 /**
- * Runtime-facing JSON catalog writer. The main process uses semantic operations
- * instead of whole-workspace read/replace snapshots, while the underlying
- * mutation repository keeps workspace + media identity serialized and retry-safe.
+ * Runtime-facing media catalog writer. While JSON remains supported during the
+ * cutover window callers may pass a legacy file path; the production SQLite
+ * backend can inject the same exact-identity mutation repository contract.
+ * Semantic operations therefore stay unchanged across the storage cutover and
+ * there is never a need to dual-write JSON and SQLite.
  *
  * A deletion claim is an authoritative tombstone. Once present, background video
  * and replica writers are fail-closed for that row until the delete either commits
  * or explicitly clears its own claim for retry/recovery.
  */
 export function createMediaIndexRuntimeWriter<T extends RuntimeMediaIndexRow>(
-  filePath: string,
+  backend: MediaIndexRuntimeWriterBackend<T>,
 ): MediaIndexRuntimeWriter<T> {
-  const repository = createMediaIndexMutationRepository<T>(filePath);
+  const repository = typeof backend === 'string'
+    ? createMediaIndexMutationRepository<T>(backend)
+    : backend;
   return {
     ingest: row => repository.append(row),
     patchVideo: (workspaceId, key, patch) => repository.patch(workspaceId, key, current => {
