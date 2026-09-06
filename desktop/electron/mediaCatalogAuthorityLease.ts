@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-export type MediaCatalogAuthorityOwner = 'desktop-runtime' | 'operator-export';
+export type MediaCatalogAuthorityOwner = 'desktop-runtime' | 'operator-export' | 'operator-restore';
 
 type LeaseRecord = {
   version: 1;
@@ -28,7 +28,7 @@ function parseLease(leasePath: string): LeaseRecord {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('MEDIA_CATALOG_AUTHORITY_LOCK_INVALID');
   const row = parsed as Partial<LeaseRecord>;
   if (row.version !== 1 || typeof row.token !== 'string' || !row.token || !Number.isInteger(row.pid) || Number(row.pid) <= 0
-    || (row.owner !== 'desktop-runtime' && row.owner !== 'operator-export') || typeof row.createdAt !== 'string') {
+    || (row.owner !== 'desktop-runtime' && row.owner !== 'operator-export' && row.owner !== 'operator-restore') || typeof row.createdAt !== 'string') {
     throw new Error('MEDIA_CATALOG_AUTHORITY_LOCK_INVALID');
   }
   return row as LeaseRecord;
@@ -46,11 +46,11 @@ function isProcessAlive(pid: number): boolean {
 /**
  * Process lease for the single SQLite media-catalog authority.
  *
- * Both Desktop runtime and offline operator tooling take this exact lease. A live
- * holder always blocks the other side, so export can never race active runtime
- * mutation or accidentally create a dual-authority window. Stale leases left by
- * a crashed process are reclaimed only when the recorded PID is proven absent;
- * malformed/ambiguous leases fail closed.
+ * Desktop runtime and offline operator export/restore tooling take this exact
+ * lease. A live holder always blocks every other side, so recovery tooling can
+ * never race active runtime mutation or create a dual-authority window. Stale
+ * leases left by a crashed process are reclaimed only when the recorded PID is
+ * proven absent; malformed/ambiguous leases fail closed.
  */
 export function acquireMediaCatalogAuthorityLease(
   leasePath: string,
