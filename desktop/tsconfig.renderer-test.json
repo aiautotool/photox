@@ -20,6 +20,8 @@
     "src/driveAllocationUi.ts",
     "src/driveAllocationUi.test.ts",
     "src/backupHealthUi.ts",
-    "src/backupHealthUi.test.ts"
+    "src/backupHealthUi.test.ts",
+    "src/mediaCatalogOperationsUi.ts",
+    "src/mediaCatalogOperationsUi.test.ts"
   ]
 }
