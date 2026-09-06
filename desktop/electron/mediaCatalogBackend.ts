@@ -22,7 +22,8 @@ export type ActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow> = {
   kind: 'sqlite';
   catalog: SqliteMediaIndexCatalog<T>;
   writer: MediaIndexRuntimeWriter<T>;
-  health: MediaCatalogBackendHealth;
+  /** Live health snapshot. rowCount must reflect current SQLite authority, not startup state. */
+  readonly health: MediaCatalogBackendHealth;
   get(workspaceId: string, key: string): T | null;
   listWorkspace(workspaceId: string): T[];
   listAll(): T[];
@@ -94,19 +95,21 @@ export function openActiveMediaCatalogBackend<T extends RuntimeMediaIndexRow>(
     const repository = createSqliteMediaIndexMutationRepository(catalog);
     const writer = createMediaIndexRuntimeWriter(repository);
     const importedRowCount = marker?.importedCount ?? 0;
+    const healthBase = {
+      kind: 'sqlite' as const,
+      schemaVersion: 1 as const,
+      migrationStatus: migration.status,
+      importedRowCount,
+      backupPath: marker?.backupPath ?? migration.backupPath,
+      sourceSha256: marker?.sourceSha256 ?? migration.sourceSha256,
+    };
 
     return {
       kind: 'sqlite',
       catalog,
       writer,
-      health: {
-        kind: 'sqlite',
-        schemaVersion: 1,
-        migrationStatus: migration.status,
-        rowCount: rows.length,
-        importedRowCount,
-        backupPath: marker?.backupPath ?? migration.backupPath,
-        sourceSha256: marker?.sourceSha256 ?? migration.sourceSha256,
+      get health(): MediaCatalogBackendHealth {
+        return { ...healthBase, rowCount: catalog.listAll().length };
       },
       get: (workspaceId, key) => catalog.get(workspaceId, key),
       listWorkspace: workspaceId => catalog.listWorkspace(workspaceId),
