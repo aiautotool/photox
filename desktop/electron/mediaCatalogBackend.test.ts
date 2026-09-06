@@ -75,7 +75,7 @@ test('startup backend validates migration marker count before activation', async
   const f = await fixture([{ workspaceId: 'w1', key: 'a', filename: 'a.jpg' }]);
   try {
     const backend = openActiveMediaCatalogBackend<Row>(f);
-    backend.catalog.append({ workspaceId: 'w1', key: 'extra', filename: 'extra.jpg' });
+    backend.catalog.remove('w1', 'a');
     backend.close();
     assert.throws(
       () => openActiveMediaCatalogBackend<Row>(f),
