@@ -39,6 +39,8 @@
     "electron/mediaIndexRuntimeWiring.test.ts",
     "electron/mediaIndexSerializedStore.ts",
     "electron/mediaIndexSerializedStore.test.ts",
+    "electron/mediaIngestCommitCoordinator.ts",
+    "electron/mediaIngestCommitCoordinator.test.ts",
     "electron/mediaProviderOperationGate.ts",
     "electron/mediaProviderOperationGate.test.ts",
     "electron/mediaProcessing.ts",
