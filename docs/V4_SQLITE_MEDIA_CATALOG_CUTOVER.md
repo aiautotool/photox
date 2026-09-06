@@ -21,10 +21,11 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - `mediaCatalogOperationsTransport.ts` defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256.
 - Production transports expose authenticated Web `GET /api/web/v1/operations/media-catalog` and trusted Desktop IPC/preload diagnostics through the shared `DesktopBridge` contract.
 - Desktop runtime and offline operator recovery tools share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export/restore, offline operator ownership blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
-- CI now includes a real child-process authority-holder termination regression: a live `operator-restore` process blocks Desktop authority, abrupt process termination leaves the expected stale lease, and the next process reclaims it only after the old PID is gone.
+- CI includes a real child-process authority-holder termination regression: a live `operator-restore` process blocks Desktop authority, abrupt process termination leaves the expected stale lease, and the next process reclaims it only after the old PID is gone.
 - Offline restore regressions are explicitly part of `tsconfig.electron-test.json`; successful restore, Desktop-authority blocking, SHA verification, duplicate tenant identity rejection, corrupt SQLite handling, and lease release on open failure are no longer orphaned tests outside the repository gate.
 - `mediaCatalogOfflineExport.ts` wraps the existing atomic SQLite→JSON export with that authority lease and refuses a missing SQLite database instead of creating an empty catalog. `catalog:export` provides an explicit CLI surface. The resulting JSON is a recovery/rollback artifact only; runtime remains SQLite-only.
 - `mediaCatalogOfflineRestore.ts` consumes only a SHA-256-verified offline export while holding the same authority lease. Before mutation it exports the current authoritative rows to a pre-restore JSON backup, then replaces only `photox_media_index` rows in one SQLite transaction while preserving schema/migration metadata. JSON never becomes a live writer and the SQLite database file remains the sole runtime authority.
+- Deterministic process-kill restore acceptance now covers `backup-created`, `transaction-started`, and `commit-complete` boundaries. The child process is terminated while holding `operator-restore` authority, the pre-restore backup is verified durable at every boundary, stale authority is reclaimed only after process death, and restart observes either the complete original catalog before commit or the complete restored catalog after commit—never a partially replaced catalog.
 
 ## Offline operator export
 With PhotoX Desktop fully stopped, run:
@@ -51,10 +52,10 @@ The restore command verifies the source hash and tenant/media-key uniqueness bef
 After a successful restore, start PhotoX normally. SQLite remains the sole active runtime catalog; the JSON source and pre-restore backup remain offline recovery artifacts only.
 
 ## Active cutover work
-1. Extend crash-boundary coverage around interrupted legacy workspace-ID preparation and characterize interruption before/during/after the restore SQLite transaction itself. Stale lease reclamation after an abruptly terminated holder is now process-tested in CI.
+1. Extend crash-boundary coverage around interrupted legacy workspace-ID preparation. Restore transaction kill-point acceptance is now process-tested at backup-created / in-transaction / post-commit boundaries.
 2. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
-3. Add stronger process-level restore interruption acceptance so backup durability and transactional rollback/commit behavior are explicitly proven at each kill point, not only lease reclamation.
-4. After remaining crash acceptance is green, stop referring to `media-index.json` as a runtime catalog anywhere in product/operator documentation. Keep it only as the one-time legacy import source and preserved rollback artifact.
+3. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
+4. Run real OS/power-loss acceptance on supported release platforms; CI process-kill coverage proves transactional semantics but does not replace physical power-loss testing.
 
 ## Non-negotiable product constraints carried through cutover
 - Google Drive allocation has no fixed 10 GB cap. Default PhotoX allocation remains 2/3 of each account's authoritative total quota while respecting provider remaining bytes, safety reserve, and configurable per-account ratio.
