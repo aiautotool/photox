@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
+import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
@@ -21,7 +21,7 @@ import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DesktopWorkspaceAuth } from './workspaceAuth.js';
 import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation, rendererDriveAccountInfo, type DriveRuntimeAllocation, type RendererDriveAccountInfo } from './driveRuntimeAllocation.js';
-import { createMediaIndexRuntimeWriter } from './mediaIndexRuntimeWriter.js';
+import { openActiveMediaCatalogBackend, type ActiveMediaCatalogBackend } from './mediaCatalogBackend.js';
 import { createMediaProviderOperationGate } from './mediaProviderOperationGate.js';
 import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';
@@ -50,6 +50,7 @@ let workspaceRepository:SqliteWorkspaceRepository|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
 let webEdgeServer:PhotoXWebEdgeServer|null=null;
 let workspaceAuth:DesktopWorkspaceAuth|null=null;
+let mediaCatalogBackend:ActiveMediaCatalogBackend<MediaIndexRow>|null=null;
 
 const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
 const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
@@ -169,7 +170,9 @@ function ingestRecoveryDir(){ return path.join(stateDir(),'ingest-recovery'); }
 function ingestRecoveryJournal(){return createMediaIngestRecoveryJournal({journalDir:ingestRecoveryDir(),libraryRoot:libraryDir(),incomingRoot:incomingDir()});}
 function videoCacheDir(){ return path.join(stateDir(),'video-cache'); }
 function indexFile(){ return path.join(stateDir(),'media-index.json'); }
-function mediaIndexWriter(){ return createMediaIndexRuntimeWriter<MediaIndexRow>(indexFile()); }
+function mediaCatalogDbFile(){ return path.join(stateDir(),'media-catalog.sqlite'); }
+function requireMediaCatalog(){if(!mediaCatalogBackend)throw new Error('MEDIA_CATALOG_NOT_READY');return mediaCatalogBackend;}
+function mediaIndexWriter(){ return requireMediaCatalog().writer; }
 function pairFile(){ return path.join(stateDir(),'pair-code.txt'); }
 function driveAccountsDir(){ return path.join(stateDir(),'google-accounts'); }
 function googlePhotosAccountsDir(){ return path.join(stateDir(),'google-photos-accounts'); }
@@ -193,24 +196,23 @@ function lanAddress(){
   return '127.0.0.1';
 }
 
-async function readAllIndex():Promise<MediaIndexRow[]>{
+async function prepareLegacyIndexForSqlite():Promise<void>{
   try{
     const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];
     const migrated=migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID);
-    if(migrated.migrated){await fs.mkdir(stateDir(),{recursive:true});await fs.writeFile(indexFile(),JSON.stringify(migrated.rows,null,2),'utf8');}
-    return migrated.rows;
-  }catch{return []}
-}
-async function readAllIndexForRecovery():Promise<MediaIndexRow[]>{
-  try{
-    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];
-    return migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID).rows;
+    if(!migrated.migrated)return;
+    await fs.mkdir(stateDir(),{recursive:true});
+    const tmp=`${indexFile()}.${crypto.randomUUID()}.migrating`;
+    await fs.writeFile(tmp,`${JSON.stringify(migrated.rows,null,2)}\n`,'utf8');
+    await fs.rename(tmp,indexFile());
   }catch(error){
-    if((error as NodeJS.ErrnoException).code==='ENOENT')return [];
+    if((error as NodeJS.ErrnoException).code==='ENOENT')return;
     throw error;
   }
 }
-async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}
+async function readAllIndex():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
+async function readAllIndexForRecovery():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
+async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return requireMediaCatalog().listWorkspace(workspaceId)}
 function replicasOf(row:MediaIndexRow){if(row.cloudReplicas?.length)return row.cloudReplicas;if(row.cloud)return [row.cloud];return []}
 function isVerified(replica:CloudDestination){return replica.state==='VERIFIED'||replica.state==='UPLOADED'}
 async function evaluateRow(row:MediaIndexRow){
@@ -746,12 +748,12 @@ ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigra
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());if(ingestRecovery.scanned||ingestRecovery.invalid.length)console.info('PhotoX ingest restart recovery',ingestRecovery);migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});await prepareLegacyIndexForSqlite();mediaCatalogBackend=openActiveMediaCatalogBackend<MediaIndexRow>({sqlitePath:mediaCatalogDbFile(),legacyJsonPath:indexFile()});console.info('PhotoX media catalog authority',mediaCatalogBackend.health);const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());if(ingestRecovery.scanned||ingestRecovery.invalid.length)console.info('PhotoX ingest restart recovery',ingestRecovery);migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
       if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}
       return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
   });createWindow();const deleteRecovery=await recoverDeletionTombstones(await readAllIndexForRecovery(),row=>deleteManagedMedia(row.key,row.workspaceId));if(deleteRecovery.attempted)console.info('PhotoX deletion restart recovery',deleteRecovery);const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
-app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
+app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;mediaCatalogBackend?.close();mediaCatalogBackend=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());

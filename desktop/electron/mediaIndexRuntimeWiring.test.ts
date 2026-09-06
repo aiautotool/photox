@@ -5,7 +5,8 @@ import path from 'node:path';
 
 test('desktop main routes ingest, video, and replica writes through exact runtime writer', async () => {
   const source = await fs.readFile(path.resolve('electron/main.ts'), 'utf8');
-  assert.match(source, /createMediaIndexRuntimeWriter<MediaIndexRow>\(indexFile\(\)\)/);
+  assert.match(source, /function mediaIndexWriter\(\)\{ return requireMediaCatalog\(\)\.writer; \}/);
+  assert.doesNotMatch(source, /createMediaIndexRuntimeWriter<MediaIndexRow>\(indexFile\(\)\)/);
   assert.match(source, /mediaIndexWriter\(\)\.ingest\(row\)/);
   assert.match(source, /writer\.patchVideo\(workspaceId,key,/);
   assert.match(source, /mediaIndexWriter\(\)\.syncReplicas\(row\.workspaceId,row\.key,replicas\)/);
