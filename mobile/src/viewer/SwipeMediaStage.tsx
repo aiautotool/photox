@@ -15,14 +15,20 @@ function distance(a:{pageX:number;pageY:number},b:{pageX:number;pageY:number}){
 
 function clamp(v:number,min:number,max:number){return Math.max(min,Math.min(max,v));}
 
-function VideoStage({asset}:{asset:DisplayAsset}){
+function horizontalSwipe(dx:number,dy:number){
+  if(Math.abs(dx)<MIN_SWIPE||Math.abs(dx)<=Math.abs(dy)*1.4)return 0;
+  return dx<0?1:-1;
+}
+
+function VideoStage({asset,onPrevious,onNext}:{asset:DisplayAsset;onPrevious():void;onNext():void}){
   const source=useMemo(()=>({uri:asset.uri,headers:asset.requestHeaders}),[asset.uri,asset.requestHeaders]);
   const player=useVideoPlayer(source,p=>{p.loop=false;p.play();});
   const [status,setStatus]=useState(player.status);
   const [errorMessage,setErrorMessage]=useState<string|null>(null);
   const [retrying,setRetrying]=useState(false);
+  const touchStartRef=useRef<{x:number;y:number}|null>(null);
 
-  useEffect(()=>{setErrorMessage(null);setRetrying(false);setStatus(player.status);},[asset.id,player]);
+  useEffect(()=>{setErrorMessage(null);setRetrying(false);setStatus(player.status);touchStartRef.current=null;},[asset.id,player]);
   useEffect(()=>{
     const subscription=player.addListener('statusChange',event=>{
       setStatus(event.status);
@@ -40,10 +46,23 @@ function VideoStage({asset}:{asset:DisplayAsset}){
     catch(error){setRetrying(false);setErrorMessage(error instanceof Error?error.message:String(error));}
   }
 
+  function onTouchStart(e:GestureResponderEvent){
+    const touches=e.nativeEvent.touches;
+    if(touches.length!==1){touchStartRef.current=null;return;}
+    touchStartRef.current={x:touches[0].pageX,y:touches[0].pageY};
+  }
+
+  function onTouchEnd(e:GestureResponderEvent){
+    const start=touchStartRef.current;touchStartRef.current=null;
+    const changed=e.nativeEvent.changedTouches?.[0];if(!start||!changed)return;
+    const direction=horizontalSwipe(changed.pageX-start.x,changed.pageY-start.y);
+    if(direction>0)onNext();else if(direction<0)onPrevious();
+  }
+
   const loading=status==='idle'||status==='loading'||retrying;
   const failed=status==='error'||Boolean(errorMessage);
 
-  return <View style={s.videoStage}>
+  return <View style={s.videoStage} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onTouchCancel={()=>{touchStartRef.current=null;}}>
     {asset.thumbnailUri&&<Image source={{uri:asset.thumbnailUri,headers:asset.requestHeaders}} style={StyleSheet.absoluteFill} contentFit="contain"/>}
     <VideoView player={player} style={StyleSheet.absoluteFill} nativeControls contentFit="contain" allowsFullscreen allowsPictureInPicture/>
     {loading&&!failed&&<View style={s.playerOverlay} pointerEvents="none"><ActivityIndicator size="large" color="#fff"/><Text style={s.playerMessage}>Đang tải video…</Text></View>}
@@ -91,8 +110,8 @@ function ZoomablePhoto({asset,onPrevious,onNext}:{asset:DisplayAsset;onPrevious(
     const start=startRef.current;startRef.current=null;
     if(!start||scale>1.01)return;
     const changed=e.nativeEvent.changedTouches?.[0];if(!changed)return;
-    const dx=changed.pageX-start.x,dy=changed.pageY-start.y;
-    if(Math.abs(dx)>=MIN_SWIPE&&Math.abs(dx)>Math.abs(dy)*1.4){dx<0?onNext():onPrevious();}
+    const direction=horizontalSwipe(changed.pageX-start.x,changed.pageY-start.y);
+    if(direction>0)onNext();else if(direction<0)onPrevious();
   }
 
   return <View style={StyleSheet.absoluteFill} onTouchStart={onStart} onTouchMove={onMove} onTouchEnd={onEnd} onTouchCancel={()=>{startRef.current=null;pinchRef.current=null;}}>
@@ -114,9 +133,7 @@ export function SwipeMediaStage({assets,current,onChange}:{assets:DisplayAsset[]
   const goNext=()=>{if(next)onChange(next);};
 
   return <View style={s.root}>
-    {current.mediaType==='video'?<View style={StyleSheet.absoluteFill} onTouchEnd={e=>{
-      const touches=e.nativeEvent.changedTouches;if(!touches?.length)return;
-    }}><VideoStage asset={current}/></View>:<ZoomablePhoto asset={current} onPrevious={goPrevious} onNext={goNext}/>} 
+    {current.mediaType==='video'?<VideoStage asset={current} onPrevious={goPrevious} onNext={goNext}/>:<ZoomablePhoto asset={current} onPrevious={goPrevious} onNext={goNext}/>} 
   </View>;
 }
 
