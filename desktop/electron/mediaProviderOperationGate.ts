@@ -17,7 +17,7 @@ export function createMediaProviderOperationGate(): MediaProviderOperationGate {
   const counts = new Map<string, number>();
 
   return {
-    async run<T>(workspaceId, key, operation) {
+    async run<T>(workspaceId: string, key: string, operation: () => Promise<T>): Promise<T> {
       const id = identity(workspaceId, key);
       const previous = tails.get(id) ?? Promise.resolve();
       counts.set(id, (counts.get(id) ?? 0) + 1);
@@ -41,7 +41,7 @@ export function createMediaProviderOperationGate(): MediaProviderOperationGate {
         }
       }
     },
-    pending(workspaceId, key) {
+    pending(workspaceId: string, key: string): number {
       return counts.get(identity(workspaceId, key)) ?? 0;
     },
   };
