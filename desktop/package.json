@@ -10,6 +10,7 @@
     "build": "vite build && tsc -p tsconfig.electron.json",
     "test": "tsc -p tsconfig.electron-test.json && tsc -p tsconfig.renderer-test.json && node --test dist-electron-test/*.test.js dist-renderer-test/*.test.js",
     "catalog:export": "npm run build && node dist-electron/mediaCatalogOfflineExportCli.js",
+    "catalog:restore": "npm run build && node dist-electron/mediaCatalogOfflineRestoreCli.js",
     "smoke:packaged-renderer": "electron . --no-sandbox",
     "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64 --publish never",
