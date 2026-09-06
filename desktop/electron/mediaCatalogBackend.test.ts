@@ -32,12 +32,15 @@ test('startup backend imports legacy JSON once then exposes sqlite as sole autho
     assert.equal(first.get('w2', 'same')?.filename, 'two.jpg');
     await first.writer.ingest({ workspaceId: 'w1', key: 'new', filename: 'new.jpg' });
     assert.equal(first.listWorkspace('w1').length, 2);
+    assert.equal(first.health.rowCount, 3, 'health rowCount must be live after runtime ingest');
     first.close();
 
     const second = openActiveMediaCatalogBackend<Row>(f);
     assert.equal(second.health.migrationStatus, 'ALREADY_IMPORTED');
     assert.equal(second.health.rowCount, 3);
     assert.equal(second.get('w1', 'new')?.filename, 'new.jpg');
+    await second.writer.remove('w1', 'new');
+    assert.equal(second.health.rowCount, 2, 'health rowCount must be live after runtime removal');
     second.close();
   } finally {
     await fs.rm(f.dir, { recursive: true, force: true });
