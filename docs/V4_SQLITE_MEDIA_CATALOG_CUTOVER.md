@@ -1,46 +1,56 @@
 # PhotoX V4 — SQLite Media Catalog Cutover
 
 ## Purpose
-Move the Desktop/Web media catalog from `media-index.json` to transactional SQLite without dual-writing, without changing runtime semantic operations, and without weakening workspace isolation, deletion tombstones, replica state, ingest crash recovery, or rollback safety.
+Move the Desktop/Web media catalog from legacy `media-index.json` to transactional SQLite without dual-writing, without changing runtime semantic operations, and without weakening workspace isolation, deletion tombstones, replica state, ingest crash recovery, diagnostics or rollback safety.
+
+## Production authority status
+SQLite is now the sole active Desktop media-catalog authority.
+
+`media-index.json` has only two permitted roles:
+1. one-time legacy import source during cutover; and
+2. offline recovery/export artifact produced or consumed while Desktop is stopped and exclusive catalog authority is held by the operator tool.
+
+It must never be reintroduced as a concurrent runtime writer or second live catalog.
 
 ## Completed foundation
-- `SqliteMediaIndexCatalog` owns a composite `workspace_id + media_key` primary key, schema version metadata, transactional append/patch/remove, exact identity immutability, workspace listing/all listing, and JSON row preservation for existing video/replica/deletion metadata.
-- Legacy JSON import is strict and idempotent. It validates row identities and duplicates, requires an empty SQLite target, stores the source SHA-256 in a versioned migration marker, creates/fsyncs a backup artifact before import, rejects a changed source after import, and commits rows + marker in one SQLite transaction.
-- SQLite can export the active catalog back to atomic JSON for operator rollback/recovery.
-- Desktop `mediaIndexRuntimeWriter` accepts either the legacy JSON path or an injected `MediaIndexMutationRepository`. This keeps ingest/video/replica/delete semantics storage-agnostic and avoids a JSON+SQLite dual-write mode.
-- `mediaIndexSqliteRepository.ts` adapts `SqliteMediaIndexCatalog` to the existing async exact-identity mutation repository contract.
-- CI-gated Desktop regressions verify SQLite runtime semantics for identical media keys in different workspaces, video patch isolation, concurrent Drive replica progress, deletion tombstone blocking, owner-only deletion finalization, duplicate ingest fail-closed behavior, and identity immutability.
-- `mediaCatalogBackend.ts` provides the Desktop/Web startup authority boundary. It opens the PhotoX SQLite store, performs the one-time legacy import, validates catalog identities, migration marker version/SHA, and the marker's imported-row lower bound before returning any runtime read/write handle. A first install with no legacy JSON is supported. Post-migration SQLite growth is allowed while a catalog with fewer rows than its durable import marker fails closed.
-- Startup backend regressions cover first import, already-imported restart with post-cutover rows, source mutation after import, first install without legacy JSON, and fail-closed detection when imported data disappears.
-- Desktop production startup now prepares legacy workspace IDs only before the one-time import, opens exactly one `ActiveMediaCatalogBackend`, and activates it before ingest crash recovery, workspace usage bootstrap, receiver/Web startup, deletion replay, video processing, or Drive retry work.
-- Legacy workspace-ID preparation is now an explicit crash-safe boundary. `legacyMediaIndexPreparation.ts` never mutates the source in place, validates JSON before replacement, writes a unique mode-0600 temp, fsyncs it before atomic rename, attempts directory fsync, removes pre-rename temps on ordinary failures, and cleans orphaned `*.migrating` files left by abrupt termination on the next startup. Restart is idempotent and already-scoped rows retain their existing workspace identity.
-- Desktop runtime reads now use SQLite `listAll`/`listWorkspace`; ingest/video/replica/delete mutations use the active backend writer. Ingest journal recovery and deletion tombstone replay therefore consult the same SQLite authority as normal runtime operations rather than stale JSON.
-- Desktop shutdown closes the active media catalog store. Production wiring regressions fail if the legacy JSON runtime writer is reintroduced or if recovery runs before SQLite activation.
-- Restart-boundary regressions cover a durable pre-import backup with no marker, process restart after import commit but before runtime backend activation, corrupt SQLite fail-closed behavior, and newer-than-supported media catalog schema rejection. These complement the existing already-imported/source-changed/fresh-install/data-loss guards.
-- `mediaCatalogDiagnostics.ts` defines a role-safe diagnostics contract. Workspace-visible diagnostics expose backend/schema/migration/count/backup-availability only; trusted operator diagnostics may additionally expose the local backup path and source SHA-256. Tests prevent filesystem paths or source fingerprints from leaking through the workspace-safe shape.
-- Catalog health is live rather than a startup snapshot: `rowCount` is read from current SQLite authority after ingest/delete, preventing stale Admin/Operations diagnostics.
-- `mediaCatalogOperationsTransport.ts` defines the transport policy boundary. Web diagnostics require `admin`/`owner` and always return the workspace-safe redacted shape even for owners; only the trusted local Desktop/operator boundary may expose backup path and source SHA-256.
-- Production transports expose authenticated Web `GET /api/web/v1/operations/media-catalog` and trusted Desktop IPC/preload diagnostics through the shared `DesktopBridge` contract.
-- Shared Desktop/Web React renderer now includes a real Media Catalog Operations drawer backed by `DesktopBridge.getMediaCatalogDiagnostics()`. Web role denial hides the surface, successful Web diagnostics receive a second renderer-level redaction pass, and local Desktop operators may expand recovery-only metadata. The drawer refreshes live diagnostics without adding mutation controls or mock actions.
-- Renderer regressions explicitly cover Web redaction, trusted Desktop recovery metadata, and Web 403/`ROLE_FORBIDDEN` detection; the tests are included in `tsconfig.renderer-test.json` and therefore run in repository CI.
-- Desktop runtime and offline operator recovery tools share an exclusive process authority lease (`<sqlite>.authority.lock`). Live Desktop ownership blocks export/restore, offline operator ownership blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only when the recorded PID is proven absent.
-- CI includes a real child-process authority-holder termination regression: a live `operator-restore` process blocks Desktop authority, abrupt process termination leaves the expected stale lease, and the next process reclaims it only after the old PID is gone.
-- Offline restore regressions are explicitly part of `tsconfig.electron-test.json`; successful restore, Desktop-authority blocking, SHA verification, duplicate tenant identity rejection, corrupt SQLite handling, and lease release on open failure are no longer orphaned tests outside the repository gate.
-- `mediaCatalogOfflineExport.ts` wraps the existing atomic SQLite→JSON export with that authority lease and refuses a missing SQLite database instead of creating an empty catalog. `catalog:export` provides an explicit CLI surface. The resulting JSON is a recovery/rollback artifact only; runtime remains SQLite-only.
-- `mediaCatalogOfflineRestore.ts` consumes only a SHA-256-verified offline export while holding the same authority lease. Before mutation it exports the current authoritative rows to a pre-restore JSON backup, then replaces only `photox_media_index` rows in one SQLite transaction while preserving schema/migration metadata. JSON never becomes a live writer and the SQLite database file remains the sole runtime authority.
-- Deterministic process-kill restore acceptance now covers `backup-created`, `transaction-started`, and `commit-complete` boundaries. The child process is terminated while holding `operator-restore` authority, the pre-restore backup is verified durable at every boundary, stale authority is reclaimed only after process death, and restart observes either the complete original catalog before commit or the complete restored catalog after commit—never a partially replaced catalog.
+- `SqliteMediaIndexCatalog` owns composite `workspace_id + media_key` identity, schema metadata and transactional append/patch/remove semantics.
+- One-time JSON import is strict/idempotent, validates identities/duplicates, records versioned migration metadata + source SHA-256, creates/fsyncs backup material and commits rows + marker transactionally.
+- `mediaCatalogBackend.ts` is the startup authority boundary and validates schema/import-marker invariants before returning runtime handles.
+- Desktop production startup activates one `ActiveMediaCatalogBackend` before ingest recovery, usage bootstrap, receiver/Web startup, deletion replay, video processing or Drive retry work.
+- Desktop runtime reads use SQLite `listAll`/`listWorkspace`; ingest/video/replica/delete mutations use the active backend writer.
+- Legacy workspace-ID preparation is crash-safe, temp-file based, fsynced before atomic rename, cleans orphan `*.migrating` files on restart and is idempotent.
+- Startup/restart regressions cover first import, already-imported restart, post-cutover growth, source mutation, fresh install, imported-row loss, durable backup without marker, post-commit/pre-activation restart, corrupt SQLite and unsupported newer schema.
+- Runtime shutdown closes the active catalog. Regression gates fail if the legacy JSON runtime writer is reintroduced or recovery runs before SQLite activation.
+- `mediaCatalogDiagnostics.ts` provides live catalog health. Workspace-safe diagnostics redact local backup paths/source fingerprints; trusted local operators may access recovery-only metadata.
+- Web `admin`/`owner` diagnostics are role-gated and always redacted. Trusted Desktop operator diagnostics may expose local recovery metadata.
+- Shared Desktop/Web React renderer contains a real Operations drawer backed by `DesktopBridge.getMediaCatalogDiagnostics()`; Web role denial hides the surface and renderer applies an additional redaction pass.
+- Runtime and offline tools share an exclusive `<sqlite>.authority.lock`. Live Desktop ownership blocks export/restore, offline operator ownership blocks Desktop startup, malformed locks fail closed, and stale crash locks are reclaimed only after the recorded PID is proven absent.
+- Offline `catalog:export` creates an atomic JSON recovery artifact without turning JSON into a live writer.
+- Offline `catalog:restore` accepts only SHA-256-verified exports, takes exclusive authority, creates a pre-restore backup and replaces only media rows in one SQLite transaction while preserving schema/migration metadata.
+- Process-level kill tests prove stale lease reclamation after abrupt termination.
+- Deterministic restore killpoints cover `backup-created`, `transaction-started` and `commit-complete`; restart observes either the complete original catalog before commit or complete restored catalog after commit, never a half-restored state.
+
+## Documentation audit — current progress
+Completed in the current audit batch:
+- root `README.md` now describes SQLite runtime authority, current Desktop/Web architecture, compliant Google Photos Picker migration and the real Drive allocation policy.
+- `docs/ARCHITECTURE.md` no longer describes the obsolete Tauri/Rust + fixed-cap model and now records the current React Native/Electron/shared-Web architecture.
+- `docs/BRD.md` removes the fixed 10 GiB business rule and carries the 2/3 authoritative quota requirement, Google Photos Picker-only boundary and shared Web/Desktop SaaS requirements.
+- `docs/FRS.md` replaces hard-coded 10 GiB functional requirements with the runtime allocation formula and explicitly defines SQLite as runtime media-catalog authority.
+- `docs/RUN_REAL_SYNC.md` removes the obsolete 10 GiB storage rule and updates pairing/session/catalog/provider behavior.
+
+Still to audit: secondary historical/integration documents that may describe pre-cutover JSON writers or old product architecture. Historical run notes may retain past-state descriptions when clearly labeled as historical; current operator/product instructions must not describe JSON as runtime authority.
 
 ## Offline operator export
-With PhotoX Desktop fully stopped, run:
+With PhotoX Desktop fully stopped:
 
 ```bash
 npm --workspace @photosync/desktop run catalog:export -- --sqlite "/path/to/photosync-state/media-catalog.sqlite" --out "/safe/path/photox-media-catalog-rollback.json"
 ```
 
-Record the `sha256` emitted by the command together with the export artifact. Keep the exported JSON outside the active state directory when possible. Do not replace `media-index.json` while PhotoX is running and do not use this artifact as a second live writer.
+Record the emitted SHA-256 together with the artifact. Keep the export outside the active state directory when possible. Do not replace legacy JSON or use the export as a second writer while PhotoX is running.
 
 ## Offline operator restore
-With PhotoX Desktop fully stopped, restore a previously exported artifact only when its recorded SHA-256 is available:
+With PhotoX Desktop fully stopped:
 
 ```bash
 npm --workspace @photosync/desktop run catalog:restore -- \
@@ -50,20 +60,20 @@ npm --workspace @photosync/desktop run catalog:restore -- \
   --backup "/safe/path/pre-restore-current-catalog.json"
 ```
 
-The restore command verifies the source hash and tenant/media-key uniqueness before taking authority or mutating SQLite. While holding exclusive authority it writes a pre-restore backup of the current SQLite rows, replaces the media rows transactionally, verifies the restored rows, closes SQLite, then releases the authority lease. If Desktop is running, the command fails rather than racing it. A missing/corrupt source, SHA mismatch, duplicate identity, missing/corrupt SQLite database, or malformed authority lock fails closed.
+The restore validates source hash and tenant/media-key uniqueness before mutation, holds exclusive authority, writes a pre-restore backup, performs transactional replacement, verifies restored rows, closes SQLite, then releases authority. Missing/corrupt input, SHA mismatch, duplicate identity, missing/corrupt SQLite or malformed authority lock fail closed.
 
-After a successful restore, start PhotoX normally. SQLite remains the sole active runtime catalog; the JSON source and pre-restore backup remain offline recovery artifacts only.
+After restore, start PhotoX normally. SQLite remains the sole runtime catalog.
 
 ## Active cutover work
-1. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
-2. Add renderer-level integration coverage for the Operations drawer lifecycle when a suitable DOM test harness is available; current pure view-model tests and production build/smoke gates cover redaction and compilation, while transport integration remains separately covered in Electron/Web tests.
-3. Run real OS/power-loss acceptance on supported release platforms; CI process-kill coverage proves transactional semantics but does not replace physical power-loss testing.
+1. Continue the secondary documentation audit and remove only current-state references that still present `media-index.json` as a runtime catalog/writer.
+2. Add renderer-level DOM lifecycle coverage for the Operations drawer when a suitable DOM harness is available; current view-model tests plus Electron/Web transport integration already cover redaction/role policy.
+3. Run real OS/physical power-loss acceptance on supported release platforms; CI process-kill tests prove transactional semantics but do not substitute for hardware/filesystem power-loss testing.
 
 ## Non-negotiable product constraints carried through cutover
-- Google Drive allocation has no fixed 10 GB cap. Default PhotoX allocation remains 2/3 of each account's authoritative total quota while respecting provider remaining bytes, safety reserve, and configurable per-account ratio.
-- Google Photos migration remains Picker-selected only under the current Google Photos Picker API, with append-only destination upload and durable migration state. The product must not claim unrestricted full-library crawling.
-- Web and Desktop continue to share the same React UI/components/styles and `DesktopBridge` contract, with Electron IPC and authenticated HTTP/WebSocket adapters respectively.
-- Workspace/tenant identity must remain authoritative at every catalog operation; identical media keys in different workspaces must never collide.
+- Google Drive allocation has **no fixed 10 GB cap**. Default PhotoX allocation is `2/3` of each account's authoritative total quota, bounded by actual provider remaining bytes and the configured safety reserve, with configurable per-account ratio.
+- Google Photos migration is **Picker-selected only** under the current Google Photos Picker API. Destination Google Photos writes are append-only; Google Drive is also a supported destination. The product must not claim unrestricted full-library crawling.
+- Web and Desktop share the same React UI/components/styles and `DesktopBridge` contract, with Electron IPC and authenticated HTTP/WebSocket adapters respectively.
+- Workspace/tenant identity remains authoritative at every catalog operation; identical media keys in different workspaces must never collide.
 
-## Exit criteria for SQLite authority
-SQLite is the sole active Desktop media catalog at the production lifecycle boundary. Release acceptance still requires repository tests, Desktop integration tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging, and packaged Desktop smoke to remain green on the final branch head. Platform-signed installers and real power-loss acceptance remain separately reportable as NOT VERIFIED until run in the required platform/signing environment.
+## Exit criteria
+SQLite is the sole active Desktop media catalog at the production lifecycle boundary. Every completed code batch must keep repository tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging and packaged Desktop smoke green on the final branch head. Platform-signed installers, live provider-account acceptance, public TLS/reverse-proxy acceptance and physical power-loss acceptance remain explicitly **NOT VERIFIED** until run in the required environment.
