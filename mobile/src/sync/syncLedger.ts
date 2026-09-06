@@ -24,7 +24,7 @@ function retryDelayMs(attempts: number) {
 function validRetryState(value: unknown): value is FailedRetryState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<FailedRetryState>;
-  return Number.isInteger(item.attempts) && (item.attempts || 0) > 0
+  return typeof item.attempts === 'number' && Number.isInteger(item.attempts) && item.attempts > 0
     && typeof item.failedAt === 'number' && Number.isFinite(item.failedAt)
     && typeof item.retryAfter === 'number' && Number.isFinite(item.retryAfter);
 }
