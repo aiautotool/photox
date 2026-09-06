@@ -23,6 +23,7 @@ import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driv
 import { driveRuntimeAllocation, rendererDriveAccountInfo, type DriveRuntimeAllocation, type RendererDriveAccountInfo } from './driveRuntimeAllocation.js';
 import { createMediaIndexRuntimeWriter } from './mediaIndexRuntimeWriter.js';
 import { createMediaProviderOperationGate } from './mediaProviderOperationGate.js';
+import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -40,6 +41,7 @@ let cloudflareStopping = false;
 let lastStatus: DesktopStatus = { state: 'idle', received: 0, duplicates: 0, cloudUploaded: 0, cloudBlocked: 0 };
 let cloudUploadQueue: Promise<void> = Promise.resolve();
 const mediaProviderOperationGate=createMediaProviderOperationGate();
+const mediaIngestCommitCoordinator=createMediaIngestCommitCoordinator();
 let repairSweepActive=false;
 let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
@@ -510,13 +512,38 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
     await pipeline(req,createWriteStream(tmp));
     const stat=await fs.stat(tmp);
     if(stat.size!==declaredSize)throw new Error(`MEDIA_SIZE_MISMATCH:${declaredSize}:${stat.size}`);
-    const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
-  await fs.rename(tmp,target); const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; try{await mediaIndexWriter().ingest(row)}catch(error){if(error instanceof Error&&error.message==='MEDIA_INDEX_DUPLICATE_KEY'){repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return}throw error}
-  lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
-  res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
-  reservationCommitted=true;
-  repo.appendAudit({workspaceId:requestWorkspace,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:deviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size}});
-  if(declaredMediaType==='video')void processVideoRow(key,requestWorkspace);void enqueueCloudUpload(row);
+    const hash=await hashFile(tmp);
+    let outcome;
+    try{
+      outcome=await mediaIngestCommitCoordinator.run({workspaceId:requestWorkspace,key},{
+        exists:async()=>{const authoritative=await readIndex(requestWorkspace);return authoritative.some(item=>item.key===key);},
+        commit:async()=>{
+          const parsed=path.parse(filename);
+          const uniqueSuffix=crypto.createHash('sha256').update(`${requestWorkspace}\0${key}\0${crypto.randomUUID()}`).digest('hex').slice(0,16);
+          const target=path.join(folder,`${parsed.name}-${uniqueSuffix}${parsed.ext}`);
+          await fs.rename(tmp,target);
+          const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]};
+          try{await mediaIndexWriter().ingest(row);return {row,target};}
+          catch(error){await fs.unlink(target).catch(()=>undefined);throw error;}
+        },
+      });
+    }catch(error){
+      if(error instanceof Error&&error.message==='MEDIA_INDEX_DUPLICATE_KEY'){
+        await fs.unlink(tmp).catch(()=>undefined);repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;
+        res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;
+      }
+      throw error;
+    }
+    if(outcome.status==='duplicate'){
+      await fs.unlink(tmp).catch(()=>undefined);repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;
+      res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;
+    }
+    const {row,target}=outcome.value;
+    lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
+    res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
+    reservationCommitted=true;
+    repo.appendAudit({workspaceId:requestWorkspace,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:deviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size}});
+    if(declaredMediaType==='video')void processVideoRow(key,requestWorkspace);void enqueueCloudUpload(row);
   }catch(error){
     await fs.unlink(tmp).catch(()=>undefined);
     if(!reservationCommitted)repo.releaseMediaReservation(requestWorkspace,declaredSize);
