@@ -1,0 +1,39 @@
+name: One-shot remove legacy index writers
+on:
+  push:
+    branches: [v4]
+    paths:
+      - 'scripts/one-shot-remove-legacy-index-writers.mjs'
+      - '.github/workflows/one-shot-remove-legacy-index-writers.yml'
+permissions:
+  contents: write
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v4
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Remove legacy writers
+        run: node scripts/one-shot-remove-legacy-index-writers.mjs
+      - name: Run tests
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Commit cleanup and remove one-shot files
+        shell: bash
+        run: |
+          git config user.name 'aiautotool'
+          git config user.email '161418348+aiautotool@users.noreply.github.com'
+          git rm scripts/one-shot-remove-legacy-index-writers.mjs .github/workflows/one-shot-remove-legacy-index-writers.yml
+          git add desktop/electron/main.ts
+          git diff --cached --check
+          git commit -m 'refactor(v4): remove dead whole-workspace media writers'
+          git push origin HEAD:v4
