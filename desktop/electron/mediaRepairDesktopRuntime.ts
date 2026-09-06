@@ -5,12 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, migrateLegacyWorkspaceRows, type StorageAccount } from '@photosync/core';
+import { chooseAccount, type StorageAccount } from '@photosync/core';
 import { createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 import { SqlitePhotoXStore, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { loadWorkspaceDriveAccounts } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation } from './driveRuntimeAllocation.js';
-import { mutateSerializedJsonArray } from './mediaIndexSerializedStore.js';
+import { loadMediaRepairCatalogRow, upsertMediaRepairCatalogReplica } from './mediaRepairCatalog.js';
 import { MediaRepairCoordinator } from './mediaRepairCoordinator.js';
 import { repairMediaFromPrincipal, type MediaRepairAuditEvent, type MediaRepairPrincipal } from './mediaRepairTransport.js';
 import { mimeTypeForFilename } from './mediaProcessing.js';
@@ -40,7 +40,7 @@ export type RepairReplica = {
 };
 
 type RepairRow = {
-  workspaceId?: string;
+  workspaceId: string;
   key: string;
   filename: string;
   path: string;
@@ -77,7 +77,7 @@ async function paths() {
   const stateDir = path.join(app.getPath('userData'), 'photosync-state');
   return {
     stateDir,
-    indexFile: path.join(stateDir, 'media-index.json'),
+    mediaCatalogPath: path.join(stateDir, 'media-catalog.sqlite'),
     accountsDir: path.join(stateDir, 'google-accounts'),
     databasePath: path.join(stateDir, 'migration.sqlite'),
   };
@@ -90,31 +90,6 @@ function replicasOf(row: RepairRow) {
 
 function isVerified(replica: RepairReplica) {
   return replica.state === 'VERIFIED' || replica.state === 'UPLOADED';
-}
-
-async function readRows(): Promise<RepairRow[]> {
-  const resolved = await paths();
-  try {
-    const raw = JSON.parse(await fs.readFile(resolved.indexFile, 'utf8')) as RepairRow[];
-    return migrateLegacyWorkspaceRows(raw as any[], LEGACY_WORKSPACE_ID).rows as RepairRow[];
-  } catch {
-    return [];
-  }
-}
-
-async function mutateExactRow(workspaceId: string, key: string, mutate: (row: RepairRow) => RepairRow) {
-  const resolved = await paths();
-  let mutated: RepairRow | undefined;
-  await mutateSerializedJsonArray<any>(resolved.indexFile, rawRows => {
-    const rows = migrateLegacyWorkspaceRows(rawRows as any[], LEGACY_WORKSPACE_ID).rows as RepairRow[];
-    const index = rows.findIndex(row => (row.workspaceId || LEGACY_WORKSPACE_ID) === workspaceId && row.key === key);
-    if (index < 0) throw new Error('MEDIA_REPAIR_NOT_FOUND');
-    mutated = { ...mutate({ ...rows[index] }), workspaceId };
-    rows[index] = mutated;
-    return rows;
-  }, { tempLabel: 'repair' });
-  if (!mutated) throw new Error('MEDIA_REPAIR_NOT_FOUND');
-  return mutated;
 }
 
 async function oauthClient() {
@@ -164,16 +139,18 @@ async function runtimeDriveAccounts(workspaceId: string): Promise<RuntimeDriveAc
   return result;
 }
 
-async function saveReplica(workspaceId: string, key: string, replica: RepairReplica) {
-  return mutateExactRow(workspaceId, key, row => {
-    const replicas = replicasOf(row).filter(existing => !(replica.accountId && existing.accountId === replica.accountId));
-    replicas.push(replica);
-    return { ...row, cloud: replicas[0], cloudReplicas: replicas };
-  });
+async function loadExactRow(workspaceId: string, key: string): Promise<RepairRow | null> {
+  const resolved = await paths();
+  return loadMediaRepairCatalogRow(resolved.mediaCatalogPath, workspaceId, key) as RepairRow | null;
+}
+
+async function saveReplica(workspaceId: string, key: string, replica: RepairReplica): Promise<RepairRow> {
+  const resolved = await paths();
+  return upsertMediaRepairCatalogReplica(resolved.mediaCatalogPath, workspaceId, key, replica) as RepairRow;
 }
 
 async function uploadExactMedia(workspaceId: string, key: string) {
-  const row = (await readRows()).find(item => (item.workspaceId || LEGACY_WORKSPACE_ID) === workspaceId && item.key === key);
+  const row = await loadExactRow(workspaceId, key);
   if (!row) throw new Error('MEDIA_REPAIR_NOT_FOUND');
   await fs.access(row.path).catch(() => { throw new Error('MEDIA_REPAIR_LOCAL_ORIGINAL_UNAVAILABLE'); });
 
@@ -290,7 +267,7 @@ async function appendDesktopAudit(principal: MediaRepairPrincipal, event: MediaR
 
 const coordinator = new MediaRepairCoordinator({
   loadMedia: async (workspaceId, key) => {
-    const row = (await readRows()).find(item => (item.workspaceId || LEGACY_WORKSPACE_ID) === workspaceId && item.key === key);
+    const row = await loadExactRow(workspaceId, key);
     if (!row) return undefined;
     let localAvailable = false;
     try { await fs.access(row.path); localAvailable = true; } catch {}
