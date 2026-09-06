@@ -7,17 +7,19 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - `SqliteMediaIndexCatalog` owns a composite `workspace_id + media_key` primary key, schema version metadata, transactional append/patch/remove, exact identity immutability, workspace listing/all listing, and JSON row preservation for existing video/replica/deletion metadata.
 - Legacy JSON import is strict and idempotent. It validates row identities and duplicates, requires an empty SQLite target, stores the source SHA-256 in a versioned migration marker, creates/fsyncs a read-only-style backup artifact before import, rejects a changed source after import, and commits rows + marker in one SQLite transaction.
 - SQLite can export the active catalog back to atomic JSON for operator rollback/recovery.
-- Desktop `mediaIndexRuntimeWriter` now accepts either the legacy JSON path or an injected `MediaIndexMutationRepository`. This keeps ingest/video/replica/delete semantics storage-agnostic and avoids a JSON+SQLite dual-write mode.
+- Desktop `mediaIndexRuntimeWriter` accepts either the legacy JSON path or an injected `MediaIndexMutationRepository`. This keeps ingest/video/replica/delete semantics storage-agnostic and avoids a JSON+SQLite dual-write mode.
 - `mediaIndexSqliteRepository.ts` adapts `SqliteMediaIndexCatalog` to the existing async exact-identity mutation repository contract.
 - CI-gated Desktop regressions verify SQLite runtime semantics for identical media keys in different workspaces, video patch isolation, concurrent Drive replica progress, deletion tombstone blocking, owner-only deletion finalization, duplicate ingest fail-closed behavior, and identity immutability.
+- `mediaCatalogBackend.ts` now provides the Desktop/Web startup authority boundary. It opens the PhotoX SQLite store, performs the one-time legacy import, validates catalog identities, migration marker version/SHA, and the marker's imported-row lower bound before returning any runtime read/write handle. A first install with no legacy JSON is supported. Post-migration SQLite growth is allowed while a catalog with fewer rows than its durable import marker fails closed.
+- Startup backend regressions cover first import, already-imported restart with post-cutover rows, source mutation after import, first install without legacy JSON, and fail-closed detection when imported data disappears.
 
 ## Active cutover work
-1. Add a Desktop catalog backend/orchestrator that opens the existing PhotoX SQLite store, imports legacy JSON exactly once when required, validates imported row count/identities and migration marker, and only then exposes SQLite as the sole active catalog backend.
+1. Wire the Desktop process startup to create exactly one `ActiveMediaCatalogBackend` and keep it alive for the process lifetime; close it during app shutdown.
 2. Route `readIndex`/strict startup reads through the active backend so read authority switches at the same boundary as writes. Do not leave JSON reads active after SQLite becomes authoritative.
-3. Instantiate `mediaIndexRuntimeWriter` with the SQLite mutation adapter after successful startup cutover; keep the legacy JSON factory only for explicit rollback/migration tooling and tests.
+3. Instantiate production `mediaIndexRuntimeWriter` from `backend.writer`; keep the legacy JSON factory only for explicit rollback/migration tooling and tests.
 4. Route ingest journal recovery and deletion tombstone replay through the active catalog backend so crash recovery never consults stale JSON after cutover.
-5. Persist explicit cutover/health observability: backend kind, schema version, migration status, imported row count, backup path, and startup validation failure reason. Fail closed on corrupt/too-new SQLite schema or migration mismatch.
-6. Add restart/crash-boundary regressions: crash before import transaction, crash after import commit before runtime activation, already-imported restart, source changed after marker, missing legacy JSON on first install, and corrupt SQLite fail-closed behavior.
+5. Surface backend health/observability from the authority boundary: backend kind, schema version, migration status, active row count, imported row count, backup path, source SHA, and startup validation failure reason.
+6. Add restart/crash-boundary regressions around production startup wiring: crash before import transaction, crash after import commit before runtime activation, already-imported restart, source changed after marker, missing legacy JSON on first install, and corrupt/too-new SQLite fail-closed behavior.
 7. Only after these gates are green, stop treating `media-index.json` as an active runtime catalog. Retain the backup/export artifact for operator rollback according to release policy.
 
 ## Non-negotiable product constraints carried through cutover
@@ -27,4 +29,4 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - Workspace/tenant identity must remain authoritative at every catalog operation; identical media keys in different workspaces must never collide.
 
 ## Exit criteria for SQLite authority
-SQLite becomes the sole active media catalog only when repository tests, Desktop integration tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging, and packaged Desktop smoke are green with the startup orchestrator wired. Platform-signed installers and real process-kill/power-loss acceptance remain separately reportable as NOT VERIFIED until run in the required platform/signing environment.
+SQLite becomes the sole active media catalog only when repository tests, Desktop integration tests, TypeScript typecheck, production build, Desktop renderer smoke, electron-builder packaging, and packaged Desktop smoke are green with the startup orchestrator wired into production reads, writes, ingest recovery, and deletion replay. Platform-signed installers and real process-kill/power-loss acceptance remain separately reportable as NOT VERIFIED until run in the required platform/signing environment.
