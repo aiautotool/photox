@@ -93,6 +93,20 @@ test('offline export creates an atomic rollback JSON artifact and releases autho
   }
 });
 
+test('offline export releases authority when SQLite open fails', async () => {
+  const f = await fixture();
+  try {
+    await fsp.writeFile(f.sqlitePath, 'not-a-sqlite-database', 'utf8');
+    assert.throws(
+      () => exportMediaCatalogOffline<Row>({ sqlitePath: f.sqlitePath, targetPath: f.targetPath, leasePath: f.leasePath }),
+      /database|sqlite|disk image|file is not a database/i,
+    );
+    assert.equal(mediaCatalogAuthorityLeaseExists(f.leasePath), false);
+  } finally {
+    await fsp.rm(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('offline export refuses missing SQLite instead of creating an empty authority', async () => {
   const f = await fixture();
   try {

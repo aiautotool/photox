@@ -34,13 +34,23 @@ export function exportMediaCatalogOffline<T extends SqliteMediaIndexIdentity & R
 
   const leasePath = options.leasePath ?? `${sqlitePath}.authority.lock`;
   const lease = acquireMediaCatalogAuthorityLease(leasePath, 'operator-export');
-  const store = new SqlitePhotoXStore({ path: sqlitePath });
+  let store: SqlitePhotoXStore;
+  try {
+    store = new SqlitePhotoXStore({ path: sqlitePath });
+  } catch (error) {
+    lease.release();
+    throw error;
+  }
+
   try {
     const catalog = new SqliteMediaIndexCatalog<T>(store);
     const result = catalog.exportLegacyJson(targetPath);
     return { targetPath, ...result };
   } finally {
-    store.close();
-    lease.release();
+    try {
+      store.close();
+    } finally {
+      lease.release();
+    }
   }
 }
