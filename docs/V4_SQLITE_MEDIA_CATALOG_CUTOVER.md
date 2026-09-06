@@ -13,6 +13,7 @@ Move the Desktop/Web media catalog from `media-index.json` to transactional SQLi
 - `mediaCatalogBackend.ts` provides the Desktop/Web startup authority boundary. It opens the PhotoX SQLite store, performs the one-time legacy import, validates catalog identities, migration marker version/SHA, and the marker's imported-row lower bound before returning any runtime read/write handle. A first install with no legacy JSON is supported. Post-migration SQLite growth is allowed while a catalog with fewer rows than its durable import marker fails closed.
 - Startup backend regressions cover first import, already-imported restart with post-cutover rows, source mutation after import, first install without legacy JSON, and fail-closed detection when imported data disappears.
 - Desktop production startup now prepares legacy workspace IDs only before the one-time import, opens exactly one `ActiveMediaCatalogBackend`, and activates it before ingest crash recovery, workspace usage bootstrap, receiver/Web startup, deletion replay, video processing, or Drive retry work.
+- Legacy workspace-ID preparation is now an explicit crash-safe boundary. `legacyMediaIndexPreparation.ts` never mutates the source in place, validates JSON before replacement, writes a unique mode-0600 temp, fsyncs it before atomic rename, attempts directory fsync, removes pre-rename temps on ordinary failures, and cleans orphaned `*.migrating` files left by abrupt termination on the next startup. Restart is idempotent and already-scoped rows retain their existing workspace identity.
 - Desktop runtime reads now use SQLite `listAll`/`listWorkspace`; ingest/video/replica/delete mutations use the active backend writer. Ingest journal recovery and deletion tombstone replay therefore consult the same SQLite authority as normal runtime operations rather than stale JSON.
 - Desktop shutdown closes the active media catalog store. Production wiring regressions fail if the legacy JSON runtime writer is reintroduced or if recovery runs before SQLite activation.
 - Restart-boundary regressions cover a durable pre-import backup with no marker, process restart after import commit but before runtime backend activation, corrupt SQLite fail-closed behavior, and newer-than-supported media catalog schema rejection. These complement the existing already-imported/source-changed/fresh-install/data-loss guards.
@@ -52,10 +53,9 @@ The restore command verifies the source hash and tenant/media-key uniqueness bef
 After a successful restore, start PhotoX normally. SQLite remains the sole active runtime catalog; the JSON source and pre-restore backup remain offline recovery artifacts only.
 
 ## Active cutover work
-1. Extend crash-boundary coverage around interrupted legacy workspace-ID preparation. Restore transaction kill-point acceptance is now process-tested at backup-created / in-transaction / post-commit boundaries.
-2. Wire the diagnostics contract into the Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
-3. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
-4. Run real OS/power-loss acceptance on supported release platforms; CI process-kill coverage proves transactional semantics but does not replace physical power-loss testing.
+1. Wire the diagnostics contract into the shared Admin/Operations UI without exposing operator-only recovery metadata on Web. Controls must have real backing logic; no mock actions.
+2. Audit product/operator documentation and remove any remaining references that describe `media-index.json` as a runtime catalog. Keep it only as the one-time legacy import source and preserved rollback artifact.
+3. Run real OS/power-loss acceptance on supported release platforms; CI process-kill coverage proves transactional semantics but does not replace physical power-loss testing.
 
 ## Non-negotiable product constraints carried through cutover
 - Google Drive allocation has no fixed 10 GB cap. Default PhotoX allocation remains 2/3 of each account's authoritative total quota while respecting provider remaining bytes, safety reserve, and configurable per-account ratio.
