@@ -69,6 +69,8 @@
     "electron/mediaRepairTransport.test.ts",
     "electron/resumableMediaIngest.ts",
     "electron/resumableMediaIngest.test.ts",
+    "electron/resumableMediaIngestLifecycle.ts",
+    "electron/resumableMediaIngestLifecycle.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
     "electron/webEdgeMediaRepair.test.ts",
     "electron/webEdgeProxyHardening.test.ts",
