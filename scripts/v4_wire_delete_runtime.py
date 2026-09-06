@@ -1,3 +1,4 @@
+# One-shot v4 runtime wiring migration; remove after the generated production commit lands.
 from pathlib import Path
 
 p = Path('desktop/electron/main.ts')
