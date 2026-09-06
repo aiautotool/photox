@@ -13,6 +13,8 @@ import type { RuntimeMediaIndexRow } from './mediaIndexRuntimeWriter.js';
 type Row = RuntimeMediaIndexRow & { filename: string };
 
 async function waitForChildReady(child: ReturnType<typeof spawn>): Promise<void> {
+  const stdoutStream = child.stdout;
+  if (!stdoutStream) throw new Error('child authority holder stdout unavailable');
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('child authority holder did not become ready')), 10_000);
     let stdout = '';
@@ -20,14 +22,14 @@ async function waitForChildReady(child: ReturnType<typeof spawn>): Promise<void>
       stdout += chunk.toString();
       if (!stdout.includes('READY')) return;
       clearTimeout(timeout);
-      child.stdout.off('data', onData);
+      stdoutStream.off('data', onData);
       resolve();
     };
     child.once('error', (error) => {
       clearTimeout(timeout);
       reject(error);
     });
-    child.stdout.on('data', onData);
+    stdoutStream.on('data', onData);
   });
 }
 
