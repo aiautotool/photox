@@ -78,7 +78,7 @@ test('production runtime rejects a different member even on the same workspace a
     const create = await fetch(`${baseUrl}/api/v1/media/uploads`, { method: 'POST', headers: { authorization: 'Bearer member-a', 'content-type': 'application/json' }, body: JSON.stringify({ assetId: 'asset-member', filename: 'photo.jpg', mimeType: 'image/jpeg', mediaType: 'photo', createdAt: Date.now(), expectedBytes: bytes.length }) });
     assert.equal(create.status, 201); const session = await create.json() as { sessionId: string };
     const denied = await fetch(`${baseUrl}/api/v1/media/uploads/${session.sessionId}`, { headers: { authorization: 'Bearer member-b' } });
-    assert.equal(denied.status, 401); assert.deepEqual(await denied.json(), { error: 'UNAUTHORIZED' });
+    assert.equal(denied.status, 403); assert.deepEqual(await denied.json(), { error: 'FORBIDDEN' });
     const chunk = await fetch(`${baseUrl}/api/v1/media/uploads/${session.sessionId}/chunks`, { method: 'PATCH', headers: { authorization: 'Bearer member-a', 'x-photox-upload-offset': '0' }, body: bytes }); assert.equal(chunk.status, 200);
     const finalize = await fetch(`${baseUrl}/api/v1/media/uploads/${session.sessionId}/finalize`, { method: 'POST', headers: { authorization: 'Bearer member-a', 'content-type': 'application/json' }, body: JSON.stringify({ sha256: crypto.createHash('sha256').update(bytes).digest('hex') }) });
     assert.equal(finalize.status, 200);
