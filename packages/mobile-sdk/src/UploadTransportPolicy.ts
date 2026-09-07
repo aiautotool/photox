@@ -41,3 +41,21 @@ export function shouldFallbackMobileUpload(
 ): boolean {
   return Boolean(plan.fallback) && !options.aborted;
 }
+
+/**
+ * Execute the selected transport policy with one authoritative fallback point.
+ * The caller owns the concrete resumable/relay transports; this function owns
+ * the rollout semantics so runtime code cannot drift from the tested policy.
+ */
+export async function executeMobileUploadPlan<T>(
+  plan: MobileUploadPlan,
+  executeAttempt: (attempt: MobileUploadAttempt) => Promise<T>,
+  options: { isAborted?: () => boolean } = {},
+): Promise<T> {
+  try {
+    return await executeAttempt(plan.primary);
+  } catch (error) {
+    if (!shouldFallbackMobileUpload(plan, { aborted: options.isAborted?.() ?? false })) throw error;
+    return await executeAttempt(plan.fallback!);
+  }
+}
