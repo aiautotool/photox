@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
+import type { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { ResumableFinalizeLedger } from './resumableFinalizeLedger.js';
 import { ResumableMediaIngestStore } from './resumableMediaIngest.js';
 import {
@@ -16,6 +17,7 @@ export type ResumableMediaReceiverRuntimeOptions<T> = {
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   commit(input: ResumableIngestCommitInput): Promise<T>;
   quota: ResumableQuotaReservationHooks;
+  coordinator?: ReturnType<typeof createMediaIngestCommitCoordinator>;
   maxChunkBytes?: number;
   maxJsonBytes?: number;
   sessionTtlMs?: number;
@@ -71,6 +73,7 @@ export function createResumableMediaReceiverRuntime<T>(options: ResumableMediaRe
   const lifecycle = createResumableMediaIngestLifecycle({
     store,
     finalizeLedger,
+    coordinator: options.coordinator,
     exists: options.exists,
     commit: options.commit,
     quota: options.quota,
