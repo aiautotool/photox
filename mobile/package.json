@@ -16,6 +16,7 @@
     "@dariyd/react-native-image-filters": "^1.0.10",
     "@photosync/core": "*",
     "@photox/image-editor": "*",
+    "@photox/mobile-sdk": "*",
     "exifr": "^7.1.3",
     "expo": "^57.0.0",
     "expo-background-task": "~57.0.14",
