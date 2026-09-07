@@ -3,10 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 export type ResumableMediaSession = {
-  version: 1;
+  version: 1 | 2;
   sessionId: string;
   workspaceId: string;
   deviceId: string;
+  actorUserId?: string;
   assetId: string;
   filename: string;
   mimeType: string;
@@ -23,6 +24,7 @@ export type ResumableMediaSession = {
 export type CreateResumableMediaSessionInput = {
   workspaceId: string;
   deviceId: string;
+  actorUserId?: string;
   assetId: string;
   filename: string;
   mimeType: string;
@@ -79,10 +81,12 @@ async function atomicWriteJson(filePath: string, value: unknown) {
 function isSession(value: unknown): value is ResumableMediaSession {
   if (!value || typeof value !== 'object') return false;
   const row = value as Record<string, unknown>;
-  return row.version === 1
+  return (row.version === 1 || row.version === 2)
     && typeof row.sessionId === 'string'
     && typeof row.workspaceId === 'string'
     && typeof row.deviceId === 'string'
+    && (row.actorUserId === undefined || typeof row.actorUserId === 'string')
+    && (row.version !== 2 || typeof row.actorUserId === 'string')
     && typeof row.assetId === 'string'
     && typeof row.filename === 'string'
     && typeof row.mimeType === 'string'
@@ -112,23 +116,14 @@ export class ResumableMediaIngestStore {
     this.maxChunkBytes = assertPositiveSafeInteger(options.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES, 'max_chunk_bytes');
   }
 
-  private metadataPath(sessionId: string) {
-    return path.join(this.rootDir, `${assertIdentity(sessionId, 'session_id')}.json`);
-  }
-
-  private partPath(sessionId: string) {
-    return path.join(this.rootDir, `${assertIdentity(sessionId, 'session_id')}.part`);
-  }
-
-  private async ensureRoot() {
-    await fs.mkdir(this.rootDir, { recursive: true, mode: 0o700 });
-  }
+  private metadataPath(sessionId: string) { return path.join(this.rootDir, `${assertIdentity(sessionId, 'session_id')}.json`); }
+  private partPath(sessionId: string) { return path.join(this.rootDir, `${assertIdentity(sessionId, 'session_id')}.part`); }
+  private async ensureRoot() { await fs.mkdir(this.rootDir, { recursive: true, mode: 0o700 }); }
 
   private async readSessionUnchecked(sessionId: string): Promise<ResumableMediaSession> {
     let parsed: unknown;
-    try {
-      parsed = JSON.parse(await fs.readFile(this.metadataPath(sessionId), 'utf8'));
-    } catch (error) {
+    try { parsed = JSON.parse(await fs.readFile(this.metadataPath(sessionId), 'utf8')); }
+    catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('UPLOAD_SESSION_NOT_FOUND');
       throw new Error('UPLOAD_SESSION_METADATA_INVALID');
     }
@@ -142,6 +137,7 @@ export class ResumableMediaIngestStore {
     await this.ensureRoot();
     const workspaceId = assertIdentity(input.workspaceId, 'workspace_id');
     const deviceId = assertIdentity(input.deviceId, 'device_id');
+    const actorUserId = assertOptionalIdentity(input.actorUserId, 'actor_user_id');
     const assetId = assertIdentity(input.assetId, 'asset_id');
     const filename = assertIdentity(input.filename, 'filename');
     const mimeType = assertIdentity(input.mimeType, 'mime_type');
@@ -151,79 +147,42 @@ export class ResumableMediaIngestStore {
     const ttlMs = assertPositiveSafeInteger(input.ttlMs ?? this.defaultTtlMs, 'ttl_ms');
     const now = this.now();
     const session: ResumableMediaSession = {
-      version: 1,
-      sessionId: safeSessionId(),
-      workspaceId,
-      deviceId,
-      assetId,
-      filename,
-      mimeType,
-      mediaType: input.mediaType,
-      createdAt: input.createdAt,
-      expectedBytes,
-      acknowledgedBytes: 0,
-      quotaReservationId,
-      createdAtIso: new Date(now).toISOString(),
-      updatedAtIso: new Date(now).toISOString(),
-      expiresAtIso: new Date(now + ttlMs).toISOString(),
+      version: actorUserId ? 2 : 1, sessionId: safeSessionId(), workspaceId, deviceId, actorUserId, assetId, filename, mimeType,
+      mediaType: input.mediaType, createdAt: input.createdAt, expectedBytes, acknowledgedBytes: 0, quotaReservationId,
+      createdAtIso: new Date(now).toISOString(), updatedAtIso: new Date(now).toISOString(), expiresAtIso: new Date(now + ttlMs).toISOString(),
     };
     await fs.writeFile(this.partPath(session.sessionId), Buffer.alloc(0), { flag: 'wx', mode: 0o600 });
-    try {
-      await atomicWriteJson(this.metadataPath(session.sessionId), session);
-    } catch (error) {
-      await fs.rm(this.partPath(session.sessionId), { force: true }).catch(() => undefined);
-      throw error;
-    }
+    try { await atomicWriteJson(this.metadataPath(session.sessionId), session); }
+    catch (error) { await fs.rm(this.partPath(session.sessionId), { force: true }).catch(() => undefined); throw error; }
     return session;
   }
 
-  async get(sessionId: string, binding?: { workspaceId: string; deviceId: string }): Promise<ResumableMediaSession> {
+  async get(sessionId: string, binding?: { workspaceId: string; deviceId: string; actorUserId?: string }): Promise<ResumableMediaSession> {
     const session = await this.readSessionUnchecked(sessionId);
-    if (binding && (session.workspaceId !== binding.workspaceId || session.deviceId !== binding.deviceId)) {
+    if (binding && (session.workspaceId !== binding.workspaceId || session.deviceId !== binding.deviceId || (session.actorUserId !== undefined && session.actorUserId !== binding.actorUserId))) {
       throw new Error('UPLOAD_SESSION_BINDING_MISMATCH');
     }
     if (Date.parse(session.expiresAtIso) <= this.now()) throw new Error('UPLOAD_SESSION_EXPIRED');
     return session;
   }
 
-  async appendChunk(input: {
-    sessionId: string;
-    workspaceId: string;
-    deviceId: string;
-    offset: number;
-    chunk: Uint8Array;
-  }): Promise<ResumableMediaSession> {
-    const session = await this.get(input.sessionId, { workspaceId: input.workspaceId, deviceId: input.deviceId });
+  async appendChunk(input: { sessionId: string; workspaceId: string; deviceId: string; actorUserId?: string; offset: number; chunk: Uint8Array }): Promise<ResumableMediaSession> {
+    const session = await this.get(input.sessionId, { workspaceId: input.workspaceId, deviceId: input.deviceId, actorUserId: input.actorUserId });
     if (!Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('INVALID_UPLOAD_OFFSET');
     if (input.offset !== session.acknowledgedBytes) throw new Error(`UPLOAD_OFFSET_MISMATCH:${session.acknowledgedBytes}`);
     if (!(input.chunk instanceof Uint8Array) || input.chunk.byteLength <= 0) throw new Error('UPLOAD_CHUNK_REQUIRED');
     if (input.chunk.byteLength > this.maxChunkBytes) throw new Error('UPLOAD_CHUNK_TOO_LARGE');
     if (session.acknowledgedBytes + input.chunk.byteLength > session.expectedBytes) throw new Error('UPLOAD_EXCEEDS_EXPECTED_BYTES');
-
     const handle = await fs.open(this.partPath(session.sessionId), 'r+');
-    try {
-      const result = await handle.write(input.chunk, 0, input.chunk.byteLength, input.offset);
-      if (result.bytesWritten !== input.chunk.byteLength) throw new Error('UPLOAD_CHUNK_SHORT_WRITE');
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-
-    const updated: ResumableMediaSession = {
-      ...session,
-      acknowledgedBytes: session.acknowledgedBytes + input.chunk.byteLength,
-      updatedAtIso: new Date(this.now()).toISOString(),
-    };
-    try {
-      await atomicWriteJson(this.metadataPath(session.sessionId), updated);
-    } catch (error) {
-      await fs.truncate(this.partPath(session.sessionId), session.acknowledgedBytes).catch(() => undefined);
-      throw error;
-    }
+    try { const result = await handle.write(input.chunk, 0, input.chunk.byteLength, input.offset); if (result.bytesWritten !== input.chunk.byteLength) throw new Error('UPLOAD_CHUNK_SHORT_WRITE'); await handle.sync(); }
+    finally { await handle.close(); }
+    const updated: ResumableMediaSession = { ...session, acknowledgedBytes: session.acknowledgedBytes + input.chunk.byteLength, updatedAtIso: new Date(this.now()).toISOString() };
+    try { await atomicWriteJson(this.metadataPath(session.sessionId), updated); }
+    catch (error) { await fs.truncate(this.partPath(session.sessionId), session.acknowledgedBytes).catch(() => undefined); throw error; }
     return updated;
   }
 
-  async requireComplete(sessionId: string, binding: { workspaceId: string; deviceId: string }): Promise<{ session: ResumableMediaSession; partPath: string }> {
+  async requireComplete(sessionId: string, binding: { workspaceId: string; deviceId: string; actorUserId?: string }): Promise<{ session: ResumableMediaSession; partPath: string }> {
     const session = await this.get(sessionId, binding);
     if (session.acknowledgedBytes !== session.expectedBytes) throw new Error(`UPLOAD_INCOMPLETE:${session.acknowledgedBytes}`);
     return { session, partPath: this.partPath(session.sessionId) };
@@ -231,30 +190,22 @@ export class ResumableMediaIngestStore {
 
   async remove(sessionId: string): Promise<void> {
     const id = assertIdentity(sessionId, 'session_id');
-    await Promise.all([
-      fs.rm(this.metadataPath(id), { force: true }),
-      fs.rm(this.partPath(id), { force: true }),
-    ]);
+    await Promise.all([fs.rm(this.metadataPath(id), { force: true }), fs.rm(this.partPath(id), { force: true })]);
   }
 
   async cleanupExpired(beforeRemove?: (session: ResumableMediaSession) => Promise<void>): Promise<number> {
     await this.ensureRoot();
-    const names = await fs.readdir(this.rootDir);
-    let removed = 0;
+    const names = await fs.readdir(this.rootDir); let removed = 0;
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
-      const sessionId = name.slice(0, -5);
-      let session: ResumableMediaSession | undefined;
-      try {
-        session = await this.readSessionUnchecked(sessionId);
-        if (Date.parse(session.expiresAtIso) > this.now()) continue;
-      } catch (error) {
+      const sessionId = name.slice(0, -5); let session: ResumableMediaSession | undefined;
+      try { session = await this.readSessionUnchecked(sessionId); if (Date.parse(session.expiresAtIso) > this.now()) continue; }
+      catch (error) {
         if (error instanceof Error && error.message === 'UPLOAD_SESSION_OFFSET_CORRUPT') continue;
         if (error instanceof Error && error.message === 'UPLOAD_SESSION_METADATA_INVALID') continue;
       }
       if (session && beforeRemove) await beforeRemove(session);
-      await this.remove(sessionId);
-      removed += 1;
+      await this.remove(sessionId); removed += 1;
     }
     return removed;
   }
