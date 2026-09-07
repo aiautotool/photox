@@ -17,10 +17,11 @@ function sha256(bytes: Uint8Array) {
 
 function session(bytes: number, overrides: Partial<ResumableMediaSession> = {}): ResumableMediaSession {
   return {
-    version: 1,
+    version: 2,
     sessionId: 'upload_test',
     workspaceId: 'workspace-a',
     deviceId: 'device-a',
+    actorUserId: 'user-a',
     assetId: 'asset-a',
     filename: 'IMG:unsafe?.jpg',
     mimeType: 'image/jpeg',
@@ -69,6 +70,7 @@ test('copies verified bytes into the library while preserving the authoritative 
   assert.equal(await fs.readFile(partPath, 'utf8'), bytes.toString('utf8'));
   assert.equal(await fs.readFile(result.target, 'utf8'), bytes.toString('utf8'));
   assert.equal(result.row, ingested);
+  assert.equal(result.actorUserId, 'user-a');
   assert.equal(result.row.filename, 'IMG_unsafe_.jpg');
   assert.equal(result.row.path, result.target);
   assert.equal(result.row.size, bytes.length);
