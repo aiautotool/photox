@@ -22,8 +22,8 @@ export type ResumableUploadSessionStore = {
 
 export type ResumableUploadSource = {
   size: number;
-  readChunk(offset: number, length: number): Promise<Uint8Array>;
-  sha256(): Promise<string>;
+  readChunk(offset: number, length: number, signal?: AbortSignal): Promise<Uint8Array>;
+  sha256(signal?: AbortSignal): Promise<string>;
 };
 
 export type ResumableUploadProgress = {
@@ -58,6 +58,14 @@ const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
 
 function normalizeBaseUrl(value: string) {
   return value.replace(/\/$/, '');
+}
+
+function assertNotAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('RESUMABLE_UPLOAD_ABORTED');
+  error.name = 'AbortError';
+  throw error;
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
@@ -98,50 +106,63 @@ export class ResumableUploadClient {
     return { ...(await this.options.getHeaders()), ...extra };
   }
 
-  private async request(url: string, initFactory: () => Promise<RequestInit>) {
-    let response = await this.fetchImpl(url, await initFactory());
+  private async request(url: string, initFactory: () => Promise<RequestInit>, signal?: AbortSignal) {
+    const send = async () => {
+      assertNotAborted(signal);
+      const init = await initFactory();
+      assertNotAborted(signal);
+      return this.fetchImpl(url, signal ? { ...init, signal } : init);
+    };
+
+    let response = await send();
     if (response.status === 401 && this.options.onUnauthorized) {
+      assertNotAborted(signal);
       await this.options.onUnauthorized();
-      response = await this.fetchImpl(url, await initFactory());
+      response = await send();
     }
     return response;
   }
 
-  private async createSession(asset: ResumableUploadAsset) {
+  private async createSession(asset: ResumableUploadAsset, signal?: AbortSignal) {
     const response = await this.request(this.endpoint(), async () => ({
       method: 'POST',
       headers: await this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(asset),
-    }));
+    }), signal);
     const session = validateSession(await parseResponse<ResumableUploadSession>(response), asset.expectedBytes);
+    assertNotAborted(signal);
     await this.options.sessionStore.save(asset.assetId, session);
     return session;
   }
 
-  private async refreshSession(asset: ResumableUploadAsset, session: ResumableUploadSession) {
+  private async refreshSession(asset: ResumableUploadAsset, session: ResumableUploadSession, signal?: AbortSignal) {
     const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}`), async () => ({
       method: 'GET',
       headers: await this.headers(),
-    }));
+    }), signal);
     if (response.status === 404 || response.status === 410) {
+      assertNotAborted(signal);
       await this.options.sessionStore.remove(asset.assetId);
-      return this.createSession(asset);
+      return this.createSession(asset, signal);
     }
     const current = validateSession(await parseResponse<ResumableUploadSession>(response), asset.expectedBytes);
+    assertNotAborted(signal);
     await this.options.sessionStore.save(asset.assetId, current);
     return current;
   }
 
-  private async loadOrCreateSession(asset: ResumableUploadAsset) {
+  private async loadOrCreateSession(asset: ResumableUploadAsset, signal?: AbortSignal) {
+    assertNotAborted(signal);
     const stored = await this.options.sessionStore.load(asset.assetId);
+    assertNotAborted(signal);
     if (!stored || stored.expectedBytes !== asset.expectedBytes) {
       if (stored) await this.options.sessionStore.remove(asset.assetId);
-      return this.createSession(asset);
+      return this.createSession(asset, signal);
     }
-    return this.refreshSession(asset, stored);
+    return this.refreshSession(asset, stored, signal);
   }
 
-  private async appendChunk(asset: ResumableUploadAsset, session: ResumableUploadSession, chunk: Uint8Array) {
+  private async appendChunk(asset: ResumableUploadAsset, session: ResumableUploadSession, chunk: Uint8Array, signal?: AbortSignal) {
     const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}/chunks`), async () => ({
       method: 'PATCH',
       headers: await this.headers({
@@ -149,45 +170,61 @@ export class ResumableUploadClient {
         'x-photox-upload-offset': String(session.acknowledgedBytes),
       }),
       body: new Uint8Array(chunk).buffer,
-    }));
+    }), signal);
     if (response.status === 409) {
       const body = await response.json().catch(() => ({})) as ErrorBody;
       if (body.error === 'UPLOAD_OFFSET_MISMATCH' && Number.isSafeInteger(body.acknowledgedBytes)) {
         const reconciled = validateSession({ ...session, acknowledgedBytes: Number(body.acknowledgedBytes) }, asset.expectedBytes);
+        assertNotAborted(signal);
         await this.options.sessionStore.save(asset.assetId, reconciled);
         return reconciled;
       }
       throw new ResumableUploadHttpError(response.status, body.error || 'RESUMABLE_UPLOAD_FAILED', body);
     }
     if (response.status === 404 || response.status === 410) {
+      assertNotAborted(signal);
       await this.options.sessionStore.remove(asset.assetId);
-      return this.createSession(asset);
+      return this.createSession(asset, signal);
     }
     const updated = validateSession(await parseResponse<ResumableUploadSession>(response), asset.expectedBytes);
+    assertNotAborted(signal);
     await this.options.sessionStore.save(asset.assetId, updated);
     return updated;
   }
 
-  async upload(asset: ResumableUploadAsset, source: ResumableUploadSource, onProgress?: (progress: ResumableUploadProgress) => void) {
+  async upload(
+    asset: ResumableUploadAsset,
+    source: ResumableUploadSource,
+    onProgress?: (progress: ResumableUploadProgress) => void,
+    signal?: AbortSignal,
+  ) {
     if (source.size !== asset.expectedBytes) throw new Error('UPLOAD_SOURCE_SIZE_MISMATCH');
-    let session = await this.loadOrCreateSession(asset);
+    assertNotAborted(signal);
+    let session = await this.loadOrCreateSession(asset, signal);
+    assertNotAborted(signal);
     onProgress?.({ sessionId: session.sessionId, uploadedBytes: session.acknowledgedBytes, totalBytes: asset.expectedBytes });
 
     while (session.acknowledgedBytes < asset.expectedBytes) {
+      assertNotAborted(signal);
       const length = Math.min(this.chunkBytes, asset.expectedBytes - session.acknowledgedBytes);
-      const chunk = await source.readChunk(session.acknowledgedBytes, length);
+      const chunk = await source.readChunk(session.acknowledgedBytes, length, signal);
+      assertNotAborted(signal);
       if (chunk.byteLength !== length) throw new Error('UPLOAD_SOURCE_CHUNK_SIZE_MISMATCH');
-      session = await this.appendChunk(asset, session, chunk);
+      session = await this.appendChunk(asset, session, chunk, signal);
+      assertNotAborted(signal);
       onProgress?.({ sessionId: session.sessionId, uploadedBytes: session.acknowledgedBytes, totalBytes: asset.expectedBytes });
     }
 
-    const sha256 = await source.sha256();
+    assertNotAborted(signal);
+    const sha256 = await source.sha256(signal);
+    assertNotAborted(signal);
     const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}/finalize`), async () => ({
       method: 'POST',
       headers: await this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ sha256 }),
-    }));
+    }), signal);
     const result = await parseResponse<unknown>(response);
+    assertNotAborted(signal);
     await this.options.sessionStore.remove(asset.assetId);
     return result;
   }
