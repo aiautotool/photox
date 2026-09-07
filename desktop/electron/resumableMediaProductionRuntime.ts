@@ -13,7 +13,7 @@ export type ResumableMediaProductionRuntimeOptions = {
   libraryRoot: string;
   incomingRoot: string;
   journalDir: string;
-  authorizeRequest(req: IncomingMessage, required: ['media:write']): Promise<{ workspaceId?: string; deviceId?: string }>;
+  authorizeRequest(req: IncomingMessage, required: ['media:write']): Promise<{ subject?: string; workspaceId?: string; deviceId?: string }>;
   workspaces: WorkspaceQuotaRepository;
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   ingest(row: ResumableCommittedMediaRow): Promise<void>;
@@ -75,6 +75,7 @@ export function createResumableMediaProductionRuntime(
     authorize: async req => {
       const principal = await options.authorizeRequest(req, ['media:write']);
       return {
+        actorUserId: requiredPrincipal(principal.subject, 'USER_SCOPE_REQUIRED'),
         workspaceId: requiredPrincipal(principal.workspaceId, 'WORKSPACE_SCOPE_REQUIRED'),
         deviceId: requiredPrincipal(principal.deviceId, 'DEVICE_SCOPE_REQUIRED'),
       };
