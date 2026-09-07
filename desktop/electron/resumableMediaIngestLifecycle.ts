@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
+import { ResumableFinalizeLedger } from './resumableFinalizeLedger.js';
 import { ResumableMediaIngestStore, type CreateResumableMediaSessionInput, type ResumableMediaSession } from './resumableMediaIngest.js';
 
 export type ResumableIngestPrincipal = {
@@ -28,6 +29,7 @@ export type ResumableQuotaReservationHooks = {
 
 export type ResumableIngestLifecycleDependencies<T> = {
   store: ResumableMediaIngestStore;
+  finalizeLedger?: ResumableFinalizeLedger;
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   commit(input: ResumableIngestCommitInput): Promise<T>;
   quota?: ResumableQuotaReservationHooks;
@@ -105,6 +107,23 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
     if (authoritativeSha256 !== expectedSha256) throw new Error('UPLOAD_SHA256_MISMATCH');
 
     const key = `${complete.session.deviceId}:${complete.session.assetId}`;
+    const reservationId = quotaReservationId(complete.session);
+    const priorCommit = await deps.finalizeLedger?.get(sessionId, actor);
+    if (priorCommit) {
+      if (priorCommit.key !== key
+        || priorCommit.sha256 !== authoritativeSha256
+        || priorCommit.expectedBytes !== complete.session.expectedBytes
+        || priorCommit.reservationId !== reservationId) {
+        throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
+      }
+      if (reservationId && deps.quota) {
+        await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
+      }
+      await deps.finalizeLedger?.remove(sessionId);
+      await deps.store.remove(sessionId);
+      return { state: 'COMMITTED' as const, key, sha256: authoritativeSha256, recovered: true as const };
+    }
+
     const outcome = await coordinator.run({ workspaceId: complete.session.workspaceId, key }, {
       exists: () => deps.exists({ workspaceId: complete.session.workspaceId, key }),
       commit: () => deps.commit({
@@ -116,7 +135,18 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
       }),
     });
 
-    const reservationId = quotaReservationId(complete.session);
+    if (outcome.status === 'committed' && deps.finalizeLedger) {
+      await deps.finalizeLedger.markCommitted({
+        sessionId,
+        workspaceId: complete.session.workspaceId,
+        deviceId: complete.session.deviceId,
+        reservationId,
+        expectedBytes: complete.session.expectedBytes,
+        key,
+        sha256: authoritativeSha256,
+      });
+    }
+
     if (reservationId && deps.quota) {
       if (outcome.status === 'duplicate') {
         await deps.quota.release({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, reason: 'duplicate' });
@@ -124,6 +154,7 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
         await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
       }
     }
+    await deps.finalizeLedger?.remove(sessionId);
     await deps.store.remove(sessionId);
     return outcome.status === 'duplicate'
       ? { state: 'ALREADY_RECEIVED' as const, key, sha256: authoritativeSha256 }
@@ -133,9 +164,25 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
   async function cleanupExpired() {
     return deps.store.cleanupExpired(async session => {
       const reservationId = quotaReservationId(session);
-      if (!reservationId || !deps.quota) return;
+      if (!reservationId || !deps.quota) {
+        await deps.finalizeLedger?.remove(session.sessionId);
+        return;
+      }
+      const actor = { workspaceId: session.workspaceId, deviceId: session.deviceId };
+      const priorCommit = await deps.finalizeLedger?.get(session.sessionId, actor);
+      if (priorCommit) {
+        const key = `${session.deviceId}:${session.assetId}`;
+        if (priorCommit.key !== key
+          || priorCommit.expectedBytes !== session.expectedBytes
+          || priorCommit.reservationId !== reservationId) {
+          throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
+        }
+        await deps.quota.commit({ principal: actor, reservationId, expectedBytes: session.expectedBytes, key });
+        await deps.finalizeLedger?.remove(session.sessionId);
+        return;
+      }
       await deps.quota.release({
-        principal: { workspaceId: session.workspaceId, deviceId: session.deviceId },
+        principal: actor,
         reservationId,
         expectedBytes: session.expectedBytes,
         reason: 'expired',
