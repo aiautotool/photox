@@ -37,10 +37,10 @@ function newDeviceId() {
 }
 
 function authBaseCandidates(target: PairedDesktop): AuthCandidate[] {
-  const direct = [target.receiverUrl, target.publicUrl]
+  const direct: AuthCandidate[] = [target.receiverUrl, target.publicUrl]
     .filter((value): value is string => Boolean(value))
     .map(base => ({ base: base.replace(/\/$/, '') }));
-  const relay = target.relayUrl && target.desktopId && target.pairToken ? [{
+  const relay: AuthCandidate[] = target.relayUrl && target.desktopId && target.pairToken ? [{
     base: target.relayUrl.replace(/\/$/, ''),
     headers: {
       'x-photosync-relay-desktop-id': target.desktopId,
