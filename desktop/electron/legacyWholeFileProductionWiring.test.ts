@@ -2,10 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const sourcePath = path.join(here, 'main.ts');
+const sourcePath = path.join(process.cwd(), 'electron', 'main.ts');
 
 test('production whole-file receiver consumes the shared pre-ingest gate', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
