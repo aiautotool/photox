@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket, type WebSocket as WebSocketType } from 'ws';
+import { ResumableRelayBroker } from './resumableBroker.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const UPLOAD_TTL_MS = 30 * 60_000;
@@ -37,6 +38,13 @@ type Pending = {
 
 const hosts = new Map<string, Host>();
 const pending = new Map<string, Pending>();
+const resumableBroker = new ResumableRelayBroker({
+  getHostSocket: desktopId => hosts.get(desktopId)?.socket,
+  openReadyState: WebSocket.OPEN,
+  maxRequestBytes: Number(process.env.PHOTOSYNC_RELAY_RESUMABLE_REQUEST_BYTES || 5 * 1024 ** 2),
+  maxResponseBytes: Number(process.env.PHOTOSYNC_RELAY_RESUMABLE_RESPONSE_BYTES || 1024 ** 2),
+  timeoutMs: Number(process.env.PHOTOSYNC_RELAY_RESUMABLE_TIMEOUT_MS || 30_000),
+});
 let pushSubscriptions: PushSubscription[] = await fsp.readFile(pushFile, 'utf8').then(x => JSON.parse(x) as PushSubscription[]).catch(() => []);
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
@@ -110,14 +118,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'access-control-allow-origin': '*',
-        'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+        'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
         'access-control-allow-headers': '*',
       });
       return res.end();
     }
     if (req.method === 'GET' && url.pathname === '/health') {
-      return json(res, 200, { ok: true, onlineDesktops: hosts.size, pendingUploads: pending.size, pushSubscriptions: pushSubscriptions.length });
+      return json(res, 200, { ok: true, onlineDesktops: hosts.size, pendingUploads: pending.size, pendingResumableRequests: resumableBroker.pendingCount, pushSubscriptions: pushSubscriptions.length });
     }
+    if (await resumableBroker.handleHttp(req, res, url)) return;
     if (req.method === 'GET' && url.pathname.startsWith('/api/v1/desktop/') && url.pathname.endsWith('/status')) {
       const desktopId = decodeURIComponent(url.pathname.split('/')[4] || '');
       return json(res, 200, { online: hosts.has(desktopId) });
@@ -247,9 +256,11 @@ server.on('upgrade', (req, socket, head) => {
       hosts.set(desktopId, { socket: ws, hostSecret, connectedAt: Date.now() });
       ws.send(JSON.stringify({ type: 'tunnel.ready', desktopId }));
       void notifyDesktopOnline(desktopId);
+      ws.on('message', raw => { resumableBroker.handleDesktopMessage(desktopId, raw); });
       ws.on('close', () => {
         const current = hosts.get(desktopId);
         if (current?.socket === ws) hosts.delete(desktopId);
+        resumableBroker.handleDesktopDisconnect(desktopId);
       });
     });
   } catch {
