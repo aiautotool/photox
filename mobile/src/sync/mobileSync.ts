@@ -325,10 +325,18 @@ export async function syncAssetsToLaptop(
       };
       reportBytes(0);
 
-      const uploadResumable = async (transport: 'local'|'public') => {
-        const baseUrl = transport === 'local' ? target.receiverUrl : publicEndpoint(target, '');
-        if (!baseUrl) throw new Error(`${transport === 'local' ? 'LAN' : 'Public'} resumable endpoint unavailable`);
-        const client = createMobileResumableClient(target, baseUrl);
+      const uploadResumable = async (transport: 'local'|'public'|'relay') => {
+        const baseUrl = transport === 'local'
+          ? target.receiverUrl
+          : transport === 'public'
+            ? publicEndpoint(target, '')
+            : target.relayUrl;
+        if (!baseUrl) throw new Error(`${transport === 'local' ? 'LAN' : transport === 'public' ? 'Public' : 'Relay'} resumable endpoint unavailable`);
+        const relayHeaders = transport === 'relay' ? {
+          'x-photosync-relay-desktop-id': target.desktopId,
+          'x-photosync-pair-token': target.pairToken,
+        } : {};
+        const client = createMobileResumableClient(target, baseUrl, relayHeaders);
         const source = createExpoUploadSource(local!.uri, local!.size);
         return await client.upload({
           assetId: asset.id,
@@ -340,57 +348,13 @@ export async function syncAssetsToLaptop(
         }, source, ({ uploadedBytes, totalBytes }) => reportBytes(uploadedBytes, totalBytes), signal) as { status?: string };
       };
 
-      const uploadRelay = async () => {
-        reportBytes(0);
-        const task = FileSystem.createUploadTask(
-          relayEndpoint(target, `/api/v1/upload/${encodeURIComponent(target.desktopId)}`),
-          local!.uri,
-          {
-            httpMethod: 'POST',
-            uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-            sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
-            headers: {
-              'content-type': mimeFor(asset),
-              'x-photosync-pair-token': target.pairToken,
-              ...workspaceAuthHeaders(target),
-              'x-photosync-device-id': target.deviceId,
-              'x-photosync-asset-id': asset.id,
-              'x-photosync-filename': encodeURIComponent(asset.filename),
-              'x-photosync-created-at': String(asset.creationTime),
-              'x-photosync-media-type': mediaType,
-              'x-photosync-size': String(local!.size),
-            },
-          },
-          ({ totalBytesSent, totalBytesExpectedToSend }) => {
-            reportBytes(totalBytesSent, totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : local!.size);
-          },
-        );
-        const cancel = () => { void task.cancelAsync().catch(() => undefined); };
-        signal?.addEventListener('abort', cancel, { once: true });
-        try {
-          const result = await task.uploadAsync();
-          if (!result) throw new Error('Tác vụ tải lên đã bị hủy');
-          return result;
-        } finally {
-          signal?.removeEventListener('abort', cancel);
-        }
-      };
-
       const executeAttempt = async (attempt: MobileUploadAttempt): Promise<'COMMITTED'|'ALREADY_RECEIVED'> => {
-        if (attempt.resumable) {
-          if (attempt.transport === 'relay') throw new Error('Relay resumable chưa được hỗ trợ');
-          const result = await uploadResumable(attempt.transport);
-          if (result.status === 'ALREADY_RECEIVED') return 'ALREADY_RECEIVED';
-          if (result.status === 'COMMITTED') return 'COMMITTED';
-          const label = attempt.transport === 'local' ? 'LAN' : 'Public';
-          throw new Error(`${label} resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
-        }
-        if (attempt.transport !== 'relay') throw new Error(`Whole-file transport không hợp lệ: ${attempt.transport}`);
-        const result = await uploadRelay();
-        if (result.status === 208) return 'ALREADY_RECEIVED';
-        if (result.status >= 200 && result.status < 300) return 'COMMITTED';
-        if (result.status === 503) throw new Error('Laptop đang offline');
-        throw new Error(`Tunnel ${result.status}: ${result.body}`);
+        if (!attempt.resumable) throw new Error(`Whole-file transport is no longer selected by policy: ${attempt.transport}`);
+        const result = await uploadResumable(attempt.transport);
+        if (result.status === 'ALREADY_RECEIVED') return 'ALREADY_RECEIVED';
+        if (result.status === 'COMMITTED') return 'COMMITTED';
+        const label = attempt.transport === 'local' ? 'LAN' : attempt.transport === 'public' ? 'Public' : 'Relay';
+        throw new Error(`${label} resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
       };
 
       const result = await executeMobileUploadPlan(uploadPlan, executeAttempt, {
