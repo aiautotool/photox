@@ -59,6 +59,23 @@ test('persists server-authoritative acknowledged offset across store restart', a
   });
 });
 
+test('persists authenticated actor binding across store restart', async () => {
+  await withTempStore(async ({ root, store, now }) => {
+    const created = await store.create({ ...input, actorUserId: 'member-a' });
+    assert.equal(created.version, 2);
+    assert.equal(created.actorUserId, 'member-a');
+
+    now.value += 500;
+    const restarted = new ResumableMediaIngestStore({ rootDir: root, now: () => now.value, defaultTtlMs: 60_000, maxChunkBytes: 4 });
+    const status = await restarted.get(created.sessionId, { workspaceId: input.workspaceId, deviceId: input.deviceId, actorUserId: 'member-a' });
+    assert.equal(status.actorUserId, 'member-a');
+    await assert.rejects(
+      restarted.get(created.sessionId, { workspaceId: input.workspaceId, deviceId: input.deviceId, actorUserId: 'member-b' }),
+      /UPLOAD_SESSION_BINDING_MISMATCH/,
+    );
+  });
+});
+
 test('rejects stale, skipped, oversized and overrun chunks without moving acknowledged offset', async () => {
   await withTempStore(async ({ store }) => {
     const created = await store.create({ ...input, expectedBytes: 5 });
