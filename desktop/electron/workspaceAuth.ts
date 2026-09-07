@@ -40,6 +40,16 @@ function billingReconciliationIntervalMs() {
   return Math.max(60_000, Math.min(24 * 60 * 60_000, Math.floor(raw)));
 }
 
+export function assertBearerRequestBinding(
+  req: Pick<IncomingMessage, 'headers'>,
+  principal: { workspaceId?: string; deviceId?: string },
+) {
+  const requestedWorkspace = String(req.headers['x-photosync-workspace-id'] || '').trim();
+  if (requestedWorkspace && requestedWorkspace !== principal.workspaceId) throw new Error('WORKSPACE_SCOPE_MISMATCH');
+  const requestedDevice = String(req.headers['x-photosync-device-id'] || '').trim();
+  if (requestedDevice && requestedDevice !== principal.deviceId) throw new Error('DEVICE_SCOPE_MISMATCH');
+}
+
 let activeDesktopWorkspaceAuth:DesktopWorkspaceAuth|null=null;
 let workspaceAuthIpcRegistered=false;
 export function requireActiveDesktopWorkspaceAuth(){if(!activeDesktopWorkspaceAuth)throw new Error('WORKSPACE_AUTH_NOT_READY');return activeDesktopWorkspaceAuth;}
@@ -278,7 +288,9 @@ export class DesktopWorkspaceAuth {
   async authorizeRequest(req: IncomingMessage, required: MediaApiScope[]) {
     const token=bearerToken(typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined);
     if(!token)throw new Error('AUTH_REQUIRED');
-    return this.validatePrincipal(token,required);
+    const principal=await this.validatePrincipal(token,required);
+    assertBearerRequestBinding(req,principal);
+    return principal;
   }
 }
 
