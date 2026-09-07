@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import path from 'node:path';
+import { ResumableFinalizeLedger } from './resumableFinalizeLedger.js';
 import { ResumableMediaIngestStore } from './resumableMediaIngest.js';
 import {
   createResumableMediaIngestLifecycle,
@@ -42,7 +44,8 @@ function positiveSafeInteger(value: number | undefined, fallback: number, code: 
  *
  * The caller owns application-specific authorization and final media commit logic.
  * This runtime owns durable upload-session state, authoritative byte offsets,
- * quota-reservation lifecycle, HTTP routing and periodic expired-session cleanup.
+ * durable media-finalize ownership, quota-reservation lifecycle, HTTP routing and
+ * periodic expired-session cleanup.
  */
 export function createResumableMediaReceiverRuntime<T>(options: ResumableMediaReceiverRuntimeOptions<T>): ResumableMediaReceiverRuntime {
   const cleanupIntervalMs = positiveSafeInteger(
@@ -61,8 +64,13 @@ export function createResumableMediaReceiverRuntime<T>(options: ResumableMediaRe
     maxChunkBytes,
     now: options.now,
   });
+  const finalizeLedger = new ResumableFinalizeLedger({
+    rootDir: path.join(options.rootDir, 'finalize-ledger'),
+    now: options.now,
+  });
   const lifecycle = createResumableMediaIngestLifecycle({
     store,
+    finalizeLedger,
     exists: options.exists,
     commit: options.commit,
     quota: options.quota,
