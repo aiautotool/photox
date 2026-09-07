@@ -11,6 +11,14 @@ function safeKeyPart(value: string | undefined) {
   return (value || 'none').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160);
 }
 
+function assertNotAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('RESUMABLE_UPLOAD_ABORTED');
+  error.name = 'AbortError';
+  throw error;
+}
+
 class ExpoSecureSessionStore implements ResumableUploadSessionStore {
   constructor(private readonly target: PairedDesktop) {}
 
@@ -121,25 +129,31 @@ export function createExpoUploadSource(uri: string, size: number): ResumableUplo
   const file = new ExpoFile(uri);
   return {
     size,
-    async readChunk(offset: number, length: number) {
+    async readChunk(offset: number, length: number, signal?: AbortSignal) {
+      assertNotAborted(signal);
       const handle = file.open(FileMode.ReadOnly);
       try {
         handle.offset = offset;
-        return handle.readBytes(length);
+        const chunk = handle.readBytes(length);
+        assertNotAborted(signal);
+        return chunk;
       } finally { handle.close(); }
     },
-    async sha256() {
+    async sha256(signal?: AbortSignal) {
+      assertNotAborted(signal);
       const hash = new Sha256();
       const handle = file.open(FileMode.ReadOnly);
       try {
         let remaining = size;
         while (remaining > 0) {
+          assertNotAborted(signal);
           const chunk = handle.readBytes(Math.min(HASH_CHUNK_BYTES, remaining));
           if (!chunk.byteLength) throw new Error('UPLOAD_SOURCE_HASH_READ_FAILED');
           hash.update(chunk);
           remaining -= chunk.byteLength;
         }
       } finally { handle.close(); }
+      assertNotAborted(signal);
       return hash.digestHex();
     },
   };
