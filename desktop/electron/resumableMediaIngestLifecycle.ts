@@ -30,6 +30,7 @@ export type ResumableQuotaReservationHooks = {
 export type ResumableIngestLifecycleDependencies<T> = {
   store: ResumableMediaIngestStore;
   finalizeLedger?: ResumableFinalizeLedger;
+  coordinator?: ReturnType<typeof createMediaIngestCommitCoordinator>;
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   commit(input: ResumableIngestCommitInput): Promise<T>;
   quota?: ResumableQuotaReservationHooks;
@@ -69,7 +70,10 @@ function quotaReservationId(session: ResumableMediaSession) {
 }
 
 export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLifecycleDependencies<T>) {
-  const coordinator = createMediaIngestCommitCoordinator();
+  // Production may inject the same coordinator used by the legacy whole-file
+  // receiver so both ingest protocols serialize on the identical workspace/key
+  // boundary during the mobile migration period.
+  const coordinator = deps.coordinator ?? createMediaIngestCommitCoordinator();
 
   async function create(principal: ResumableIngestPrincipal, input: Omit<CreateResumableMediaSessionInput, 'workspaceId' | 'deviceId' | 'quotaReservationId'>) {
     const actor = binding(principal);
