@@ -50,7 +50,14 @@ function isAllowedRoute(method: string | undefined, pathname: string) {
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+$/.test(pathname)) return method === 'GET';
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+\/chunks$/.test(pathname)) return method === 'PATCH';
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+\/finalize$/.test(pathname)) return method === 'POST';
+  if (pathname === '/api/v1/auth/pair') return method === 'POST';
+  if (pathname === '/api/v1/auth/refresh') return method === 'POST';
+  if (pathname === '/api/v1/auth/revoke') return method === 'POST';
   return false;
+}
+
+function ownsTunnelNamespace(pathname: string) {
+  return pathname.startsWith('/api/v1/media/uploads') || pathname.startsWith('/api/v1/auth/');
 }
 
 async function readBoundedBody(req: http.IncomingMessage, maxBytes: number) {
@@ -91,7 +98,7 @@ export class ResumableRelayBroker {
   get pendingCount() { return this.pending.size; }
 
   async handleHttp(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<boolean> {
-    if (!url.pathname.startsWith('/api/v1/media/uploads')) return false;
+    if (!ownsTunnelNamespace(url.pathname)) return false;
     if (!isAllowedRoute(req.method, url.pathname)) {
       json(res, 404, { error: 'RESUMABLE_RELAY_ROUTE_NOT_FOUND' });
       return true;
