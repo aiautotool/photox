@@ -129,6 +129,20 @@ test('resumable HTTP transport exposes status and finalize without filesystem me
   });
 });
 
+test('resumable HTTP transport owns its namespace and rejects unsupported routes before legacy dispatch', async () => {
+  const fx = fixture();
+  await withServer(fx.handler, async baseUrl => {
+    const wrongMethod = await fetch(`${baseUrl}/api/v1/media/uploads/upload-1`, { method: 'DELETE', headers: auth });
+    assert.equal(wrongMethod.status, 404);
+    assert.deepEqual(await wrongMethod.json(), { error: 'RESUMABLE_UPLOAD_ROUTE_NOT_FOUND' });
+
+    const unknownChild = await fetch(`${baseUrl}/api/v1/media/uploads/upload-1/legacy-looking-child`, { headers: auth });
+    assert.equal(unknownChild.status, 404);
+    assert.deepEqual(await unknownChild.json(), { error: 'RESUMABLE_UPLOAD_ROUTE_NOT_FOUND' });
+    assert.equal(fx.calls.length, 0);
+  });
+});
+
 test('resumable HTTP transport leaves unrelated receiver routes untouched', async () => {
   const fx = fixture();
   await withServer(fx.handler, async baseUrl => {
