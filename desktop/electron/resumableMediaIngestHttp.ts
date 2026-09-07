@@ -87,7 +87,7 @@ function errorResponse(error: unknown) {
   if (message === 'REQUEST_BODY_TOO_LARGE' || message === 'UPLOAD_CHUNK_TOO_LARGE') return { status: 413, body: { error: message } };
   if (message === 'UPLOAD_SESSION_NOT_FOUND') return { status: 404, body: { error: message } };
   if (message === 'UPLOAD_SESSION_EXPIRED') return { status: 410, body: { error: message } };
-  if (message === 'UPLOAD_SESSION_BINDING_MISMATCH') return { status: 403, body: { error: message } };
+  if (message === 'UPLOAD_SESSION_BINDING_MISMATCH' || message === 'UPLOAD_FINALIZE_BINDING_MISMATCH') return { status: 403, body: { error: 'FORBIDDEN' } };
   if (message.startsWith('UPLOAD_OFFSET_MISMATCH:')) {
     const acknowledgedBytes = Number(message.split(':')[1]);
     return { status: 409, body: { error: 'UPLOAD_OFFSET_MISMATCH', acknowledgedBytes: Number.isSafeInteger(acknowledgedBytes) ? acknowledgedBytes : undefined } };
