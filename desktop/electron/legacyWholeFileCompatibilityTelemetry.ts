@@ -25,19 +25,85 @@ export type LegacyWholeFileDeprecationReadiness = {
   blockers: string[];
 };
 
+export type LegacyWholeFileCompatibilityPersistedState = {
+  version: 1;
+  observedSince: number;
+  total: number;
+  byAuthMode: Record<LegacyWholeFileAuthMode, number>;
+  byOutcome: Record<LegacyWholeFileOutcome, number>;
+  lastObservedAt?: number;
+};
+
 export type LegacyWholeFileCompatibilityTelemetryOptions = {
   now?: () => number;
   minimumObservationMs?: number;
+  persistedState?: unknown;
 };
 
 const DEFAULT_MINIMUM_OBSERVATION_MS = 7 * 24 * 60 * 60 * 1000;
 
+const AUTH_MODES: LegacyWholeFileAuthMode[] = ['bearer', 'pair-code', 'pairing-challenge'];
+const OUTCOMES: LegacyWholeFileOutcome[] = ['accepted', 'duplicate', 'rejected'];
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isFiniteTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function parseCounterRecord<T extends string>(value: unknown, keys: readonly T[]): Record<T, number> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const parsed = {} as Record<T, number>;
+  for (const key of keys) {
+    if (!isNonNegativeInteger(record[key])) return undefined;
+    parsed[key] = record[key] as number;
+  }
+  return parsed;
+}
+
+export function parseLegacyWholeFileCompatibilityPersistedState(
+  value: unknown,
+): LegacyWholeFileCompatibilityPersistedState | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const state = value as Record<string, unknown>;
+  if (state.version !== 1 || !isFiniteTimestamp(state.observedSince) || !isNonNegativeInteger(state.total)) return undefined;
+
+  const byAuthMode = parseCounterRecord(state.byAuthMode, AUTH_MODES);
+  const byOutcome = parseCounterRecord(state.byOutcome, OUTCOMES);
+  if (!byAuthMode || !byOutcome) return undefined;
+
+  const authTotal = AUTH_MODES.reduce((sum, key) => sum + byAuthMode[key], 0);
+  const outcomeTotal = OUTCOMES.reduce((sum, key) => sum + byOutcome[key], 0);
+  if (authTotal !== state.total || outcomeTotal !== state.total) return undefined;
+
+  const lastObservedAt = state.lastObservedAt;
+  if (lastObservedAt !== undefined && (!isFiniteTimestamp(lastObservedAt) || lastObservedAt < state.observedSince)) {
+    return undefined;
+  }
+  if (state.total === 0 && lastObservedAt !== undefined) return undefined;
+  if (state.total > 0 && lastObservedAt === undefined) return undefined;
+
+  return {
+    version: 1,
+    observedSince: state.observedSince,
+    total: state.total,
+    byAuthMode,
+    byOutcome,
+    lastObservedAt,
+  };
+}
+
 /**
- * Process-local compatibility telemetry for the legacy whole-file receiver.
+ * Compatibility telemetry for the legacy whole-file receiver.
  *
  * Deliberately records only coarse auth mode/outcome/time. It never stores
  * tokens, pairing credentials, workspace IDs, device IDs, filenames, media
- * keys, addresses, or request headers.
+ * keys, addresses, or request headers. Persisted state is versioned and
+ * strictly validated so corrupt/unknown state starts a fresh observation
+ * window rather than accidentally making route retirement look safe.
  */
 export class LegacyWholeFileCompatibilityTelemetry {
   private readonly now: () => number;
@@ -59,7 +125,14 @@ export class LegacyWholeFileCompatibilityTelemetry {
   constructor(options: LegacyWholeFileCompatibilityTelemetryOptions = {}) {
     this.now = options.now ?? Date.now;
     this.minimumObservationMs = Math.max(0, options.minimumObservationMs ?? DEFAULT_MINIMUM_OBSERVATION_MS);
-    this.observedSince = this.now();
+    const persistedState = parseLegacyWholeFileCompatibilityPersistedState(options.persistedState);
+    this.observedSince = persistedState?.observedSince ?? this.now();
+    if (persistedState) {
+      this.total = persistedState.total;
+      this.lastObservedAt = persistedState.lastObservedAt;
+      Object.assign(this.byAuthMode, persistedState.byAuthMode);
+      Object.assign(this.byOutcome, persistedState.byOutcome);
+    }
   }
 
   record(event: Omit<LegacyWholeFileCompatibilityEvent, 'at'> & { at?: number }): void {
@@ -68,6 +141,17 @@ export class LegacyWholeFileCompatibilityTelemetry {
     this.byAuthMode[event.authMode] += 1;
     this.byOutcome[event.outcome] += 1;
     this.lastObservedAt = Math.max(this.lastObservedAt ?? at, at);
+  }
+
+  exportPersistedState(): LegacyWholeFileCompatibilityPersistedState {
+    return {
+      version: 1,
+      observedSince: this.observedSince,
+      total: this.total,
+      byAuthMode: { ...this.byAuthMode },
+      byOutcome: { ...this.byOutcome },
+      lastObservedAt: this.lastObservedAt,
+    };
   }
 
   snapshot(at = this.now()): LegacyWholeFileCompatibilitySnapshot {
