@@ -634,11 +634,11 @@ function createProductionResumableRuntime(){
     workspaces:requireWorkspaceRepository(),
     exists:async({workspaceId,key})=>(await readIndex(workspaceId)).some(item=>item.key===key),
     ingest:async row=>{await mediaIndexWriter().ingest(row as MediaIndexRow);},
-    onCommitted:async({row,target})=>{
+    onCommitted:async({row,target,actorUserId})=>{
       const mediaRow=row as MediaIndexRow;
       lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${mediaRow.filename}`,lastRunAt:new Date().toISOString()};
       notifyRenderer('photosync:file-received',{name:mediaRow.filename,path:target});
-      requireWorkspaceRepository().appendAudit({workspaceId:mediaRow.workspaceId,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:mediaRow.deviceId,action:'media.ingest',targetType:'media',targetId:mediaRow.key,metadata:{filename:mediaRow.filename,size:mediaRow.size,transport:'resumable'}});
+      requireWorkspaceRepository().appendAudit({workspaceId:mediaRow.workspaceId,actorUserId,actorDeviceId:mediaRow.deviceId,action:'media.ingest',targetType:'media',targetId:mediaRow.key,metadata:{filename:mediaRow.filename,size:mediaRow.size,transport:'resumable'}});
       if(mediaRow.mediaType==='video')void processVideoRow(mediaRow.key,mediaRow.workspaceId);
       void enqueueCloudUpload(mediaRow);
     },
