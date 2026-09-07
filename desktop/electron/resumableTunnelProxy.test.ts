@@ -78,6 +78,41 @@ test('forwards PATCH chunks and preserves authoritative 409 offset reconciliatio
   });
 });
 
+test('forwards only the explicit workspace auth routes and strips relay pair credentials', async () => {
+  const observed: Array<{ url:string; init:RequestInit | undefined }> = [];
+  for (const path of ['/api/v1/auth/pair', '/api/v1/auth/refresh', '/api/v1/auth/revoke']) {
+    const body = path.endsWith('/pair') ? { workspaceId:'workspace-1', pairingChallenge:'challenge-1', deviceId:'phone-1' }
+      : path.endsWith('/refresh') ? { refreshToken:'refresh-secret' } : { sessionId:'session-1' };
+    const result = await proxyResumableTunnelRequest(request({
+      path,
+      headers: {
+        'x-photosync-pair-token': pairToken,
+        'content-type':'application/json',
+        authorization:'Bearer access-secret',
+        'x-photosync-workspace-id':'workspace-1',
+      },
+      bodyBase64:Buffer.from(JSON.stringify(body)).toString('base64'),
+    }), {
+      expectedPairToken:pairToken,
+      fetchImpl:async(url, init) => {
+        observed.push({ url:String(url), init });
+        return new Response(JSON.stringify({ ok:true }), { status:200, headers:{ 'content-type':'application/json' } });
+      },
+    });
+    assert.equal(result.status, 200);
+  }
+  assert.deepEqual(observed.map(item=>item.url), [
+    'http://127.0.0.1:43117/api/v1/auth/pair',
+    'http://127.0.0.1:43117/api/v1/auth/refresh',
+    'http://127.0.0.1:43117/api/v1/auth/revoke',
+  ]);
+  for (const item of observed) {
+    const headers=item.init?.headers as Record<string,string>;
+    assert.equal(headers['x-photosync-pair-token'], undefined);
+    assert.equal(headers.authorization, 'Bearer access-secret');
+  }
+});
+
 test('rejects invalid pair tokens, routes and oversized chunk bodies before local forwarding', async () => {
   let calls = 0;
   const fetchImpl: typeof fetch = async () => { calls += 1; return new Response('{}'); };
@@ -87,6 +122,9 @@ test('rejects invalid pair tokens, routes and oversized chunk bodies before loca
   }), /INVALID_RELAY_PAIR_TOKEN/);
   await assert.rejects(() => proxyResumableTunnelRequest(request({ method: 'POST', path: '/api/v1/media' }), {
     expectedPairToken: pairToken, fetchImpl,
+  }), /INVALID_RELAY_RESUMABLE_ROUTE/);
+  await assert.rejects(() => proxyResumableTunnelRequest(request({ method:'POST', path:'/api/v1/auth/session' }), {
+    expectedPairToken:pairToken, fetchImpl,
   }), /INVALID_RELAY_RESUMABLE_ROUTE/);
   await assert.rejects(() => proxyResumableTunnelRequest(request({ bodyBase64: Buffer.alloc(5).toString('base64') }), {
     expectedPairToken: pairToken, fetchImpl, maxRequestBytes: 4,
