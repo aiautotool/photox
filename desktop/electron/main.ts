@@ -29,6 +29,7 @@ import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWe
 import { prepareLegacyMediaIndexForSqlite } from './legacyMediaIndexPreparation.js';
 import { createResumableMediaProductionRuntime } from './resumableMediaProductionRuntime.js';
 import type { ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
+import { legacyWholeFileAuditAttribution, type LegacyWholeFileAuthPrincipal } from './legacyMediaAuditAttribution.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -489,13 +490,25 @@ async function uploadLocalToDriveUnlocked(row:MediaIndexRow){
   }
 }
 
-async function receiveMedia(req:IncomingMessage,res:ServerResponse){
+async function receiveMedia(req:IncomingMessage,res:ServerResponse,authorizedPrincipal?:LegacyWholeFileAuthPrincipal){
   const pair=await ensurePairCode();
   const bearer=typeof req.headers.authorization==='string'&&req.headers.authorization.startsWith('Bearer ');
   let requestWorkspace=LEGACY_WORKSPACE_ID;
-  if(bearer){const principal=await requireWorkspaceAuth().authorizeRequest(req,['media:write']);requestWorkspace=principal.workspaceId!;}
-  else {const headerWorkspace=String(req.headers['x-photosync-workspace-id']||'');if(req.headers['x-photosync-pair-code']!==pair&&!workspacePairingChallenges.verify({challenge:String(req.headers['x-photosync-pairing-challenge']||''),workspaceId:headerWorkspace})){res.writeHead(401);res.end('Invalid media credential');return;}if(headerWorkspace)requestWorkspace=headerWorkspace;}
+  let principal=authorizedPrincipal;
+  let authMode:'bearer'|'pair-code'|'pairing-challenge'='pair-code';
+  if(bearer){principal=principal||await requireWorkspaceAuth().authorizeRequest(req,['media:write']);requestWorkspace=principal.workspaceId!;authMode='bearer';}
+  else {
+    const headerWorkspace=String(req.headers['x-photosync-workspace-id']||'');
+    const pairCodeValid=req.headers['x-photosync-pair-code']===pair;
+    const pairingChallengeValid=workspacePairingChallenges.verify({challenge:String(req.headers['x-photosync-pairing-challenge']||''),workspaceId:headerWorkspace});
+    if(!pairCodeValid&&!pairingChallengeValid){res.writeHead(401);res.end('Invalid media credential');return;}
+    authMode=pairingChallengeValid?'pairing-challenge':'pair-code';
+    if(headerWorkspace)requestWorkspace=headerWorkspace;
+  }
   const deviceId=String(req.headers['x-photosync-device-id']||'unknown'); const assetId=String(req.headers['x-photosync-asset-id']||''); const key=`${deviceId}:${assetId}`;
+  let auditAttribution;
+  try{auditAttribution=legacyWholeFileAuditAttribution({principal,requestWorkspaceId:requestWorkspace,requestDeviceId:deviceId,legacyOwnerUserId:LEGACY_OWNER_USER_ID,authMode});}
+  catch(error){res.writeHead(403,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));return;}
   const rows=await readIndex(requestWorkspace); if(rows.some(x=>x.key===key)){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
   const filename=safeFilename(decodeURIComponent(String(req.headers['x-photosync-filename']||`media-${Date.now()}`))); const createdAt=Number(req.headers['x-photosync-created-at']||Date.now());
   const declaredSize=Number(req.headers['x-photosync-size']||req.headers['content-length']||0);
@@ -552,7 +565,7 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
     lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
     res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
     reservationCommitted=true;
-    repo.appendAudit({workspaceId:requestWorkspace,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:deviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size}});
+    repo.appendAudit({workspaceId:requestWorkspace,actorUserId:auditAttribution.actorUserId,actorDeviceId:auditAttribution.actorDeviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size,...auditAttribution.metadata}});
     if(declaredMediaType==='video')void processVideoRow(key,requestWorkspace);void enqueueCloudUpload(row);
   }catch(error){
     await fs.unlink(tmp).catch(()=>undefined);
@@ -675,7 +688,8 @@ async function startReceiver(){
     const legacyPairValid=req.headers['x-photosync-pair-code']===pair; const workspaceChallengeValid=workspacePairingChallenges.verify({challenge,workspaceId:requestWorkspace});
     const bearer=typeof req.headers.authorization==='string'&&req.headers.authorization.startsWith('Bearer ');
     let authorizedWorkspace=LEGACY_WORKSPACE_ID;
-    if(bearer){const scope=url.pathname==='/api/v1/media'&&req.method==='POST'?'media:write':req.method==='DELETE'?'media:delete':url.pathname.startsWith('/api/v1/media/')||url.pathname.startsWith('/api/v1/playback/')||url.pathname.startsWith('/api/v1/thumbnail/')?'media:download':'media:read';try{const principal=await requireWorkspaceAuth().authorizeRequest(req,[scope]);authorizedWorkspace=principal.workspaceId!;}catch(error){res.writeHead(401);res.end(error instanceof Error?error.message:String(error));return;}}
+    let authorizedPrincipal:LegacyWholeFileAuthPrincipal|undefined;
+    if(bearer){const scope=url.pathname==='/api/v1/media'&&req.method==='POST'?'media:write':req.method==='DELETE'?'media:delete':url.pathname.startsWith('/api/v1/media/')||url.pathname.startsWith('/api/v1/playback/')||url.pathname.startsWith('/api/v1/thumbnail/')?'media:download':'media:read';try{const principal=await requireWorkspaceAuth().authorizeRequest(req,[scope]);authorizedWorkspace=principal.workspaceId!;authorizedPrincipal=principal;}catch(error){res.writeHead(401);res.end(error instanceof Error?error.message:String(error));return;}}
     else if(!legacyPairValid&&!workspaceChallengeValid){res.writeHead(401);res.end('Invalid or expired pairing credential');return;}else if(workspaceChallengeValid){authorizedWorkspace=requestWorkspace;}
     if(req.method==='GET'&&url.pathname==='/api/v1/status'){const index=await readIndex(authorizedWorkspace);res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({name:os.hostname(),version:'1',libraryPath:libraryDir(),received:index.length}));return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/library'){
@@ -703,7 +717,7 @@ async function startReceiver(){
       if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
       res.writeHead(response.status,headers);if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
     }
-    if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res);return;} res.writeHead(404);res.end('Not found');
+    if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res,authorizedPrincipal);return;} res.writeHead(404);res.end('Not found');
   }catch(e){console.error(e);res.writeHead(500);res.end(e instanceof Error?e.message:String(e))}}); receiver.listen(RECEIVER_PORT,'0.0.0.0');
 }
 
