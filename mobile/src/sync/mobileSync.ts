@@ -312,6 +312,7 @@ export async function syncAssetsToLaptop(
     let local: Awaited<ReturnType<typeof materializeAsset>> | null = null;
     try {
       if (asset.mediaType !== 'photo' && asset.mediaType !== 'video') throw new Error(`Không hỗ trợ đồng bộ loại media ${asset.mediaType}`);
+      const mediaType: 'photo' | 'video' = asset.mediaType;
       local = await materializeAsset(asset);
       const reportBytes = (uploadedBytes: number, totalBytes = local!.size) => {
         const uploaded = Math.min(Math.max(uploadedBytes, 0), totalBytes);
@@ -331,7 +332,7 @@ export async function syncAssetsToLaptop(
           assetId: asset.id,
           filename: asset.filename,
           mimeType: mimeFor(asset),
-          mediaType: asset.mediaType,
+          mediaType,
           createdAt: asset.creationTime,
           expectedBytes: local!.size,
         }, source, ({ uploadedBytes, totalBytes }) => reportBytes(uploadedBytes, totalBytes), signal) as { status?: string };
@@ -354,7 +355,7 @@ export async function syncAssetsToLaptop(
               'x-photosync-asset-id': asset.id,
               'x-photosync-filename': encodeURIComponent(asset.filename),
               'x-photosync-created-at': String(asset.creationTime),
-              'x-photosync-media-type': asset.mediaType,
+              'x-photosync-media-type': mediaType,
               'x-photosync-size': String(local!.size),
             },
           },
