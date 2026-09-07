@@ -160,6 +160,56 @@ test('production runtime binds media:write auth, workspace quota, catalog ingest
   assert.equal([...repo.reservations.values()][0]?.key, 'device-production:asset-production');
 });
 
+test('production runtime normalizes an unsafe durable root under managed incoming storage', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-production-resumable-boundary-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const unsafeRoot = path.join(temp, 'outside-incoming');
+  const incomingRoot = path.join(temp, 'incoming');
+  const libraryRoot = path.join(temp, 'library');
+  const journalDir = path.join(temp, 'journal');
+  const rows: string[] = [];
+  const repo = workspaceRepository();
+  const runtime = createResumableMediaProductionRuntime({
+    rootDir: unsafeRoot,
+    incomingRoot,
+    libraryRoot,
+    journalDir,
+    workspaces: repo,
+    coordinator: createMediaIngestCommitCoordinator(),
+    authorizeRequest: async () => ({ workspaceId: 'ws-production', deviceId: 'device-production' }),
+    exists: async () => false,
+    ingest: async row => { rows.push(row.path); },
+  });
+
+  await withServer(runtime, async baseUrl => {
+    const bytes = Buffer.from('managed-boundary');
+    const create = await fetch(`${baseUrl}/api/v1/media/uploads`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer production-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ assetId: 'asset-boundary', filename: 'photo.jpg', mimeType: 'image/jpeg', mediaType: 'photo', createdAt: Date.now(), expectedBytes: bytes.length }),
+    });
+    assert.equal(create.status, 201);
+    const session = await create.json() as { sessionId: string };
+    const chunk = await fetch(`${baseUrl}/api/v1/media/uploads/${session.sessionId}/chunks`, {
+      method: 'PATCH',
+      headers: { authorization: 'Bearer production-token', 'x-photox-upload-offset': '0' },
+      body: bytes,
+    });
+    assert.equal(chunk.status, 200);
+    const finalize = await fetch(`${baseUrl}/api/v1/media/uploads/${session.sessionId}/finalize`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer production-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ sha256: crypto.createHash('sha256').update(bytes).digest('hex') }),
+    });
+    assert.equal(finalize.status, 200);
+    assert.equal((await finalize.json() as { state: string }).state, 'COMMITTED');
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(await fs.stat(unsafeRoot).then(() => true, () => false), false);
+  assert.equal(await fs.stat(path.join(incomingRoot, 'resumable')).then(() => true, () => false), true);
+});
+
 test('production runtime fails closed when bearer principal has no device binding', async t => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-production-resumable-auth-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
