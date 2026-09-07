@@ -118,3 +118,36 @@ test('resumable client recreates an expired durable session and uploads through 
   assert.match(calls[2].url, /\/fresh\/chunks$/);
   assert.equal(store.current(), null);
 });
+
+test('resumable client refreshes authentication once and retries the exact failed request', async () => {
+  const store = memoryStore(null);
+  let token = 'expired';
+  let refreshes = 0;
+  const calls = [];
+  const responses = [
+    json(401, { error: 'UNAUTHORIZED' }),
+    json(201, { sessionId: 'fresh', expectedBytes: 6, acknowledgedBytes: 0, expiresAt: '2099-01-01T00:00:00.000Z' }),
+    json(200, { sessionId: 'fresh', expectedBytes: 6, acknowledgedBytes: 6, expiresAt: '2099-01-01T00:00:00.000Z' }),
+    json(200, { status: 'COMMITTED' }),
+  ];
+  const client = new ResumableUploadClient({
+    baseUrl: 'https://desktop.example',
+    chunkBytes: 6,
+    sessionStore: store,
+    getHeaders: () => ({ authorization: `Bearer ${token}` }),
+    onUnauthorized: async () => { refreshes += 1; token = 'fresh'; },
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method, authorization: init.headers?.authorization });
+      return responses.shift();
+    },
+  });
+
+  const result = await client.upload(asset, source());
+  assert.deepEqual(result, { status: 'COMMITTED' });
+  assert.equal(refreshes, 1);
+  assert.equal(calls[0].authorization, 'Bearer expired');
+  assert.equal(calls[1].authorization, 'Bearer fresh');
+  assert.equal(calls[0].url, calls[1].url);
+  assert.equal(calls[0].method, calls[1].method);
+  assert.equal(store.current(), null);
+});
