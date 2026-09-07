@@ -67,6 +67,8 @@
     "electron/mediaRepairCoordinator.test.ts",
     "electron/mediaRepairTransport.ts",
     "electron/mediaRepairTransport.test.ts",
+    "electron/resumableFinalizeLedger.ts",
+    "electron/resumableFinalizeReconciliation.test.ts",
     "electron/resumableMediaIngest.ts",
     "electron/resumableMediaIngest.test.ts",
     "electron/resumableMediaIngestLifecycle.ts",
