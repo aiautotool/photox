@@ -29,7 +29,8 @@ import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWe
 import { prepareLegacyMediaIndexForSqlite } from './legacyMediaIndexPreparation.js';
 import { createResumableMediaProductionRuntime } from './resumableMediaProductionRuntime.js';
 import type { ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
-import { legacyWholeFileAuditAttribution, type LegacyWholeFileAuthPrincipal } from './legacyMediaAuditAttribution.js';
+import type { LegacyWholeFileAuthPrincipal } from './legacyMediaAuditAttribution.js';
+import { resolveLegacyWholeFileReceiveGate } from './legacyWholeFileReceiveGate.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -505,11 +506,20 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse,authorizedPri
     authMode=pairingChallengeValid?'pairing-challenge':'pair-code';
     if(headerWorkspace)requestWorkspace=headerWorkspace;
   }
-  const deviceId=String(req.headers['x-photosync-device-id']||'unknown'); const assetId=String(req.headers['x-photosync-asset-id']||''); const key=`${deviceId}:${assetId}`;
-  let auditAttribution;
-  try{auditAttribution=legacyWholeFileAuditAttribution({principal,requestWorkspaceId:requestWorkspace,requestDeviceId:deviceId,legacyOwnerUserId:LEGACY_OWNER_USER_ID,authMode});}
-  catch(error){res.writeHead(403,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));return;}
-  const rows=await readIndex(requestWorkspace); if(rows.some(x=>x.key===key)){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
+  let gate;
+  try{
+    gate=await resolveLegacyWholeFileReceiveGate({
+      req,
+      defaultWorkspaceId:LEGACY_WORKSPACE_ID,
+      legacyOwnerUserId:LEGACY_OWNER_USER_ID,
+      authMode,
+      principal,
+      exists:async({workspaceId,key})=>(await readIndex(workspaceId)).some(item=>item.key===key),
+    });
+  }catch(error){res.writeHead(403,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));return;}
+  requestWorkspace=gate.preflight.workspaceId;
+  const {deviceId,assetId,key,audit:auditAttribution}=gate.preflight;
+  if(gate.state==='duplicate'){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
   const filename=safeFilename(decodeURIComponent(String(req.headers['x-photosync-filename']||`media-${Date.now()}`))); const createdAt=Number(req.headers['x-photosync-created-at']||Date.now());
   const declaredSize=Number(req.headers['x-photosync-size']||req.headers['content-length']||0);
   if(!Number.isFinite(declaredSize)||declaredSize<=0){res.writeHead(411,{'content-type':'application/json'});res.end(JSON.stringify({error:'MEDIA_SIZE_REQUIRED'}));return;}
