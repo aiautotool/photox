@@ -70,7 +70,7 @@ export class ResumableFinalizeLedger {
       sessionId: identity(input.sessionId, 'UPLOAD_SESSION_ID_REQUIRED'),
       workspaceId: identity(input.workspaceId, 'WORKSPACE_SCOPE_REQUIRED'),
       deviceId: identity(input.deviceId, 'DEVICE_SCOPE_REQUIRED'),
-      actorUserId,
+      ...(actorUserId ? { actorUserId } : {}),
       reservationId: input.reservationId ? identity(input.reservationId, 'UPLOAD_QUOTA_RESERVATION_INVALID') : undefined,
       expectedBytes: input.expectedBytes,
       key: identity(input.key, 'UPLOAD_FINALIZE_KEY_INVALID'),
