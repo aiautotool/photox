@@ -106,11 +106,17 @@ export function createResumableMediaIngestHttpHandler(deps: ResumableMediaHttpDe
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const url = new URL(req.url || '/', 'http://localhost');
+    const inNamespace = url.pathname === BASE_PATH || url.pathname.startsWith(`${BASE_PATH}/`);
+    if (!inNamespace) return false;
+
     const isCreate = req.method === 'POST' && url.pathname === BASE_PATH;
     const statusSessionId = req.method === 'GET' ? sessionIdFromPath(url.pathname) : null;
     const chunkSessionId = req.method === 'PATCH' ? sessionIdFromPath(url.pathname, '/chunks') : null;
     const finalizeSessionId = req.method === 'POST' ? sessionIdFromPath(url.pathname, '/finalize') : null;
-    if (!isCreate && !statusSessionId && !chunkSessionId && !finalizeSessionId) return false;
+    if (!isCreate && !statusSessionId && !chunkSessionId && !finalizeSessionId) {
+      sendJson(res, 404, { error: 'RESUMABLE_UPLOAD_ROUTE_NOT_FOUND' });
+      return true;
+    }
 
     let principal: ResumableIngestPrincipal;
     try {
@@ -164,6 +170,6 @@ export function createResumableMediaIngestHttpHandler(deps: ResumableMediaHttpDe
       return true;
     }
 
-    return false;
+    return true;
   };
 }
