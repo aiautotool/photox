@@ -20,6 +20,66 @@ test('records only coarse whole-file compatibility usage by auth mode and outcom
   assert.equal(JSON.stringify(snapshot).includes('credential'), false);
 });
 
+test('restored telemetry preserves observation window and compatibility blockers across restart', () => {
+  let now = 1_000;
+  const beforeRestart = new LegacyWholeFileCompatibilityTelemetry({ now: () => now, minimumObservationMs: 500 });
+  beforeRestart.record({ authMode: 'bearer', outcome: 'accepted', at: 1_100 });
+
+  now = 2_000;
+  const afterRestart = new LegacyWholeFileCompatibilityTelemetry({
+    now: () => now,
+    minimumObservationMs: 500,
+    persistedState: beforeRestart.exportPersistedState(),
+  });
+
+  const snapshot = afterRestart.snapshot();
+  assert.equal(snapshot.observedSince, new Date(1_000).toISOString());
+  assert.equal(snapshot.total, 1);
+  assert.equal(snapshot.lastObservedAt, new Date(1_100).toISOString());
+  assert.deepEqual(afterRestart.deprecationReadiness({ physicalDeviceResumableAccepted: true }).blockers, [
+    'COMPATIBILITY_TRAFFIC_OBSERVED',
+  ]);
+});
+
+test('invalid or unknown persisted telemetry fails closed by starting a fresh observation window', () => {
+  let now = 5_000;
+  const invalid = new LegacyWholeFileCompatibilityTelemetry({
+    now: () => now,
+    minimumObservationMs: 1_000,
+    persistedState: {
+      version: 99,
+      observedSince: 1,
+      total: 0,
+      byAuthMode: { bearer: 0, 'pair-code': 0, 'pairing-challenge': 0 },
+      byOutcome: { accepted: 0, duplicate: 0, rejected: 0 },
+    },
+  });
+
+  now = 5_500;
+  const readiness = invalid.deprecationReadiness({ physicalDeviceResumableAccepted: true });
+  assert.equal(invalid.snapshot().observedSince, new Date(5_000).toISOString());
+  assert.equal(readiness.ready, false);
+  assert.deepEqual(readiness.blockers, ['OBSERVATION_WINDOW_INCOMPLETE']);
+});
+
+test('counter-inconsistent persisted telemetry is rejected rather than undercounting compatibility traffic', () => {
+  let now = 10_000;
+  const invalid = new LegacyWholeFileCompatibilityTelemetry({
+    now: () => now,
+    minimumObservationMs: 1_000,
+    persistedState: {
+      version: 1,
+      observedSince: 1,
+      total: 0,
+      byAuthMode: { bearer: 1, 'pair-code': 0, 'pairing-challenge': 0 },
+      byOutcome: { accepted: 0, duplicate: 0, rejected: 0 },
+    },
+  });
+  now = 11_000;
+  assert.equal(invalid.snapshot().observedSince, new Date(10_000).toISOString());
+  assert.equal(invalid.snapshot().total, 0);
+});
+
 test('deprecation readiness fails closed without physical-device resumable acceptance', () => {
   let now = 1_000;
   const telemetry = new LegacyWholeFileCompatibilityTelemetry({ now: () => now, minimumObservationMs: 500 });
