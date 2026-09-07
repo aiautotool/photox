@@ -75,6 +75,8 @@
     "electron/resumableMediaIngestHttp.test.ts",
     "electron/resumableQuotaHooks.ts",
     "electron/resumableQuotaHooks.test.ts",
+    "electron/resumableMediaReceiverRuntime.ts",
+    "electron/resumableMediaReceiverRuntime.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
     "electron/webEdgeMediaRepair.test.ts",
     "electron/webEdgeProxyHardening.test.ts",
