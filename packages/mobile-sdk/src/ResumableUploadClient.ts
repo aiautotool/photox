@@ -38,6 +38,7 @@ export type ResumableUploadClientOptions = {
   sessionStore: ResumableUploadSessionStore;
   fetchImpl?: typeof fetch;
   chunkBytes?: number;
+  onUnauthorized?: () => Promise<void>;
 };
 
 type ErrorBody = { error?: string; acknowledgedBytes?: number };
@@ -97,22 +98,31 @@ export class ResumableUploadClient {
     return { ...(await this.options.getHeaders()), ...extra };
   }
 
+  private async request(url: string, initFactory: () => Promise<RequestInit>) {
+    let response = await this.fetchImpl(url, await initFactory());
+    if (response.status === 401 && this.options.onUnauthorized) {
+      await this.options.onUnauthorized();
+      response = await this.fetchImpl(url, await initFactory());
+    }
+    return response;
+  }
+
   private async createSession(asset: ResumableUploadAsset) {
-    const response = await this.fetchImpl(this.endpoint(), {
+    const response = await this.request(this.endpoint(), async () => ({
       method: 'POST',
       headers: await this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify(asset),
-    });
+    }));
     const session = validateSession(await parseResponse<ResumableUploadSession>(response), asset.expectedBytes);
     await this.options.sessionStore.save(asset.assetId, session);
     return session;
   }
 
   private async refreshSession(asset: ResumableUploadAsset, session: ResumableUploadSession) {
-    const response = await this.fetchImpl(this.endpoint(`/${encodeURIComponent(session.sessionId)}`), {
+    const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}`), async () => ({
       method: 'GET',
       headers: await this.headers(),
-    });
+    }));
     if (response.status === 404 || response.status === 410) {
       await this.options.sessionStore.remove(asset.assetId);
       return this.createSession(asset);
@@ -132,14 +142,14 @@ export class ResumableUploadClient {
   }
 
   private async appendChunk(asset: ResumableUploadAsset, session: ResumableUploadSession, chunk: Uint8Array) {
-    const response = await this.fetchImpl(this.endpoint(`/${encodeURIComponent(session.sessionId)}/chunks`), {
+    const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}/chunks`), async () => ({
       method: 'PATCH',
       headers: await this.headers({
         'content-type': 'application/octet-stream',
         'x-photox-upload-offset': String(session.acknowledgedBytes),
       }),
       body: new Uint8Array(chunk).buffer,
-    });
+    }));
     if (response.status === 409) {
       const body = await response.json().catch(() => ({})) as ErrorBody;
       if (body.error === 'UPLOAD_OFFSET_MISMATCH' && Number.isSafeInteger(body.acknowledgedBytes)) {
@@ -172,11 +182,11 @@ export class ResumableUploadClient {
     }
 
     const sha256 = await source.sha256();
-    const response = await this.fetchImpl(this.endpoint(`/${encodeURIComponent(session.sessionId)}/finalize`), {
+    const response = await this.request(this.endpoint(`/${encodeURIComponent(session.sessionId)}/finalize`), async () => ({
       method: 'POST',
       headers: await this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ sha256 }),
-    });
+    }));
     const result = await parseResponse<unknown>(response);
     await this.options.sessionStore.remove(asset.assetId);
     return result;
