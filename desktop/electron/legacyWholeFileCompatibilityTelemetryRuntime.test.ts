@@ -9,7 +9,7 @@ function memoryStore(input: { failLoad?: boolean; failSave?: boolean } = {}) {
   let state: MemoryStoreState;
   return {
     get state() { return state; },
-    async load(options: { now?: () => number; minimumObservationMs?: number }) {
+    async load(options: { now?: () => number; minimumObservationMs?: number } = {}) {
       if (input.failLoad) throw new Error('simulated load failure');
       return new LegacyWholeFileCompatibilityTelemetry({ ...options, persistedState: state });
     },
@@ -63,11 +63,10 @@ test('save failure is non-fatal but fail-closes deprecation readiness', async ()
 });
 
 test('load failure starts fresh observation state and blocks deprecation until persistence recovers', async () => {
-  let now = 10_000;
   const errors: unknown[] = [];
   const store = memoryStore({ failLoad: true });
   const runtime = await LegacyWholeFileCompatibilityTelemetryRuntime.create(store, {
-    now: () => now,
+    now: () => 10_000,
     minimumObservationMs: 0,
     onPersistenceError: error => errors.push(error),
   });
