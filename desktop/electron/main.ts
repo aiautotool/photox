@@ -27,6 +27,8 @@ import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinat
 import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';
 import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWeb } from './mediaCatalogOperationsTransport.js';
 import { prepareLegacyMediaIndexForSqlite } from './legacyMediaIndexPreparation.js';
+import { createResumableMediaProductionRuntime } from './resumableMediaProductionRuntime.js';
+import type { ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -37,6 +39,7 @@ const REDIRECT_URI = `http://127.0.0.1:${OAUTH_PORT}/oauth2callback`;
 const PUBLIC_TUNNEL_URL = process.env.PHOTOSYNC_PUBLIC_URL || 'https://photox.aiautotool.com';
 let mainWindow: BrowserWindow | null = null;
 let receiver: http.Server | null = null;
+let resumableMediaRuntime: ResumableMediaReceiverRuntime | null = null;
 let cloudflaredProcess: ChildProcess | null = null;
 let cloudflareMonitor: NodeJS.Timeout | null = null;
 let cloudflareRestart: NodeJS.Timeout | null = null;
@@ -168,6 +171,7 @@ function stableDriveAccountId(email?:string,sub?:string){
 function libraryDir(){ return path.join(app.getPath('pictures'),'PhotoSync'); }
 function stateDir(){ return path.join(app.getPath('userData'),'photosync-state'); }
 function incomingDir(){ return path.join(stateDir(),'incoming'); }
+function resumableIngestDir(){ return path.join(stateDir(),'resumable-ingest'); }
 function ingestRecoveryDir(){ return path.join(stateDir(),'ingest-recovery'); }
 function ingestRecoveryJournal(){return createMediaIngestRecoveryJournal({journalDir:ingestRecoveryDir(),libraryRoot:libraryDir(),incomingRoot:incomingDir()});}
 function videoCacheDir(){ return path.join(stateDir(),'video-cache'); }
@@ -272,9 +276,6 @@ async function deleteManagedMedia(key:string,workspaceId=LEGACY_WORKSPACE_ID){
     const requestedClaimId=crypto.randomUUID();
     const claimed=await writer.claimDeletion(workspaceId,key,requestedClaimId);
     if(!claimed)throw new Error('MEDIA_NOT_FOUND');
-    // A tombstone left by an interrupted delete is resumable. Inside the exact
-    // provider-operation gate there cannot be another live upload/delete for the
-    // same workspace + media identity, so continuing the prior claim is safe.
     const claimId=(claimed as MediaIndexRow&{deletion?:{claimId:string}}).deletion?.claimId||requestedClaimId;
     const row=claimed as MediaIndexRow;
     const accounts=new Map((await savedDriveAccounts(workspaceId)).map(account=>[account.id,account]));const failures:string[]=[];
@@ -401,7 +402,6 @@ async function removeDriveAccount(accountId:string){
   return desktopStatus();
 }
 
-
 async function uploadMigrationItemToDrive(input:{accountId:string;source:any;response:Response;signal?:AbortSignal;onBytes?:(bytes:number)=>void;checkpoint?:{kind:'google_drive_resumable_v1';accountId:string;sessionUri:string;nextByte:number;totalBytes:number;targetId?:string;updatedAt:string};onCheckpoint?:(checkpoint:any|null)=>Promise<void>}){
   const account=(await runtimeDriveAccounts()).find(item=>item.id===input.accountId);if(!account)throw new Error('GOOGLE_DRIVE_DESTINATION_NOT_FOUND');
   const token=await account.client.getAccessToken();if(!token.token)throw new Error('GOOGLE_DRIVE_ACCESS_TOKEN_MISSING');
@@ -433,7 +433,7 @@ async function uploadMigrationItemToDrive(input:{accountId:string;source:any;res
   if(!sessionUri){
     sessionUri=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:totalBytes,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});nextByte=0;
   }
-  const persistCheckpoint=async(targetId?:string)=>input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte,totalBytes,targetId,updatedAt:new Date().toISOString()});
+  const persistCheckpoint=async(targetId?:string)=>input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte,totalBytes, targetId,updatedAt:new Date().toISOString()});
   await persistCheckpoint();input.onBytes?.(nextByte);
   const body=input.response.body;if(!body)throw new Error('GOOGLE_DRIVE_SOURCE_STREAM_MISSING');
   const reader=body.getReader();const chunkSize=8*1024*1024;let skip=nextByte;let pending=Buffer.alloc(0);let completedId:string|undefined;
@@ -624,9 +624,42 @@ function stopCloudflareTunnelSupervisor(){
   cloudflaredProcess?.kill();cloudflaredProcess=null;
 }
 
+function createProductionResumableRuntime(){
+  return createResumableMediaProductionRuntime({
+    rootDir:resumableIngestDir(),
+    libraryRoot:libraryDir(),
+    incomingRoot:incomingDir(),
+    journalDir:ingestRecoveryDir(),
+    authorizeRequest:(req,required)=>requireWorkspaceAuth().authorizeRequest(req,required),
+    workspaces:requireWorkspaceRepository(),
+    exists:async({workspaceId,key})=>(await readIndex(workspaceId)).some(item=>item.key===key),
+    ingest:async row=>{await mediaIndexWriter().ingest(row as MediaIndexRow);},
+    onCommitted:async({row,target})=>{
+      const mediaRow=row as MediaIndexRow;
+      lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${mediaRow.filename}`,lastRunAt:new Date().toISOString()};
+      notifyRenderer('photosync:file-received',{name:mediaRow.filename,path:target});
+      requireWorkspaceRepository().appendAudit({workspaceId:mediaRow.workspaceId,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:mediaRow.deviceId,action:'media.ingest',targetType:'media',targetId:mediaRow.key,metadata:{filename:mediaRow.filename,size:mediaRow.size,transport:'resumable'}});
+      if(mediaRow.mediaType==='video')void processVideoRow(mediaRow.key,mediaRow.workspaceId);
+      void enqueueCloudUpload(mediaRow);
+    },
+    coordinator:mediaIngestCommitCoordinator,
+    onCleanupError:error=>console.error('Resumable ingest cleanup failed',error),
+    onJournalCleanupError:error=>console.error('Resumable ingest journal cleanup failed',error),
+    onPostCommitError:error=>console.error('Resumable ingest post-commit work failed',error),
+  });
+}
+
 async function startReceiver(){
-  if(receiver)return; receiver=http.createServer(async(req,res)=>{try{
-    const url=new URL(req.url||'/','http://localhost'); const pair=await ensurePairCode();
+  if(receiver)return;
+  resumableMediaRuntime=createProductionResumableRuntime();
+  resumableMediaRuntime.startCleanup();
+  receiver=http.createServer(async(req,res)=>{try{
+    const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname==='/api/v1/media/uploads'||url.pathname.startsWith('/api/v1/media/uploads/')){
+      const handled=await resumableMediaRuntime?.handle(req,res);
+      if(handled)return;
+    }
+    const pair=await ensurePairCode();
     if(req.method==='POST'&&url.pathname==='/api/v1/auth/pair'){
       const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));const body=JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}');
       try{const session=await requireWorkspaceAuth().exchange({workspaceId:String(body.workspaceId||''),pairingChallenge:String(body.pairingChallenge||''),deviceId:String(body.deviceId||''),deviceName:body.deviceName?String(body.deviceName):undefined,platform:body.platform});res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(session));}catch(error){res.writeHead(401,{'content-type':'application/json'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));}return;
@@ -741,7 +774,6 @@ ipcMain.handle('photosync:migration-resume',async(_event,jobId:string)=>{const s
 ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigrationService().cancel(jobId);return requireMigrationService().getSnapshot(jobId)});
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
-
 app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});await prepareLegacyIndexForSqlite();mediaCatalogBackend=openActiveMediaCatalogBackend<MediaIndexRow>({sqlitePath:mediaCatalogDbFile(),legacyJsonPath:indexFile()});console.info('PhotoX media catalog authority',mediaCatalogBackend.health);const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());if(ingestRecovery.scanned||ingestRecovery.invalid.length)console.info('PhotoX ingest restart recovery',ingestRecovery);migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
@@ -749,5 +781,5 @@ app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});awa
       return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
   });createWindow();const deleteRecovery=await recoverDeletionTombstones(await readAllIndexForRecovery(),row=>deleteManagedMedia(row.key,row.workspaceId));if(deleteRecovery.attempted)console.info('PhotoX deletion restart recovery',deleteRecovery);const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
-app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;mediaCatalogBackend?.close();mediaCatalogBackend=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
+app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;resumableMediaRuntime?.stopCleanup();resumableMediaRuntime=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;mediaCatalogBackend?.close();mediaCatalogBackend=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());
