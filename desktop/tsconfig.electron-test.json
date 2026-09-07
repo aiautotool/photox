@@ -81,6 +81,7 @@
     "electron/resumableMediaReceiverRuntime.test.ts",
     "electron/resumableMediaProductionCommit.ts",
     "electron/resumableMediaProductionCommit.test.ts",
+    "electron/resumableSharedCoordinator.test.ts",
     "electron/webEdgeDriveAllocation.test.ts",
     "electron/webEdgeMediaRepair.test.ts",
     "electron/webEdgeProxyHardening.test.ts",
