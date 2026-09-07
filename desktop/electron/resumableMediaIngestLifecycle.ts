@@ -7,6 +7,7 @@ import { ResumableMediaIngestStore, type CreateResumableMediaSessionInput, type 
 export type ResumableIngestPrincipal = {
   workspaceId: string;
   deviceId: string;
+  actorUserId?: string;
 };
 
 export type ResumableIngestCommitInput = {
@@ -17,9 +18,7 @@ export type ResumableIngestCommitInput = {
   sha256: string;
 };
 
-export type ResumableQuotaReservation = {
-  reservationId: string;
-};
+export type ResumableQuotaReservation = { reservationId: string };
 
 export type ResumableQuotaReservationHooks = {
   reserve(input: { principal: ResumableIngestPrincipal; expectedBytes: number; assetId: string }): Promise<ResumableQuotaReservation>;
@@ -36,7 +35,7 @@ export type ResumableIngestLifecycleDependencies<T> = {
   quota?: ResumableQuotaReservationHooks;
 };
 
-function requiredIdentity(value: string, code: string) {
+function requiredIdentity(value: string | undefined, code: string) {
   const normalized = String(value || '').trim();
   if (!normalized) throw new Error(code);
   return normalized;
@@ -59,9 +58,11 @@ async function sha256File(filePath: string) {
 }
 
 function binding(principal: ResumableIngestPrincipal) {
+  const actorUserId = principal.actorUserId ? requiredIdentity(principal.actorUserId, 'USER_SCOPE_REQUIRED') : undefined;
   return {
     workspaceId: requiredIdentity(principal.workspaceId, 'WORKSPACE_SCOPE_REQUIRED'),
     deviceId: requiredIdentity(principal.deviceId, 'DEVICE_SCOPE_REQUIRED'),
+    actorUserId,
   };
 }
 
@@ -70,12 +71,9 @@ function quotaReservationId(session: ResumableMediaSession) {
 }
 
 export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLifecycleDependencies<T>) {
-  // Production may inject the same coordinator used by the legacy whole-file
-  // receiver so both ingest protocols serialize on the identical workspace/key
-  // boundary during the mobile migration period.
   const coordinator = deps.coordinator ?? createMediaIngestCommitCoordinator();
 
-  async function create(principal: ResumableIngestPrincipal, input: Omit<CreateResumableMediaSessionInput, 'workspaceId' | 'deviceId' | 'quotaReservationId'>) {
+  async function create(principal: ResumableIngestPrincipal, input: Omit<CreateResumableMediaSessionInput, 'workspaceId' | 'deviceId' | 'actorUserId' | 'quotaReservationId'>) {
     const actor = binding(principal);
     let reservation: ResumableQuotaReservation | undefined;
     if (deps.quota) {
@@ -85,16 +83,13 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
     try {
       return await deps.store.create({ ...input, ...actor, quotaReservationId: reservation?.reservationId });
     } catch (error) {
-      if (reservation && deps.quota) {
-        await deps.quota.release({ principal: actor, reservationId: reservation.reservationId, expectedBytes: input.expectedBytes, reason: 'create_failed' });
-      }
+      if (reservation && deps.quota) await deps.quota.release({ principal: actor, reservationId: reservation.reservationId, expectedBytes: input.expectedBytes, reason: 'create_failed' });
       throw error;
     }
   }
 
   async function status(principal: ResumableIngestPrincipal, sessionId: string) {
-    const actor = binding(principal);
-    return deps.store.get(requiredIdentity(sessionId, 'UPLOAD_SESSION_ID_REQUIRED'), actor);
+    return deps.store.get(requiredIdentity(sessionId, 'UPLOAD_SESSION_ID_REQUIRED'), binding(principal));
   }
 
   async function appendChunk(principal: ResumableIngestPrincipal, input: { sessionId: string; offset: number; chunk: Uint8Array }) {
@@ -107,6 +102,7 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
     const sessionId = requiredIdentity(input.sessionId, 'UPLOAD_SESSION_ID_REQUIRED');
     const expectedSha256 = normalizeSha256(input.sha256);
     const complete = await deps.store.requireComplete(sessionId, actor);
+    if (complete.session.version === 2 && !complete.session.actorUserId) throw new Error('UPLOAD_SESSION_ACTOR_REQUIRED');
     const authoritativeSha256 = await sha256File(complete.partPath);
     if (authoritativeSha256 !== expectedSha256) throw new Error('UPLOAD_SHA256_MISMATCH');
 
@@ -114,15 +110,8 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
     const reservationId = quotaReservationId(complete.session);
     const priorCommit = await deps.finalizeLedger?.get(sessionId, actor);
     if (priorCommit) {
-      if (priorCommit.key !== key
-        || priorCommit.sha256 !== authoritativeSha256
-        || priorCommit.expectedBytes !== complete.session.expectedBytes
-        || priorCommit.reservationId !== reservationId) {
-        throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
-      }
-      if (reservationId && deps.quota) {
-        await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
-      }
+      if (priorCommit.key !== key || priorCommit.sha256 !== authoritativeSha256 || priorCommit.expectedBytes !== complete.session.expectedBytes || priorCommit.reservationId !== reservationId) throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
+      if (reservationId && deps.quota) await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
       await deps.finalizeLedger?.remove(sessionId);
       await deps.store.remove(sessionId);
       return { state: 'COMMITTED' as const, key, sha256: authoritativeSha256, recovered: true as const };
@@ -130,13 +119,7 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
 
     const outcome = await coordinator.run({ workspaceId: complete.session.workspaceId, key }, {
       exists: () => deps.exists({ workspaceId: complete.session.workspaceId, key }),
-      commit: () => deps.commit({
-        workspaceId: complete.session.workspaceId,
-        key,
-        session: complete.session,
-        partPath: complete.partPath,
-        sha256: authoritativeSha256,
-      }),
+      commit: () => deps.commit({ workspaceId: complete.session.workspaceId, key, session: complete.session, partPath: complete.partPath, sha256: authoritativeSha256 }),
     });
 
     if (outcome.status === 'committed' && deps.finalizeLedger) {
@@ -144,6 +127,7 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
         sessionId,
         workspaceId: complete.session.workspaceId,
         deviceId: complete.session.deviceId,
+        actorUserId: complete.session.actorUserId,
         reservationId,
         expectedBytes: complete.session.expectedBytes,
         key,
@@ -152,11 +136,8 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
     }
 
     if (reservationId && deps.quota) {
-      if (outcome.status === 'duplicate') {
-        await deps.quota.release({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, reason: 'duplicate' });
-      } else {
-        await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
-      }
+      if (outcome.status === 'duplicate') await deps.quota.release({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, reason: 'duplicate' });
+      else await deps.quota.commit({ principal: actor, reservationId, expectedBytes: complete.session.expectedBytes, key });
     }
     await deps.finalizeLedger?.remove(sessionId);
     await deps.store.remove(sessionId);
@@ -168,29 +149,17 @@ export function createResumableMediaIngestLifecycle<T>(deps: ResumableIngestLife
   async function cleanupExpired() {
     return deps.store.cleanupExpired(async session => {
       const reservationId = quotaReservationId(session);
-      if (!reservationId || !deps.quota) {
-        await deps.finalizeLedger?.remove(session.sessionId);
-        return;
-      }
-      const actor = { workspaceId: session.workspaceId, deviceId: session.deviceId };
+      if (!reservationId || !deps.quota) { await deps.finalizeLedger?.remove(session.sessionId); return; }
+      const actor = { workspaceId: session.workspaceId, deviceId: session.deviceId, actorUserId: session.actorUserId };
       const priorCommit = await deps.finalizeLedger?.get(session.sessionId, actor);
       if (priorCommit) {
         const key = `${session.deviceId}:${session.assetId}`;
-        if (priorCommit.key !== key
-          || priorCommit.expectedBytes !== session.expectedBytes
-          || priorCommit.reservationId !== reservationId) {
-          throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
-        }
+        if (priorCommit.key !== key || priorCommit.expectedBytes !== session.expectedBytes || priorCommit.reservationId !== reservationId) throw new Error('UPLOAD_FINALIZE_LEDGER_CONFLICT');
         await deps.quota.commit({ principal: actor, reservationId, expectedBytes: session.expectedBytes, key });
         await deps.finalizeLedger?.remove(session.sessionId);
         return;
       }
-      await deps.quota.release({
-        principal: actor,
-        reservationId,
-        expectedBytes: session.expectedBytes,
-        reason: 'expired',
-      });
+      await deps.quota.release({ principal: actor, reservationId, expectedBytes: session.expectedBytes, reason: 'expired' });
     });
   }
 
