@@ -42,6 +42,9 @@ function validateRoute(method: RelayResumableRequest['method'], pathname: string
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+$/.test(pathname)) return method === 'GET';
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+\/chunks$/.test(pathname)) return method === 'PATCH';
   if (/^\/api\/v1\/media\/uploads\/[^/?#]+\/finalize$/.test(pathname)) return method === 'POST';
+  if (pathname === '/api/v1/auth/pair') return method === 'POST';
+  if (pathname === '/api/v1/auth/refresh') return method === 'POST';
+  if (pathname === '/api/v1/auth/revoke') return method === 'POST';
   return false;
 }
 
