@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http';
+import path from 'node:path';
 import type { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { createResumableMediaProductionCommit, type ResumableCommittedMediaRow, type ResumableMediaProductionCommitResult } from './resumableMediaProductionCommit.js';
 import { createResumableMediaReceiverRuntime, type ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
@@ -34,6 +35,13 @@ function requiredPrincipal(value: string | undefined, code: string) {
   return normalized;
 }
 
+function managedReceiverRoot(rootDir: string, incomingRoot: string) {
+  const candidate = path.resolve(rootDir);
+  const incoming = path.resolve(incomingRoot);
+  if (candidate === incoming || candidate.startsWith(`${incoming}${path.sep}`)) return candidate;
+  return path.join(incoming, 'resumable');
+}
+
 /**
  * Wires the durable resumable protocol to PhotoX's production authorities.
  *
@@ -42,6 +50,11 @@ function requiredPrincipal(value: string | undefined, code: string) {
  * requests to the returned runtime. That keeps legacy whole-file uploads and
  * resumable uploads on the same process-wide ingest coordinator while both
  * protocols coexist during the mobile migration period.
+ *
+ * The durable upload root is forced under the managed incoming root because the
+ * ingest recovery journal intentionally rejects part files outside that trust
+ * boundary. Callers may still provide a nested root explicitly; an unsafe root
+ * is normalized to `<incomingRoot>/resumable` instead of weakening recovery.
  */
 export function createResumableMediaProductionRuntime(
   options: ResumableMediaProductionRuntimeOptions,
@@ -58,7 +71,7 @@ export function createResumableMediaProductionRuntime(
   });
 
   return createResumableMediaReceiverRuntime({
-    rootDir: options.rootDir,
+    rootDir: managedReceiverRoot(options.rootDir, options.incomingRoot),
     authorize: async req => {
       const principal = await options.authorizeRequest(req, ['media:write']);
       return {
