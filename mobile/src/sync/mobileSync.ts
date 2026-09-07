@@ -1,6 +1,7 @@
 import * as MediaLibrary from 'expo-media-library/legacy';
 import * as FileSystem from 'expo-file-system/legacy';
 import { File as ExpoFile } from 'expo-file-system';
+import { executeMobileUploadPlan, planMobileUpload, type MobileUploadAttempt } from '@photox/mobile-sdk';
 import type { PairedDesktop } from './pairing';
 import { accessHeaders, ensureWorkspaceAccess } from './pairing';
 import { createExpoUploadSource, createMobileResumableClient } from './resumableUpload';
@@ -299,6 +300,7 @@ export async function syncAssetsToLaptop(
   signal?: AbortSignal,
 ): Promise<SyncProgress> {
   const connection = await pingLaptop(target, signal);
+  const uploadPlan = planMobileUpload(connection.transport);
   const progress: SyncProgress = { total: assets.length, completed: 0, skipped: 0, failed: 0 };
 
   for (const asset of [...assets].reverse()) {
@@ -374,32 +376,28 @@ export async function syncAssetsToLaptop(
         }
       };
 
-      if (connection.transport === 'public') {
-        const result = await uploadResumable('public');
-        if (result.status === 'ALREADY_RECEIVED') progress.skipped += 1;
-        else if (result.status === 'COMMITTED') progress.completed += 1;
-        else throw new Error(`Public resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
-      } else if (connection.transport === 'local') {
-        try {
-          const result = await uploadResumable('local');
-          if (result.status === 'ALREADY_RECEIVED') progress.skipped += 1;
-          else if (result.status === 'COMMITTED') progress.completed += 1;
-          else throw new Error(`LAN resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          const result = await uploadRelay();
-          if (result.status === 208) progress.skipped += 1;
-          else if (result.status >= 200 && result.status < 300) progress.completed += 1;
-          else if (result.status === 503) throw new Error('Laptop đang offline');
-          else throw new Error(`Tunnel ${result.status}: ${result.body}`);
+      const executeAttempt = async (attempt: MobileUploadAttempt): Promise<'COMMITTED'|'ALREADY_RECEIVED'> => {
+        if (attempt.resumable) {
+          if (attempt.transport === 'relay') throw new Error('Relay resumable chưa được hỗ trợ');
+          const result = await uploadResumable(attempt.transport);
+          if (result.status === 'ALREADY_RECEIVED') return 'ALREADY_RECEIVED';
+          if (result.status === 'COMMITTED') return 'COMMITTED';
+          const label = attempt.transport === 'local' ? 'LAN' : 'Public';
+          throw new Error(`${label} resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
         }
-      } else {
+        if (attempt.transport !== 'relay') throw new Error(`Whole-file transport không hợp lệ: ${attempt.transport}`);
         const result = await uploadRelay();
-        if (result.status === 208) progress.skipped += 1;
-        else if (result.status >= 200 && result.status < 300) progress.completed += 1;
-        else if (result.status === 503) throw new Error('Laptop đang offline');
-        else throw new Error(`Tunnel ${result.status}: ${result.body}`);
-      }
+        if (result.status === 208) return 'ALREADY_RECEIVED';
+        if (result.status >= 200 && result.status < 300) return 'COMMITTED';
+        if (result.status === 503) throw new Error('Laptop đang offline');
+        throw new Error(`Tunnel ${result.status}: ${result.body}`);
+      };
+
+      const result = await executeMobileUploadPlan(uploadPlan, executeAttempt, {
+        isAborted: () => Boolean(signal?.aborted),
+      });
+      if (result === 'ALREADY_RECEIVED') progress.skipped += 1;
+      else progress.completed += 1;
 
       await markAssetSynced(asset.id);
       await clearAssetFailed(asset.id);
