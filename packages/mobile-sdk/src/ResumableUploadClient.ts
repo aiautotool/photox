@@ -138,7 +138,7 @@ export class ResumableUploadClient {
         'content-type': 'application/octet-stream',
         'x-photox-upload-offset': String(session.acknowledgedBytes),
       }),
-      body: chunk,
+      body: new Uint8Array(chunk).buffer,
     });
     if (response.status === 409) {
       const body = await response.json().catch(() => ({})) as ErrorBody;
