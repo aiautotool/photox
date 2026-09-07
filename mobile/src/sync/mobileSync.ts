@@ -3,6 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { File as ExpoFile } from 'expo-file-system';
 import type { PairedDesktop } from './pairing';
 import { accessHeaders, ensureWorkspaceAccess } from './pairing';
+import { createExpoUploadSource, createMobileResumableClient } from './resumableUpload';
 import { clearAssetFailed, markAssetFailed, markAssetSynced } from './syncLedger';
 
 declare const require: (id: string) => any;
@@ -310,66 +311,95 @@ export async function syncAssetsToLaptop(
     onProgress?.({ ...progress });
     let local: Awaited<ReturnType<typeof materializeAsset>> | null = null;
     try {
+      if (asset.mediaType !== 'photo' && asset.mediaType !== 'video') throw new Error(`Không hỗ trợ đồng bộ loại media ${asset.mediaType}`);
       local = await materializeAsset(asset);
-      progress.currentBytesUploaded = 0;
-      progress.currentBytesTotal = local.size;
-      progress.currentBytesRemaining = local.size;
-      onProgress?.({ ...progress });
-      const upload = async (transport: 'local'|'public'|'relay') => {
-        progress.currentBytesUploaded = 0;
-        progress.currentBytesTotal = local!.size;
-        progress.currentBytesRemaining = local!.size;
+      const reportBytes = (uploadedBytes: number, totalBytes = local!.size) => {
+        const uploaded = Math.min(Math.max(uploadedBytes, 0), totalBytes);
+        progress.currentBytesUploaded = uploaded;
+        progress.currentBytesTotal = totalBytes;
+        progress.currentBytesRemaining = Math.max(totalBytes - uploaded, 0);
         onProgress?.({ ...progress });
-        const task = FileSystem.createUploadTask(transport === 'local'
-          ? localEndpoint(target, '/api/v1/media')
-          : transport === 'public'
-            ? publicEndpoint(target, '/api/v1/media')!
-            : relayEndpoint(target, `/api/v1/upload/${encodeURIComponent(target.desktopId)}`), local!.uri, {
-          httpMethod: 'POST',
-          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-          sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
-          headers: {
-            'content-type': mimeFor(asset),
-            ...(transport !== 'relay'
-              ? workspaceAuthHeaders(target)
-              : { 'x-photosync-pair-token': target.pairToken, ...workspaceAuthHeaders(target) }),
-            'x-photosync-device-id': target.deviceId,
-            'x-photosync-asset-id': asset.id,
-            'x-photosync-filename': encodeURIComponent(asset.filename),
-            'x-photosync-created-at': String(asset.creationTime),
-            'x-photosync-media-type': asset.mediaType,
-            'x-photosync-size': String(local!.size),
-          },
-        }, ({ totalBytesSent, totalBytesExpectedToSend }) => {
-          const total = totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : local!.size;
-          const uploaded = Math.min(totalBytesSent, total);
-          progress.currentBytesUploaded = uploaded;
-          progress.currentBytesTotal = total;
-          progress.currentBytesRemaining = Math.max(total - uploaded, 0);
-          onProgress?.({ ...progress });
-        });
-        const result = await task.uploadAsync();
-        if (!result) throw new Error('Tác vụ tải lên đã bị hủy');
-        return result;
       };
-      let result;
+      reportBytes(0);
+
+      const uploadResumable = async (transport: 'local'|'public') => {
+        const baseUrl = transport === 'local' ? target.receiverUrl : publicEndpoint(target, '');
+        if (!baseUrl) throw new Error(`${transport === 'local' ? 'LAN' : 'Public'} resumable endpoint unavailable`);
+        const client = createMobileResumableClient(target, baseUrl);
+        const source = createExpoUploadSource(local!.uri, local!.size);
+        return await client.upload({
+          assetId: asset.id,
+          filename: asset.filename,
+          mimeType: mimeFor(asset),
+          mediaType: asset.mediaType,
+          createdAt: asset.creationTime,
+          expectedBytes: local!.size,
+        }, source, ({ uploadedBytes, totalBytes }) => reportBytes(uploadedBytes, totalBytes), signal) as { status?: string };
+      };
+
+      const uploadRelay = async () => {
+        reportBytes(0);
+        const task = FileSystem.createUploadTask(
+          relayEndpoint(target, `/api/v1/upload/${encodeURIComponent(target.desktopId)}`),
+          local!.uri,
+          {
+            httpMethod: 'POST',
+            uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+            sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
+            headers: {
+              'content-type': mimeFor(asset),
+              'x-photosync-pair-token': target.pairToken,
+              ...workspaceAuthHeaders(target),
+              'x-photosync-device-id': target.deviceId,
+              'x-photosync-asset-id': asset.id,
+              'x-photosync-filename': encodeURIComponent(asset.filename),
+              'x-photosync-created-at': String(asset.creationTime),
+              'x-photosync-media-type': asset.mediaType,
+              'x-photosync-size': String(local!.size),
+            },
+          },
+          ({ totalBytesSent, totalBytesExpectedToSend }) => {
+            reportBytes(totalBytesSent, totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : local!.size);
+          },
+        );
+        const cancel = () => { void task.cancelAsync().catch(() => undefined); };
+        signal?.addEventListener('abort', cancel, { once: true });
+        try {
+          const result = await task.uploadAsync();
+          if (!result) throw new Error('Tác vụ tải lên đã bị hủy');
+          return result;
+        } finally {
+          signal?.removeEventListener('abort', cancel);
+        }
+      };
+
       if (connection.transport === 'public') {
-        result = await upload('public');
+        const result = await uploadResumable('public');
+        if (result.status === 'ALREADY_RECEIVED') progress.skipped += 1;
+        else if (result.status === 'COMMITTED') progress.completed += 1;
+        else throw new Error(`Public resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
       } else if (connection.transport === 'local') {
         try {
-          result = await upload('local');
-          if (result.status < 200 || result.status >= 300) throw new Error(`LAN ${result.status}: ${result.body}`);
+          const result = await uploadResumable('local');
+          if (result.status === 'ALREADY_RECEIVED') progress.skipped += 1;
+          else if (result.status === 'COMMITTED') progress.completed += 1;
+          else throw new Error(`LAN resumable finalize không hợp lệ: ${result.status || 'UNKNOWN'}`);
         } catch (error) {
           if (signal?.aborted) throw error;
-          result = await upload('relay');
+          const result = await uploadRelay();
+          if (result.status === 208) progress.skipped += 1;
+          else if (result.status >= 200 && result.status < 300) progress.completed += 1;
+          else if (result.status === 503) throw new Error('Laptop đang offline');
+          else throw new Error(`Tunnel ${result.status}: ${result.body}`);
         }
       } else {
-        result = await upload('relay');
+        const result = await uploadRelay();
+        if (result.status === 208) progress.skipped += 1;
+        else if (result.status >= 200 && result.status < 300) progress.completed += 1;
+        else if (result.status === 503) throw new Error('Laptop đang offline');
+        else throw new Error(`Tunnel ${result.status}: ${result.body}`);
       }
-      if (result.status === 208) progress.skipped += 1;
-      else if (result.status >= 200 && result.status < 300) progress.completed += 1;
-      else if (result.status === 503) throw new Error('Laptop đang offline');
-      else throw new Error(`Tunnel ${result.status}: ${result.body}`);
+
       await markAssetSynced(asset.id);
       await clearAssetFailed(asset.id);
     } catch (error) {
