@@ -190,6 +190,6 @@ test('production runtime fails closed when bearer principal has no device bindin
       }),
     });
     assert.equal(response.status, 401);
-    assert.match(await response.text(), /DEVICE_SCOPE_REQUIRED/);
+    assert.deepEqual(await response.json(), { error: 'UNAUTHORIZED' });
   });
 });
