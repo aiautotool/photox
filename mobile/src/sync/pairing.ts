@@ -24,6 +24,8 @@ export type PairedDesktop = {
 
 const KEY = 'photosync.paired-desktop.v1';
 
+type AuthCandidate = { base: string; headers?: Record<string,string> };
+
 function normalizeRelayUrl(value: string) {
   const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Relay URL không hợp lệ');
@@ -34,17 +36,32 @@ function newDeviceId() {
   return `phone_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
 }
 
-function authBaseCandidates(target: PairedDesktop) {
-  const values = [target.receiverUrl, target.publicUrl].filter((value): value is string => Boolean(value));
-  return [...new Set(values.map(value => value.replace(/\/$/, '')))];
+function authBaseCandidates(target: PairedDesktop): AuthCandidate[] {
+  const direct = [target.receiverUrl, target.publicUrl]
+    .filter((value): value is string => Boolean(value))
+    .map(base => ({ base: base.replace(/\/$/, '') }));
+  const relay = target.relayUrl && target.desktopId && target.pairToken ? [{
+    base: target.relayUrl.replace(/\/$/, ''),
+    headers: {
+      'x-photosync-relay-desktop-id': target.desktopId,
+      'x-photosync-pair-token': target.pairToken,
+    },
+  }] : [];
+  const seen = new Set<string>();
+  return [...direct, ...relay].filter(candidate => {
+    const key = `${candidate.base}|${candidate.headers?.['x-photosync-relay-desktop-id'] || 'direct'}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function persist(target: PairedDesktop) {
   await SecureStore.setItemAsync(KEY, JSON.stringify(target), { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY });
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+async function postJson<T>(url: string, body: unknown, headers: Record<string,string> = {}): Promise<T> {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error(`${response.status}:${await response.text().catch(() => '')}`);
   return response.json() as Promise<T>;
 }
@@ -78,18 +95,18 @@ export function parsePairingQr(raw: string): Omit<PairedDesktop, 'deviceId'> {
 export async function exchangeWorkspaceSession(target: PairedDesktop): Promise<PairedDesktop> {
   if (target.v !== 2 || !target.workspaceId || !target.pairingChallenge) return target;
   let lastError: unknown;
-  for (const base of authBaseCandidates(target)) {
+  for (const candidate of authBaseCandidates(target)) {
     try {
       const session = await postJson<{
         accessToken:string; accessExpiresAt:number; refreshToken:string; refreshExpiresAt:number; sessionId:string;
         workspaceId?:string; workspaceRole?:PairedDesktop['workspaceRole'];
-      }>(`${base}/api/v1/auth/pair`, {
+      }>(`${candidate.base}/api/v1/auth/pair`, {
         workspaceId: target.workspaceId,
         pairingChallenge: target.pairingChallenge,
         deviceId: target.deviceId,
         deviceName: target.deviceId,
         platform: 'unknown',
-      });
+      }, candidate.headers);
       const next: PairedDesktop = {
         ...target,
         workspaceId: session.workspaceId || target.workspaceId,
@@ -118,9 +135,9 @@ export async function ensureWorkspaceAccess(target: PairedDesktop): Promise<Pair
     throw new Error('Phiên PhotoX đã hết hạn. Hãy quét lại QR trên máy tính.');
   }
   let lastError: unknown;
-  for (const base of authBaseCandidates(target)) {
+  for (const candidate of authBaseCandidates(target)) {
     try {
-      const session = await postJson<{ accessToken:string; accessExpiresAt:number; sessionId:string; workspaceId?:string; workspaceRole?:PairedDesktop['workspaceRole'] }>(`${base}/api/v1/auth/refresh`, { refreshToken: target.refreshToken });
+      const session = await postJson<{ accessToken:string; accessExpiresAt:number; sessionId:string; workspaceId?:string; workspaceRole?:PairedDesktop['workspaceRole'] }>(`${candidate.base}/api/v1/auth/refresh`, { refreshToken: target.refreshToken }, candidate.headers);
       const next = { ...target, accessToken: session.accessToken, accessExpiresAt: session.accessExpiresAt, sessionId: session.sessionId, workspaceId: session.workspaceId || target.workspaceId, workspaceRole: session.workspaceRole || target.workspaceRole };
       await persist(next);
       Object.assign(target, next);
@@ -158,9 +175,13 @@ export async function loadPairedDesktop(): Promise<PairedDesktop | null> {
 export async function forgetPairedDesktop() {
   const target = await loadPairedDesktop();
   if (target?.sessionId && target.accessToken) {
-    for (const base of authBaseCandidates(target)) {
+    for (const candidate of authBaseCandidates(target)) {
       try {
-        await fetch(`${base}/api/v1/auth/revoke`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${target.accessToken}` }, body: JSON.stringify({ sessionId: target.sessionId }) });
+        await fetch(`${candidate.base}/api/v1/auth/revoke`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${target.accessToken}`, ...candidate.headers },
+          body: JSON.stringify({ sessionId: target.sessionId }),
+        });
         break;
       } catch {}
     }
