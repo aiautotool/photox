@@ -159,13 +159,17 @@ export function createExpoUploadSource(uri: string, size: number): ResumableUplo
   };
 }
 
-export function createMobileResumableClient(target: PairedDesktop, baseUrl: string) {
+export function createMobileResumableClient(
+  target: PairedDesktop,
+  baseUrl: string,
+  extraHeaders: Record<string,string> = {},
+) {
   return new ResumableUploadClient({
     baseUrl,
     sessionStore: new ExpoSecureSessionStore(target),
     getHeaders: async () => {
       await ensureWorkspaceAccess(target);
-      return accessHeaders(target);
+      return { ...accessHeaders(target), ...extraHeaders };
     },
     onUnauthorized: async () => {
       target.accessExpiresAt = 0;
