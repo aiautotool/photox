@@ -48,6 +48,8 @@ let diagnostics: PhysicalResumableAcceptanceProductionDiagnostics = {
   ...disabledCaptureDiagnostics,
 };
 let initializing: Promise<void> | null = null;
+let configuredStateDirectory: string | null = null;
+let configuredReleaseCommitSha: string | undefined;
 
 function releaseCommitShaFromEnvironment(): string | undefined {
   const value = process.env.PHOTOX_RELEASE_COMMIT_SHA?.trim();
@@ -138,6 +140,51 @@ function fromEvaluation(
   };
 }
 
+async function loadDiagnostics(
+  stateDirectory: string,
+  releaseCommitSha: string | undefined,
+): Promise<PhysicalResumableAcceptanceProductionDiagnostics> {
+  const capture = await captureDiagnosticsFromEnvironment(stateDirectory);
+  if (!releaseCommitSha || !/^[0-9a-f]{40}$/i.test(releaseCommitSha)) {
+    return {
+      initialized: true,
+      accepted: false,
+      requiredPlatforms: ['ios', 'android'],
+      acceptedPlatforms: [],
+      blockers: ['PHYSICAL_RESUMABLE_RELEASE_COMMIT_SHA_MISSING'],
+      evidenceCount: 0,
+      persistenceHealthy: true,
+      ...capture,
+    };
+  }
+
+  const normalizedCommitSha = releaseCommitSha.toLowerCase();
+  const store = new PhysicalResumableAcceptanceEvidenceStore(
+    path.join(stateDirectory, 'physical-resumable-acceptance-evidence.json'),
+  );
+  try {
+    const evidence = await store.load();
+    return fromEvaluation(
+      evaluatePhysicalResumableAcceptance(evidence, { releaseCommitSha: normalizedCommitSha }),
+      evidence.length,
+      capture,
+    );
+  } catch (error) {
+    console.error('PhotoX physical resumable acceptance evidence load failed', error);
+    return {
+      initialized: true,
+      accepted: false,
+      releaseCommitSha: normalizedCommitSha,
+      requiredPlatforms: ['ios', 'android'],
+      acceptedPlatforms: [],
+      blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_STORE_UNHEALTHY'],
+      evidenceCount: 0,
+      persistenceHealthy: false,
+      ...capture,
+    };
+  }
+}
+
 /**
  * Loads immutable physical-device resumable evidence for the exact packaged
  * release commit. A missing/invalid release SHA or unreadable ledger always
@@ -152,55 +199,34 @@ export async function initializePhysicalResumableAcceptance(
   stateDirectory: string,
   releaseCommitSha = releaseCommitShaFromEnvironment(),
 ): Promise<void> {
+  configuredStateDirectory = stateDirectory;
+  configuredReleaseCommitSha = releaseCommitSha;
   if (diagnostics.initialized) return;
   if (initializing) return initializing;
   initializing = (async () => {
-    const capture = await captureDiagnosticsFromEnvironment(stateDirectory);
-    if (!releaseCommitSha || !/^[0-9a-f]{40}$/i.test(releaseCommitSha)) {
-      diagnostics = {
-        initialized: true,
-        accepted: false,
-        requiredPlatforms: ['ios', 'android'],
-        acceptedPlatforms: [],
-        blockers: ['PHYSICAL_RESUMABLE_RELEASE_COMMIT_SHA_MISSING'],
-        evidenceCount: 0,
-        persistenceHealthy: true,
-        ...capture,
-      };
-      return;
-    }
-
-    const normalizedCommitSha = releaseCommitSha.toLowerCase();
-    const store = new PhysicalResumableAcceptanceEvidenceStore(
-      path.join(stateDirectory, 'physical-resumable-acceptance-evidence.json'),
-    );
-    try {
-      const evidence = await store.load();
-      diagnostics = fromEvaluation(
-        evaluatePhysicalResumableAcceptance(evidence, { releaseCommitSha: normalizedCommitSha }),
-        evidence.length,
-        capture,
-      );
-    } catch (error) {
-      console.error('PhotoX physical resumable acceptance evidence load failed', error);
-      diagnostics = {
-        initialized: true,
-        accepted: false,
-        releaseCommitSha: normalizedCommitSha,
-        requiredPlatforms: ['ios', 'android'],
-        acceptedPlatforms: [],
-        blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_STORE_UNHEALTHY'],
-        evidenceCount: 0,
-        persistenceHealthy: false,
-        ...capture,
-      };
-    }
+    diagnostics = await loadDiagnostics(stateDirectory, releaseCommitSha);
   })();
   try {
     await initializing;
   } finally {
     initializing = null;
   }
+}
+
+/**
+ * Reloads the read-only physical acceptance snapshot from durable evidence and
+ * server-authority state. Production capture calls this after evidence is
+ * appended so the existing Desktop/Web operations polling sees the new state
+ * without restarting Desktop. Missing configuration remains a safe no-op.
+ */
+export async function refreshPhysicalResumableAcceptance(
+  stateDirectory = configuredStateDirectory ?? undefined,
+  releaseCommitSha = configuredReleaseCommitSha,
+): Promise<void> {
+  if (!stateDirectory) return;
+  configuredStateDirectory = stateDirectory;
+  configuredReleaseCommitSha = releaseCommitSha;
+  diagnostics = await loadDiagnostics(stateDirectory, releaseCommitSha);
 }
 
 export function physicalResumableAcceptanceDiagnostics(): PhysicalResumableAcceptanceProductionDiagnostics {
@@ -226,4 +252,6 @@ export function resetPhysicalResumableAcceptanceForTests(): void {
     ...disabledCaptureDiagnostics,
   };
   initializing = null;
+  configuredStateDirectory = null;
+  configuredReleaseCommitSha = undefined;
 }
