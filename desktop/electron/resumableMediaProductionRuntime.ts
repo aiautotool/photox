@@ -5,16 +5,21 @@ import { PhysicalResumableAcceptanceCaptureWorkflow } from './physicalResumableA
 import { PhysicalResumableAcceptanceEvidenceStore } from './physicalResumableAcceptanceEvidenceStore.js';
 import { PhysicalResumableAcceptanceIngestion } from './physicalResumableAcceptanceIngestion.js';
 import { PhysicalResumableServerAuthorityLedger } from './physicalResumableServerAuthority.js';
+import type { ResumableMediaSession } from './resumableMediaIngest.js';
 import { createResumableMediaProductionCommit, type ResumableCommittedMediaRow, type ResumableMediaProductionCommitResult } from './resumableMediaProductionCommit.js';
 import { createResumableMediaReceiverRuntime, type ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
 import { createWorkspaceResumableQuotaHooks } from './resumableQuotaHooks.js';
 
 type WorkspaceQuotaRepository = Parameters<typeof createWorkspaceResumableQuotaHooks>[0];
+type WorkspaceAuthorityRepository = WorkspaceQuotaRepository & {
+  getUsage?(workspaceId: string): { managedStorageBytes: number };
+};
 type SharedIngestCoordinator = ReturnType<typeof createMediaIngestCommitCoordinator>;
 
 export type ResumablePhysicalAcceptanceOptions = {
   stateDirectory: string;
-  counters(workspaceId: string): Promise<{ quotaBytes: number; catalogRows: number; observedAt: string }>;
+  releaseCommitSha?: string;
+  counters(workspaceId: string, session: ResumableMediaSession): Promise<{ quotaBytes: number; catalogRows: number; observedAt: string }>;
 };
 
 export type ResumableMediaProductionRuntimeOptions = {
@@ -23,7 +28,7 @@ export type ResumableMediaProductionRuntimeOptions = {
   incomingRoot: string;
   journalDir: string;
   authorizeRequest(req: IncomingMessage, required: ['media:write']): Promise<{ subject?: string; workspaceId?: string; deviceId?: string }>;
-  workspaces: WorkspaceQuotaRepository;
+  workspaces: WorkspaceAuthorityRepository;
   exists(input: { workspaceId: string; key: string }): Promise<boolean>;
   ingest(row: ResumableCommittedMediaRow): Promise<void>;
   onCommitted?(result: ResumableMediaProductionCommitResult): Promise<void> | void;
@@ -53,6 +58,42 @@ function managedReceiverRoot(rootDir: string, incomingRoot: string) {
   return path.join(incoming, 'resumable');
 }
 
+function normalizedReleaseCommitSha(value: string | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(normalized)) throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_RELEASE_SHA_INVALID');
+  return normalized;
+}
+
+/**
+ * Resolves the production-only real-device acceptance mode. Normal Desktop
+ * startup stays disabled unless the operator explicitly selects `real-device`.
+ * Enabling it without an exact release SHA or workspace usage authority fails
+ * closed instead of silently accepting weaker evidence.
+ */
+export function controlledPhysicalAcceptanceFromEnvironment(
+  options: Pick<ResumableMediaProductionRuntimeOptions, 'incomingRoot' | 'workspaces' | 'exists' | 'now'>,
+  env: NodeJS.ProcessEnv = process.env,
+): ResumablePhysicalAcceptanceOptions | undefined {
+  const mode = String(env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE || '').trim().toLowerCase();
+  if (!mode) return undefined;
+  if (mode !== 'real-device') throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_MODE_INVALID');
+  const releaseCommitSha = normalizedReleaseCommitSha(env.PHOTOX_RELEASE_COMMIT_SHA);
+  if (typeof options.workspaces.getUsage !== 'function') throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_USAGE_AUTHORITY_REQUIRED');
+  const now = options.now ?? Date.now;
+  return {
+    stateDirectory: path.dirname(path.resolve(options.incomingRoot)),
+    releaseCommitSha,
+    counters: async (workspaceId, session) => {
+      const usage = options.workspaces.getUsage!(workspaceId);
+      const quotaBytes = Number(usage?.managedStorageBytes);
+      if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_USAGE_INVALID');
+      const key = `${session.deviceId}:${session.assetId}`;
+      const catalogRows = await options.exists({ workspaceId, key }) ? 1 : 0;
+      return { quotaBytes, catalogRows, observedAt: new Date(now()).toISOString() };
+    },
+  };
+}
+
 /**
  * Wires the durable resumable protocol to PhotoX's production authorities.
  *
@@ -62,10 +103,11 @@ function managedReceiverRoot(rootDir: string, incomingRoot: string) {
  * resumable uploads on the same process-wide ingest coordinator while both
  * protocols coexist during the mobile migration period.
  *
- * Physical acceptance capture is opt-in. When supplied it uses an independent
- * durable server ledger plus the existing append-only evidence ledger; mobile
- * can submit chronology/identity only and cannot provide authoritative offset,
- * quota, catalog or verification observations.
+ * Physical acceptance capture is opt-in. When supplied explicitly, or enabled
+ * through the controlled real-device environment mode, it uses an independent
+ * durable server ledger plus the append-only evidence ledger. Mobile can submit
+ * chronology/identity only and cannot provide authoritative offset, quota,
+ * catalog or verification observations.
  */
 export function createResumableMediaProductionRuntime(
   options: ResumableMediaProductionRuntimeOptions,
@@ -81,21 +123,24 @@ export function createResumableMediaProductionRuntime(
     now: options.now,
   });
 
-  const authority = options.physicalAcceptance
+  const physicalAcceptance = options.physicalAcceptance
+    ?? controlledPhysicalAcceptanceFromEnvironment(options);
+  const authority = physicalAcceptance
     ? new PhysicalResumableServerAuthorityLedger(
-        path.join(options.physicalAcceptance.stateDirectory, 'physical-resumable-server-authority.json'),
-        { counters: options.physicalAcceptance.counters },
+        path.join(physicalAcceptance.stateDirectory, 'physical-resumable-server-authority.json'),
+        { counters: physicalAcceptance.counters },
         options.now,
       )
     : undefined;
-  const acceptanceIngestion = authority && options.physicalAcceptance
+  const acceptanceIngestion = authority && physicalAcceptance
     ? new PhysicalResumableAcceptanceIngestion(
         authority,
         new PhysicalResumableAcceptanceCaptureWorkflow(
           new PhysicalResumableAcceptanceEvidenceStore(
-            path.join(options.physicalAcceptance.stateDirectory, 'physical-resumable-acceptance-evidence.json'),
+            path.join(physicalAcceptance.stateDirectory, 'physical-resumable-acceptance-evidence.json'),
           ),
         ),
+        physicalAcceptance.releaseCommitSha,
       )
     : undefined;
 
