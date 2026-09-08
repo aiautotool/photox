@@ -54,6 +54,31 @@ test('renderer account projection exposes authoritative quota and effective writ
   assert.equal('workspaceId' in info,false);
 });
 
+test('renderer verification proves quota-ratio-reserve formula from authoritative Google Drive quota',()=>{
+  const saved=account();
+  const runtime=driveRuntimeAllocation({account:saved,email:'owner@example.com',quota:{limit:120*GIB,usage:20*GIB},appUsedBytes:5*GIB});
+  const info=rendererDriveAccountInfo({account:saved,email:'owner@example.com',runtime});
+  assert.equal(info.allocation.allocationLimitBytes,80*GIB);
+  assert.ok((info.allocation.allocationLimitBytes||0)>10*GIB,'allocation must not be capped at a fixed 10 GiB');
+  assert.equal(info.allocation.verification.source,'google-drive-about.storageQuota');
+  assert.equal(info.allocation.verification.status,'verified');
+  assert.deepEqual(info.allocation.verification.blockers,[]);
+  assert.equal(info.allocation.verification.expectedAllocationLimitBytes,80*GIB);
+  assert.equal(info.allocation.verification.expectedProviderRemainingAfterReserveBytes,100*GIB-DEFAULT_PROVIDER_SAFETY_RESERVE_BYTES);
+  assert.equal(info.allocation.verification.expectedAvailableBytes,75*GIB);
+});
+
+test('renderer verification follows custom per-account ratio and actual provider remaining bytes',()=>{
+  const saved=account({maxUsageRatio:0.9,safetyReserveBytes:2*GIB});
+  const runtime=driveRuntimeAllocation({account:saved,email:'owner@example.com',quota:{limit:100*GIB,usage:96*GIB},appUsedBytes:1*GIB});
+  const info=rendererDriveAccountInfo({account:saved,email:'owner@example.com',runtime});
+  assert.equal(info.allocation.allocationLimitBytes,90*GIB);
+  assert.equal(info.allocation.providerRemainingAfterReserveBytes,2*GIB);
+  assert.equal(info.allocation.availableBytes,2*GIB);
+  assert.equal(info.allocation.verification.status,'verified');
+  assert.equal(info.allocation.verification.expectedAvailableBytes,2*GIB);
+});
+
 test('unavailable renderer account keeps persisted policy without inventing provider quota',()=>{
   const saved=account({maxUsageRatio:0.8,safetyReserveBytes:2*GIB});
   const info=rendererDriveAccountInfo({account:saved});
@@ -64,6 +89,8 @@ test('unavailable renderer account keeps persisted policy without inventing prov
   assert.equal(info.allocation.allocationRatio,0.8);
   assert.equal(info.allocation.safetyReserveBytes,2*GIB);
   assert.equal(info.allocation.availableBytes,0);
+  assert.equal(info.allocation.verification.status,'unavailable');
+  assert.deepEqual(info.allocation.verification.blockers,['AUTHORITATIVE_GOOGLE_DRIVE_QUOTA_UNAVAILABLE']);
 });
 
 test('runtime allocation normalizes malformed quota counters fail closed',()=>{
@@ -72,4 +99,6 @@ test('runtime allocation normalizes malformed quota counters fail closed',()=>{
   assert.equal(result.storage.providerFreeBytes,0);
   assert.equal(result.storage.appUsedBytes,0);
   assert.equal(result.snapshot.availableBytes,0);
+  const info=rendererDriveAccountInfo({account:account(),runtime:result});
+  assert.equal(info.allocation.verification.status,'unavailable');
 });
