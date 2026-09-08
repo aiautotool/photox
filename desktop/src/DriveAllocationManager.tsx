@@ -5,6 +5,7 @@ import { allocationPercentFromRatio, buildDriveAllocationMutation, defaultDriveA
 import './DriveAllocationManager.css';
 
 type DraftMap=Record<string,DriveAllocationDraft>;
+type DriveAllocationVerification={source:'google-drive-about.storageQuota';status:'verified'|'unavailable';blockers:string[];expectedAllocationLimitBytes:number|null;expectedProviderRemainingAfterReserveBytes:number;expectedAvailableBytes:number};
 
 function formatBytes(bytes:number|null|undefined){
   if(bytes==null||!Number.isFinite(bytes))return 'Không khả dụng';
@@ -17,6 +18,10 @@ function formatBytes(bytes:number|null|undefined){
 
 function draftFor(account:DriveAccount):DriveAllocationDraft{
   return {allocationPercent:allocationPercentFromRatio(account.allocation.allocationRatio),safetyReserveMiB:reserveMiBFromBytes(account.allocation.safetyReserveBytes)};
+}
+
+function verificationOf(account:DriveAccount):DriveAllocationVerification|undefined{
+  return (account.allocation as typeof account.allocation&{verification?:DriveAllocationVerification}).verification;
 }
 
 export function DriveAllocationManager(){
@@ -72,9 +77,10 @@ export function DriveAllocationManager(){
     {error&&<div className="drive-allocation-feedback error"><b>Không thể cập nhật</b><span>{error}</span></div>}
     {notice&&<div className="drive-allocation-feedback success">{notice}</div>}
     {loading&&!accounts.length?<div className="drive-allocation-empty">Đang đọc quota và policy từ PhotoX…</div>:!accounts.length?<div className="drive-allocation-empty">Chưa có Google Drive. Hãy thêm tài khoản ở phía trên trước khi cấu hình phân bổ.</div>:<div className="drive-allocation-list">{accounts.map(account=>{
-      const draft=drafts[account.id]??draftFor(account);const allocation=account.allocation;const percent=Math.max(0,Math.min(100,draft.allocationPercent));
+      const draft=drafts[account.id]??draftFor(account);const allocation=account.allocation;const percent=Math.max(0,Math.min(100,draft.allocationPercent));const verification=verificationOf(account);
       return <article className="drive-allocation-card" key={account.id}>
         <div className="drive-allocation-account"><div className="drive-google-mark">G</div><div><b>{account.email}</b><span className={account.status==='ready'?'ready':'unavailable'}>{account.status==='ready'?'Quota Google đã đồng bộ':'Quota Google chưa khả dụng'}</span></div></div>
+        <div className={`drive-allocation-verification ${verification?.status==='verified'?'verified':'unavailable'}`}><b>{verification?.status==='verified'?'✓ Allocation đã đối chiếu authoritative quota':'Allocation chưa thể xác minh'}</b><span>{verification?.status==='verified'?'Nguồn: Google Drive about.storageQuota · ratio + actual remaining bytes + safety reserve khớp runtime.':verification?.blockers?.join(', ')||'Chưa nhận được authoritative Google quota.'}</span></div>
         <div className="drive-allocation-metrics">
           <div><span>Quota tổng Google</span><b>{formatBytes(allocation.providerTotalBytes)}</b></div>
           <div><span>Google còn trống</span><b>{formatBytes(allocation.providerFreeBytes)}</b></div>
