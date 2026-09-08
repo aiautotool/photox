@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   evaluatePhysicalResumableAcceptance,
@@ -14,6 +15,26 @@ export type PhysicalResumableAcceptanceProductionDiagnostics = {
   blockers: string[];
   evidenceCount: number;
   persistenceHealthy: boolean;
+  captureMode: 'disabled' | 'real-device' | 'invalid';
+  captureEnabled: boolean;
+  serverAuthorityLedgerInitialized: boolean;
+  serverAuthorityLedgerHealthy: boolean;
+  serverAuthorityRecordCount: number;
+  captureBlockers: string[];
+};
+
+type CaptureDiagnostics = Pick<
+  PhysicalResumableAcceptanceProductionDiagnostics,
+  'captureMode' | 'captureEnabled' | 'serverAuthorityLedgerInitialized' | 'serverAuthorityLedgerHealthy' | 'serverAuthorityRecordCount' | 'captureBlockers'
+>;
+
+const disabledCaptureDiagnostics: CaptureDiagnostics = {
+  captureMode: 'disabled',
+  captureEnabled: false,
+  serverAuthorityLedgerInitialized: false,
+  serverAuthorityLedgerHealthy: true,
+  serverAuthorityRecordCount: 0,
+  captureBlockers: [],
 };
 
 let diagnostics: PhysicalResumableAcceptanceProductionDiagnostics = {
@@ -24,6 +45,7 @@ let diagnostics: PhysicalResumableAcceptanceProductionDiagnostics = {
   blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_NOT_INITIALIZED'],
   evidenceCount: 0,
   persistenceHealthy: false,
+  ...disabledCaptureDiagnostics,
 };
 let initializing: Promise<void> | null = null;
 
@@ -32,9 +54,76 @@ function releaseCommitShaFromEnvironment(): string | undefined {
   return value && /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : undefined;
 }
 
+function validAuthorityRecord(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const nonEmpty = (input: unknown) => typeof input === 'string' && input.trim().length > 0;
+  return row.version === 1
+    && nonEmpty(row.workspaceId)
+    && nonEmpty(row.deviceId)
+    && nonEmpty(row.assetId)
+    && nonEmpty(row.sessionId)
+    && typeof row.expectedBytes === 'number'
+    && Number.isSafeInteger(row.expectedBytes)
+    && row.expectedBytes > 0
+    && Array.isArray(row.status);
+}
+
+async function captureDiagnosticsFromEnvironment(stateDirectory: string): Promise<CaptureDiagnostics> {
+  const rawMode = String(process.env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE || '').trim().toLowerCase();
+  if (!rawMode) return { ...disabledCaptureDiagnostics, captureBlockers: [] };
+  if (rawMode !== 'real-device') {
+    return {
+      captureMode: 'invalid',
+      captureEnabled: false,
+      serverAuthorityLedgerInitialized: false,
+      serverAuthorityLedgerHealthy: false,
+      serverAuthorityRecordCount: 0,
+      captureBlockers: ['PHYSICAL_RESUMABLE_ACCEPTANCE_MODE_INVALID'],
+    };
+  }
+
+  const filePath = path.join(stateDirectory, 'physical-resumable-server-authority.json');
+  try {
+    const value = JSON.parse(await fs.readFile(filePath, 'utf8')) as { version?: unknown; records?: unknown };
+    if (!value || value.version !== 1 || !Array.isArray(value.records) || !value.records.every(validAuthorityRecord)) {
+      throw new Error('PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_INVALID');
+    }
+    return {
+      captureMode: 'real-device',
+      captureEnabled: true,
+      serverAuthorityLedgerInitialized: true,
+      serverAuthorityLedgerHealthy: true,
+      serverAuthorityRecordCount: value.records.length,
+      captureBlockers: [],
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return {
+        captureMode: 'real-device',
+        captureEnabled: true,
+        serverAuthorityLedgerInitialized: false,
+        serverAuthorityLedgerHealthy: true,
+        serverAuthorityRecordCount: 0,
+        captureBlockers: ['PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_NOT_INITIALIZED'],
+      };
+    }
+    console.error('PhotoX physical resumable server authority ledger inspection failed', error);
+    return {
+      captureMode: 'real-device',
+      captureEnabled: true,
+      serverAuthorityLedgerInitialized: true,
+      serverAuthorityLedgerHealthy: false,
+      serverAuthorityRecordCount: 0,
+      captureBlockers: ['PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_UNHEALTHY'],
+    };
+  }
+}
+
 function fromEvaluation(
   evaluation: PhysicalResumableAcceptanceEvaluation,
   evidenceCount: number,
+  capture: CaptureDiagnostics,
 ): PhysicalResumableAcceptanceProductionDiagnostics {
   return {
     initialized: true,
@@ -45,6 +134,7 @@ function fromEvaluation(
     blockers: evaluation.blockers,
     evidenceCount,
     persistenceHealthy: true,
+    ...capture,
   };
 }
 
@@ -52,6 +142,11 @@ function fromEvaluation(
  * Loads immutable physical-device resumable evidence for the exact packaged
  * release commit. A missing/invalid release SHA or unreadable ledger always
  * fails closed; there is deliberately no mutable acceptance toggle.
+ *
+ * The same read-only snapshot also reports whether controlled real-device
+ * capture is enabled and whether its independent server-authority ledger can be
+ * parsed. It never exposes ledger paths, workspace/device/media identities, or
+ * any mutable control.
  */
 export async function initializePhysicalResumableAcceptance(
   stateDirectory: string,
@@ -60,6 +155,7 @@ export async function initializePhysicalResumableAcceptance(
   if (diagnostics.initialized) return;
   if (initializing) return initializing;
   initializing = (async () => {
+    const capture = await captureDiagnosticsFromEnvironment(stateDirectory);
     if (!releaseCommitSha || !/^[0-9a-f]{40}$/i.test(releaseCommitSha)) {
       diagnostics = {
         initialized: true,
@@ -69,6 +165,7 @@ export async function initializePhysicalResumableAcceptance(
         blockers: ['PHYSICAL_RESUMABLE_RELEASE_COMMIT_SHA_MISSING'],
         evidenceCount: 0,
         persistenceHealthy: true,
+        ...capture,
       };
       return;
     }
@@ -82,6 +179,7 @@ export async function initializePhysicalResumableAcceptance(
       diagnostics = fromEvaluation(
         evaluatePhysicalResumableAcceptance(evidence, { releaseCommitSha: normalizedCommitSha }),
         evidence.length,
+        capture,
       );
     } catch (error) {
       console.error('PhotoX physical resumable acceptance evidence load failed', error);
@@ -94,6 +192,7 @@ export async function initializePhysicalResumableAcceptance(
         blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_STORE_UNHEALTHY'],
         evidenceCount: 0,
         persistenceHealthy: false,
+        ...capture,
       };
     }
   })();
@@ -110,6 +209,7 @@ export function physicalResumableAcceptanceDiagnostics(): PhysicalResumableAccep
     requiredPlatforms: [...diagnostics.requiredPlatforms],
     acceptedPlatforms: [...diagnostics.acceptedPlatforms],
     blockers: [...diagnostics.blockers],
+    captureBlockers: [...diagnostics.captureBlockers],
   };
 }
 
@@ -123,6 +223,7 @@ export function resetPhysicalResumableAcceptanceForTests(): void {
     blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_NOT_INITIALIZED'],
     evidenceCount: 0,
     persistenceHealthy: false,
+    ...disabledCaptureDiagnostics,
   };
   initializing = null;
 }
