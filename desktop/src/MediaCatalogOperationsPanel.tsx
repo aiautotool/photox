@@ -38,6 +38,11 @@ function formatTimestamp(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function formatCommit(value?: string) {
+  if (!value) return 'Chưa xác định';
+  return value.length > 12 ? value.slice(0, 12) : value;
+}
+
 export function MediaCatalogOperationsPanel() {
   const bridge = useMemo(() => resolveDesktopBridge(), []);
   const [open, setOpen] = useState(false);
@@ -107,6 +112,21 @@ export function MediaCatalogOperationsPanel() {
             {row('Accepted / duplicate / rejected', `${compatibility.accepted} / ${compatibility.duplicate} / ${compatibility.rejected}`)}
             {row('Observation window', `${compatibility.observationProgressPercent}%`)}
             {row('Physical resumable acceptance', compatibility.physicalDeviceResumableAccepted ? 'Đã xác nhận' : 'CHƯA XÁC NHẬN')}
+            <div style={{marginTop:12,padding:'12px 14px',border:'1px solid #31475b',borderRadius:12,background:'#09131d'}}>
+              <b>Physical-device evidence</b>
+              <div style={{marginTop:8}}>
+                {row('Evidence store', compatibility.physicalEvidenceInitialized
+                  ? compatibility.physicalEvidencePersistenceHealthy ? 'Healthy' : 'Không healthy'
+                  : 'Chưa khởi tạo')}
+                {row('Release commit', formatCommit(compatibility.physicalReleaseCommitSha))}
+                {row('Evidence records', compatibility.physicalEvidenceCount.toLocaleString())}
+                {row('Required platforms', compatibility.physicalRequiredPlatforms.join(', ') || 'Không có')}
+                {row('Accepted platforms', compatibility.physicalAcceptedPlatforms.join(', ') || 'Chưa có')}
+              </div>
+              {compatibility.physicalEvidenceBlockers.length > 0 && <ul style={{margin:'8px 0 0',paddingLeft:18,fontSize:12,opacity:.75}}>
+                {compatibility.physicalEvidenceBlockers.map(blocker => <li key={blocker} style={{marginTop:4}}>{blocker}</li>)}
+              </ul>}
+            </div>
             {compatibility.initialized && <>
               {row('Observed since', formatTimestamp(compatibility.observedSince))}
               {row('Last compatibility request', formatTimestamp(compatibility.lastObservedAt))}
