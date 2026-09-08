@@ -64,6 +64,7 @@ type AcceptanceState = {
 };
 
 const STORE_KEY = 'photox.physical-resumable-acceptance.v1';
+const runPresence = new Map<string, boolean>();
 
 function nowIso() {
   return new Date().toISOString();
@@ -113,9 +114,14 @@ async function saveState(state: AcceptanceState) {
 }
 
 async function mutateRun(assetId: string, mutate: (run: PendingAcceptanceRun) => void): Promise<PendingAcceptanceRun | null> {
+  if (runPresence.get(assetId) === false) return null;
   const state = await loadState();
   const run = state.runs[assetId];
-  if (!run) return null;
+  if (!run) {
+    runPresence.set(assetId, false);
+    return null;
+  }
+  runPresence.set(assetId, true);
   mutate(run);
   await saveState(state);
   return run;
@@ -140,6 +146,7 @@ export async function beginPhysicalResumableAcceptanceRun(config: PhysicalResuma
     latestUploadedBytes: 0,
   };
   await saveState(state);
+  runPresence.set(config.assetId, true);
 }
 
 /** Test harness should call this immediately after intentionally cutting the network. */
@@ -229,9 +236,14 @@ export async function submitPhysicalResumableAcceptanceIfComplete(
   assetId: string,
   submit: (report: MobilePhysicalResumableAcceptanceReport) => Promise<void>,
 ): Promise<boolean> {
+  if (runPresence.get(assetId) === false) return false;
   const state = await loadState();
   const run = state.runs[assetId];
-  if (!run) return false;
+  if (!run) {
+    runPresence.set(assetId, false);
+    return false;
+  }
+  runPresence.set(assetId, true);
   if (!run.completedAt) run.completedAt = nowIso();
   const report = completeReport(run);
   if (!report) {
@@ -240,6 +252,7 @@ export async function submitPhysicalResumableAcceptanceIfComplete(
   }
   await submit(report);
   delete state.runs[assetId];
+  runPresence.set(assetId, false);
   await saveState(state);
   return true;
 }
