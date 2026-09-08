@@ -4,6 +4,16 @@ import { buildLegacyWholeFileOperationsView, type LegacyWholeFileCompatibilityDi
 
 const healthyMonitoring: LegacyWholeFileCompatibilityDiagnostics = {
   initialized: true,
+  physicalResumableAcceptance: {
+    initialized: true,
+    accepted: false,
+    releaseCommitSha: 'a'.repeat(40),
+    requiredPlatforms: ['ios', 'android'],
+    acceptedPlatforms: ['ios'],
+    blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_MISSING_ANDROID'],
+    evidenceCount: 2,
+    persistenceHealthy: true,
+  },
   snapshot: {
     observedSince: '2026-09-01T00:00:00.000Z',
     observedUntil: '2026-09-05T00:00:00.000Z',
@@ -43,6 +53,18 @@ test('operations view exposes coarse compatibility counts and readable blockers'
   assert.ok(view.blockerLabels.some(label => label.includes('whole-file compatibility route')));
 });
 
+test('operations view exposes evidence-derived physical acceptance status read-only', () => {
+  const view = buildLegacyWholeFileOperationsView(healthyMonitoring);
+  assert.equal(view.physicalEvidenceInitialized, true);
+  assert.equal(view.physicalEvidencePersistenceHealthy, true);
+  assert.equal(view.physicalEvidenceCount, 2);
+  assert.equal(view.physicalReleaseCommitSha, 'a'.repeat(40));
+  assert.deepEqual(view.physicalRequiredPlatforms, ['ios', 'android']);
+  assert.deepEqual(view.physicalAcceptedPlatforms, ['ios']);
+  assert.deepEqual(view.physicalEvidenceBlockers, ['PHYSICAL_RESUMABLE_EVIDENCE_MISSING_ANDROID']);
+  assert.equal(view.physicalDeviceResumableAccepted, false);
+});
+
 test('operations view fails closed when telemetry runtime is not initialized', () => {
   const view = buildLegacyWholeFileOperationsView({
     initialized: false,
@@ -56,6 +78,8 @@ test('operations view fails closed when telemetry runtime is not initialized', (
   assert.equal(view.persistenceHealthy, false);
   assert.equal(view.total, 0);
   assert.equal(view.physicalDeviceResumableAccepted, false);
+  assert.equal(view.physicalEvidenceInitialized, false);
+  assert.equal(view.physicalEvidenceCount, 0);
   assert.deepEqual(view.blockerLabels, ['Telemetry chưa được khởi tạo']);
 });
 
@@ -84,6 +108,16 @@ test('operations view reports ready only when runtime readiness is authoritative
   const diagnostics: LegacyWholeFileCompatibilityDiagnostics = {
     ...healthyMonitoring,
     initialized: true,
+    physicalResumableAcceptance: {
+      initialized: true,
+      accepted: true,
+      releaseCommitSha: 'a'.repeat(40),
+      requiredPlatforms: ['ios', 'android'],
+      acceptedPlatforms: ['ios', 'android'],
+      blockers: [],
+      evidenceCount: 2,
+      persistenceHealthy: true,
+    },
     snapshot: { ...healthyMonitoring.snapshot, total: 0, byAuthMode: { bearer: 0, 'pair-code': 0, 'pairing-challenge': 0 }, byOutcome: { accepted: 0, duplicate: 0, rejected: 0 } },
     deprecationReadiness: {
       ready: true,
@@ -99,4 +133,5 @@ test('operations view reports ready only when runtime readiness is authoritative
   assert.equal(view.status, 'ready');
   assert.equal(view.observationProgressPercent, 100);
   assert.deepEqual(view.blockers, []);
+  assert.deepEqual(view.physicalAcceptedPlatforms, ['ios', 'android']);
 });
