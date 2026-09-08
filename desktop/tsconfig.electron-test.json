@@ -17,6 +17,8 @@
     "electron/driveAccountPolicyStore.test.ts",
     "electron/driveAllocationAcceptance.ts",
     "electron/driveAllocationAcceptance.test.ts",
+    "electron/driveAllocationAcceptanceRuntime.ts",
+    "electron/driveAllocationAcceptanceRuntime.test.ts",
     "electron/driveAllocationDesktopTransport.ts",
     "electron/driveAllocationPolicyService.ts",
     "electron/driveAllocationPolicyService.test.ts",
