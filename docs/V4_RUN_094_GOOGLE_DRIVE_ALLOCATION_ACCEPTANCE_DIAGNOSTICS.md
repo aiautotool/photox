@@ -18,6 +18,7 @@ PhotoX must never apply a fixed 10 GB cap. The default allocation remains two th
 - Verification fails closed as unavailable when authoritative total quota is unavailable.
 - Added shared Desktop/Web UI status on each Google Drive account. The UI shows whether the current allocation has been verified against authoritative Google quota and never exposes OAuth tokens, workspace identifiers, session data, or provider credentials.
 - Existing policy controls remain backed by the real workspace policy store; no mock controls were added.
+- Kept the renderer diagnostics field optional at the TypeScript compatibility boundary so older fixtures/callers remain valid; production runtime projections still always emit the verification object.
 
 ## Regression coverage
 
@@ -25,6 +26,20 @@ PhotoX must never apply a fixed 10 GB cap. The default allocation remains two th
 - Custom per-account ratio remains authoritative.
 - When provider free space is the tighter constraint, effective writable bytes are bounded by `providerFreeBytes - safetyReserveBytes` even when the ratio allowance is much larger.
 - Missing/malformed authoritative quota remains fail-closed and does not invent provider capacity.
+
+## Validation
+
+CI run 1074 exposed a TypeScript compatibility regression in an existing `DriveAllocationPolicyService` test fixture because the new renderer verification field was initially required. The contract was corrected to make that diagnostics extension optional for callers while preserving unconditional production emission, and the regression tests were updated to assert the production projection explicitly.
+
+Code HEAD `24967741bb36a0df2cbbb455c6931b948c7dc863` then passed CI run 1079 (`34223211813`) completely:
+
+- dependency install: PASS
+- repository unit/integration tests: PASS
+- TypeScript typecheck: PASS
+- production build: PASS
+- built Desktop renderer smoke: PASS
+- Electron directory package: PASS
+- packaged Desktop application smoke: PASS
 
 ## Production acceptance status
 
