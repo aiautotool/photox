@@ -2,14 +2,27 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import type { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
 import { ResumableFinalizeLedger } from './resumableFinalizeLedger.js';
-import { ResumableMediaIngestStore } from './resumableMediaIngest.js';
+import { ResumableMediaIngestStore, type ResumableMediaSession } from './resumableMediaIngest.js';
 import {
   createResumableMediaIngestLifecycle,
   type ResumableIngestCommitInput,
   type ResumableIngestPrincipal,
   type ResumableQuotaReservationHooks,
 } from './resumableMediaIngestLifecycle.js';
-import { createResumableMediaIngestHttpHandler } from './resumableMediaIngestHttp.js';
+import {
+  createResumableMediaIngestHttpHandler,
+  type ResumableAcceptanceHttpIngestion,
+} from './resumableMediaIngestHttp.js';
+
+export type ResumableAcceptanceAuthorityRecorder = {
+  sessionCreated(principal: ResumableIngestPrincipal, session: ResumableMediaSession): Promise<void>;
+  statusObserved(principal: ResumableIngestPrincipal, session: ResumableMediaSession): Promise<void>;
+  finalized(
+    principal: ResumableIngestPrincipal,
+    session: ResumableMediaSession,
+    result: { state?: 'COMMITTED' | 'ALREADY_RECEIVED' },
+  ): Promise<void>;
+};
 
 export type ResumableMediaReceiverRuntimeOptions<T> = {
   rootDir: string;
@@ -18,12 +31,15 @@ export type ResumableMediaReceiverRuntimeOptions<T> = {
   commit(input: ResumableIngestCommitInput): Promise<T>;
   quota: ResumableQuotaReservationHooks;
   coordinator?: ReturnType<typeof createMediaIngestCommitCoordinator>;
+  acceptanceIngestion?: ResumableAcceptanceHttpIngestion;
+  acceptanceAuthority?: ResumableAcceptanceAuthorityRecorder;
   maxChunkBytes?: number;
   maxJsonBytes?: number;
   sessionTtlMs?: number;
   cleanupIntervalMs?: number;
   now?: () => number;
   onCleanupError?: (error: unknown) => void;
+  onAcceptanceAuthorityError?: (error: unknown) => void;
 };
 
 export type ResumableMediaReceiverRuntime = {
@@ -47,7 +63,9 @@ function positiveSafeInteger(value: number | undefined, fallback: number, code: 
  * The caller owns application-specific authorization and final media commit logic.
  * This runtime owns durable upload-session state, authoritative byte offsets,
  * durable media-finalize ownership, quota-reservation lifecycle, HTTP routing and
- * periodic expired-session cleanup.
+ * periodic expired-session cleanup. Optional acceptance authority observation is
+ * best-effort for normal ingest: evidence persistence failures can block physical
+ * acceptance, but must never make an otherwise valid media upload fail.
  */
 export function createResumableMediaReceiverRuntime<T>(options: ResumableMediaReceiverRuntimeOptions<T>): ResumableMediaReceiverRuntime {
   const cleanupIntervalMs = positiveSafeInteger(
@@ -78,9 +96,46 @@ export function createResumableMediaReceiverRuntime<T>(options: ResumableMediaRe
     commit: options.commit,
     quota: options.quota,
   });
+
+  async function observe(work: (() => Promise<void>) | undefined) {
+    if (!work) return;
+    try {
+      await work();
+    } catch (error) {
+      options.onAcceptanceAuthorityError?.(error);
+    }
+  }
+
+  const observedLifecycle = {
+    ...lifecycle,
+    async create(principal: ResumableIngestPrincipal, input: Parameters<typeof lifecycle.create>[1]) {
+      const session = await lifecycle.create(principal, input);
+      await observe(options.acceptanceAuthority
+        ? () => options.acceptanceAuthority!.sessionCreated(principal, session)
+        : undefined);
+      return session;
+    },
+    async status(principal: ResumableIngestPrincipal, sessionId: string) {
+      const session = await lifecycle.status(principal, sessionId);
+      await observe(options.acceptanceAuthority
+        ? () => options.acceptanceAuthority!.statusObserved(principal, session)
+        : undefined);
+      return session;
+    },
+    async finalize(principal: ResumableIngestPrincipal, input: Parameters<typeof lifecycle.finalize>[1]) {
+      const session = await lifecycle.status(principal, input.sessionId);
+      const result = await lifecycle.finalize(principal, input);
+      await observe(options.acceptanceAuthority
+        ? () => options.acceptanceAuthority!.finalized(principal, session, result)
+        : undefined);
+      return result;
+    },
+  };
+
   const handle = createResumableMediaIngestHttpHandler({
     authorize: options.authorize,
-    lifecycle,
+    lifecycle: observedLifecycle,
+    acceptanceIngestion: options.acceptanceIngestion,
     maxChunkBytes,
     maxJsonBytes: options.maxJsonBytes,
   });
