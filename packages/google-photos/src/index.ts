@@ -83,9 +83,13 @@ export function pickedMediaDownloadUrl(item: PickedMediaItem): string {
   return `${baseUrl}${isVideo ? '=dv' : '=d'}`;
 }
 
-export async function downloadPickedMedia(item: PickedMediaItem): Promise<Response> {
-  const response = await fetch(pickedMediaDownloadUrl(item));
-  if (!response.ok) throw new Error(`Google Photos download ${response.status}: ${await response.text()}`);
+export async function downloadPickedMedia(item: PickedMediaItem, accessToken: string): Promise<Response> {
+  const response = await fetch(pickedMediaDownloadUrl(item), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  // Picker can return image/video bytes even for an HTTP error. Do not decode
+  // those bytes as text because it produces a huge, unreadable IPC error.
+  if (!response.ok) throw new Error(`Google Photos download ${response.status}`);
   return response;
 }
 
@@ -194,6 +198,7 @@ export type MigrationItemResult = {
 
 export async function transferPickedItems(
   sourceItems: PickedMediaItem[],
+  sourceAccessToken: string,
   target: MigrationTarget,
   transfer: (input: { item: PickedMediaItem; response: Response; target: MigrationTarget }) => Promise<{ targetId?: string }>,
   onProgress?: (completed: number, total: number, current: PickedMediaItem) => void,
@@ -203,7 +208,7 @@ export async function transferPickedItems(
     const item = sourceItems[index];
     onProgress?.(index, sourceItems.length, item);
     try {
-      const response = await downloadPickedMedia(item);
+      const response = await downloadPickedMedia(item, sourceAccessToken);
       const saved = await transfer({ item, response, target });
       results.push({ sourceId: item.id, filename: item.mediaFile?.filename, target, success: true, targetId: saved.targetId });
     } catch (error) {

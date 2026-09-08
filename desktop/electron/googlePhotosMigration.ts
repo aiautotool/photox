@@ -132,7 +132,7 @@ export class DesktopGooglePhotosMigrationService {
     const account = await this.requireAccount(job.sourceAccountId, 'picker'); const token = await this.accessToken(account);
     const session = await getPickingSession(token, job.sourcePickerSessionId); if (!session.mediaItemsSet) throw new Error('GOOGLE_PHOTOS_PICKER_NOT_FINISHED');
     const selected = await listAllPickedMedia(token, job.sourcePickerSessionId);
-    const staged = await this.spool.stage(job.id, selected, downloadPickedMedia);
+    const staged = await this.spool.stage(job.id, selected, item => downloadPickedMedia(item, token));
     const sizes = new Map(staged.map(item => [item.sourceMediaId, item.sizeBytes]));
     const items = migrationItemsFromPicker(job.id, selected).map(item => ({ ...item, sizeBytes: sizes.get(item.sourceMediaId) ?? item.sizeBytes }));
     await this.options.ledger.putItems(items);

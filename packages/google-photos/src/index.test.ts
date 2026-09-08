@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GooglePhotosMigrationRunner,
+  downloadPickedMedia,
   migrationItemsFromPicker,
   pickedMediaDownloadUrl,
   transferPickedItems,
@@ -17,6 +18,28 @@ describe('Google Photos migration', () => {
   it('uses the Picker download form for photos and videos', () => {
     expect(pickedMediaDownloadUrl({ id: 'p', mediaFile: { baseUrl: 'https://example/photo', mimeType: 'image/jpeg' } })).toBe('https://example/photo=d');
     expect(pickedMediaDownloadUrl({ id: 'v', mediaFile: { baseUrl: 'https://example/video', mimeType: 'video/mp4' } })).toBe('https://example/video=dv');
+  });
+
+  it('authorizes Picker media downloads with the source access token', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('image-bytes', { status: 200 }));
+    await expect(downloadPickedMedia({
+      id: 'picked-photo',
+      mediaFile: { baseUrl: 'https://example/photo', mimeType: 'image/jpeg' },
+    }, 'source-access-token')).resolves.toBeInstanceOf(Response);
+    expect(fetchMock).toHaveBeenCalledWith('https://example/photo=d', {
+      headers: { Authorization: 'Bearer source-access-token' },
+    });
+  });
+
+  it('does not decode binary Picker error bodies into the displayed error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(new Uint8Array([137, 80, 78, 71]), {
+      status: 403,
+      headers: { 'content-type': 'image/png' },
+    }));
+    await expect(downloadPickedMedia({
+      id: 'picked-photo',
+      mediaFile: { baseUrl: 'https://example/photo', mimeType: 'image/jpeg' },
+    }, 'source-access-token')).rejects.toThrow('Google Photos download 403');
   });
 
   it('streams upload bodies without buffering and reports byte progress', async () => {
@@ -54,7 +77,7 @@ describe('Google Photos migration', () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response('one', { status: 200 }))
       .mockResolvedValueOnce(new Response('two', { status: 200 }));
-    const results = await transferPickedItems(items, 'google_drive', async ({ item }) => {
+    const results = await transferPickedItems(items, 'source-access-token', 'google_drive', async ({ item }) => {
       if (item.id === '1') throw new Error('destination failed');
       return { targetId: 'drive-2' };
     });
