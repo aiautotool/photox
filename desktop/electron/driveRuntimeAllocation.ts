@@ -31,7 +31,7 @@ export type RendererDriveAllocationSnapshot = {
   ratioRemainingBytes: number | null;
   providerRemainingAfterReserveBytes: number;
   availableBytes: number;
-  verification: RendererDriveAllocationVerification;
+  verification?: RendererDriveAllocationVerification;
 };
 
 export type RendererDriveAccountInfo = {
