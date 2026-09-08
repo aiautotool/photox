@@ -97,6 +97,13 @@ function assertExactKeys(value: unknown, expected: readonly string[], code: stri
   }
 }
 
+function normalizedReleaseCommitSha(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(normalized)) throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_RELEASE_SHA_INVALID');
+  return normalized;
+}
+
 /**
  * Fail-closed parser for the untrusted mobile acceptance artifact. In
  * particular the client is not allowed to submit server offset, quota,
@@ -115,10 +122,15 @@ export function validateMobilePhysicalResumableAcceptanceReport(
 }
 
 export class PhysicalResumableAcceptanceIngestion {
+  private readonly expectedReleaseCommitSha?: string;
+
   constructor(
     private readonly authority: PhysicalResumableServerAuthority,
     private readonly capture: PhysicalResumableAcceptanceCaptureWorkflow,
-  ) {}
+    expectedReleaseCommitSha?: string,
+  ) {
+    this.expectedReleaseCommitSha = normalizedReleaseCommitSha(expectedReleaseCommitSha);
+  }
 
   async ingest(input: {
     workspaceId: string;
@@ -129,6 +141,10 @@ export class PhysicalResumableAcceptanceIngestion {
       throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_AUTH_BINDING_REQUIRED');
     }
     const report = validateMobilePhysicalResumableAcceptanceReport(input.report);
+    if (this.expectedReleaseCommitSha
+      && String(report.release.commitSha || '').trim().toLowerCase() !== this.expectedReleaseCommitSha) {
+      throw new Error('PHYSICAL_RESUMABLE_ACCEPTANCE_RELEASE_MISMATCH');
+    }
     const authoritative = await this.authority.observe({
       workspaceId: input.workspaceId,
       deviceId: input.deviceId,
