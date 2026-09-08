@@ -1,12 +1,21 @@
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 import type { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
+import { PhysicalResumableAcceptanceCaptureWorkflow } from './physicalResumableAcceptanceCapture.js';
+import { PhysicalResumableAcceptanceEvidenceStore } from './physicalResumableAcceptanceEvidenceStore.js';
+import { PhysicalResumableAcceptanceIngestion } from './physicalResumableAcceptanceIngestion.js';
+import { PhysicalResumableServerAuthorityLedger } from './physicalResumableServerAuthority.js';
 import { createResumableMediaProductionCommit, type ResumableCommittedMediaRow, type ResumableMediaProductionCommitResult } from './resumableMediaProductionCommit.js';
 import { createResumableMediaReceiverRuntime, type ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
 import { createWorkspaceResumableQuotaHooks } from './resumableQuotaHooks.js';
 
 type WorkspaceQuotaRepository = Parameters<typeof createWorkspaceResumableQuotaHooks>[0];
 type SharedIngestCoordinator = ReturnType<typeof createMediaIngestCommitCoordinator>;
+
+export type ResumablePhysicalAcceptanceOptions = {
+  stateDirectory: string;
+  counters(workspaceId: string): Promise<{ quotaBytes: number; catalogRows: number; observedAt: string }>;
+};
 
 export type ResumableMediaProductionRuntimeOptions = {
   rootDir: string;
@@ -19,6 +28,7 @@ export type ResumableMediaProductionRuntimeOptions = {
   ingest(row: ResumableCommittedMediaRow): Promise<void>;
   onCommitted?(result: ResumableMediaProductionCommitResult): Promise<void> | void;
   coordinator: SharedIngestCoordinator;
+  physicalAcceptance?: ResumablePhysicalAcceptanceOptions;
   maxChunkBytes?: number;
   maxJsonBytes?: number;
   sessionTtlMs?: number;
@@ -27,6 +37,7 @@ export type ResumableMediaProductionRuntimeOptions = {
   onCleanupError?(error: unknown): void;
   onJournalCleanupError?(error: unknown): void;
   onPostCommitError?(error: unknown): void;
+  onAcceptanceAuthorityError?(error: unknown): void;
 };
 
 function requiredPrincipal(value: string | undefined, code: string) {
@@ -51,10 +62,10 @@ function managedReceiverRoot(rootDir: string, incomingRoot: string) {
  * resumable uploads on the same process-wide ingest coordinator while both
  * protocols coexist during the mobile migration period.
  *
- * The durable upload root is forced under the managed incoming root because the
- * ingest recovery journal intentionally rejects part files outside that trust
- * boundary. Callers may still provide a nested root explicitly; an unsafe root
- * is normalized to `<incomingRoot>/resumable` instead of weakening recovery.
+ * Physical acceptance capture is opt-in. When supplied it uses an independent
+ * durable server ledger plus the existing append-only evidence ledger; mobile
+ * can submit chronology/identity only and cannot provide authoritative offset,
+ * quota, catalog or verification observations.
  */
 export function createResumableMediaProductionRuntime(
   options: ResumableMediaProductionRuntimeOptions,
@@ -70,6 +81,24 @@ export function createResumableMediaProductionRuntime(
     now: options.now,
   });
 
+  const authority = options.physicalAcceptance
+    ? new PhysicalResumableServerAuthorityLedger(
+        path.join(options.physicalAcceptance.stateDirectory, 'physical-resumable-server-authority.json'),
+        { counters: options.physicalAcceptance.counters },
+        options.now,
+      )
+    : undefined;
+  const acceptanceIngestion = authority && options.physicalAcceptance
+    ? new PhysicalResumableAcceptanceIngestion(
+        authority,
+        new PhysicalResumableAcceptanceCaptureWorkflow(
+          new PhysicalResumableAcceptanceEvidenceStore(
+            path.join(options.physicalAcceptance.stateDirectory, 'physical-resumable-acceptance-evidence.json'),
+          ),
+        ),
+      )
+    : undefined;
+
   return createResumableMediaReceiverRuntime({
     rootDir: managedReceiverRoot(options.rootDir, options.incomingRoot),
     authorize: async req => {
@@ -84,11 +113,14 @@ export function createResumableMediaProductionRuntime(
     commit,
     quota: createWorkspaceResumableQuotaHooks(options.workspaces),
     coordinator: options.coordinator,
+    acceptanceAuthority: authority,
+    acceptanceIngestion,
     maxChunkBytes: options.maxChunkBytes,
     maxJsonBytes: options.maxJsonBytes,
     sessionTtlMs: options.sessionTtlMs,
     cleanupIntervalMs: options.cleanupIntervalMs,
     now: options.now,
     onCleanupError: options.onCleanupError,
+    onAcceptanceAuthorityError: options.onAcceptanceAuthorityError,
   });
 }
