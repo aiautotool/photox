@@ -7,6 +7,12 @@ export type PhysicalResumableAcceptanceDiagnostics = {
   blockers: string[];
   evidenceCount: number;
   persistenceHealthy: boolean;
+  captureMode?: 'disabled' | 'real-device' | 'invalid';
+  captureEnabled?: boolean;
+  serverAuthorityLedgerInitialized?: boolean;
+  serverAuthorityLedgerHealthy?: boolean;
+  serverAuthorityRecordCount?: number;
+  captureBlockers?: string[];
 };
 
 export type LegacyWholeFileCompatibilityDiagnostics =
@@ -69,6 +75,12 @@ export type LegacyWholeFileOperationsView = {
   physicalRequiredPlatforms: string[];
   physicalAcceptedPlatforms: string[];
   physicalEvidenceBlockers: string[];
+  physicalCaptureMode: 'disabled' | 'real-device' | 'invalid';
+  physicalCaptureEnabled: boolean;
+  physicalServerAuthorityInitialized: boolean;
+  physicalServerAuthorityHealthy: boolean;
+  physicalServerAuthorityRecordCount: number;
+  physicalCaptureBlockers: string[];
   observationProgressPercent: number;
   blockers: string[];
   blockerLabels: string[];
@@ -92,6 +104,7 @@ function blockerLabel(value: string): string {
 
 function physicalEvidenceView(diagnostics: LegacyWholeFileCompatibilityDiagnostics | undefined) {
   const physical = diagnostics?.physicalResumableAcceptance;
+  const captureMode = physical?.captureMode ?? 'disabled';
   return {
     physicalEvidenceInitialized: physical?.initialized ?? false,
     physicalEvidencePersistenceHealthy: physical?.persistenceHealthy ?? false,
@@ -100,6 +113,12 @@ function physicalEvidenceView(diagnostics: LegacyWholeFileCompatibilityDiagnosti
     physicalRequiredPlatforms: [...(physical?.requiredPlatforms ?? ['ios', 'android'])],
     physicalAcceptedPlatforms: [...(physical?.acceptedPlatforms ?? [])],
     physicalEvidenceBlockers: [...(physical?.blockers ?? ['PHYSICAL_RESUMABLE_EVIDENCE_NOT_INITIALIZED'])],
+    physicalCaptureMode: captureMode,
+    physicalCaptureEnabled: physical?.captureEnabled ?? captureMode === 'real-device',
+    physicalServerAuthorityInitialized: physical?.serverAuthorityLedgerInitialized ?? false,
+    physicalServerAuthorityHealthy: physical?.serverAuthorityLedgerHealthy ?? captureMode === 'disabled',
+    physicalServerAuthorityRecordCount: safeCount(physical?.serverAuthorityRecordCount),
+    physicalCaptureBlockers: [...(physical?.captureBlockers ?? [])],
   };
 }
 
