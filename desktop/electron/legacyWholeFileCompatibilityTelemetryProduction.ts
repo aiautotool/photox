@@ -2,11 +2,21 @@ import path from 'node:path';
 import type { LegacyWholeFileCompatibilityEvent } from './legacyWholeFileCompatibilityTelemetry.js';
 import { LegacyWholeFileCompatibilityTelemetryRuntime, type LegacyWholeFileCompatibilityRuntimeDiagnostics } from './legacyWholeFileCompatibilityTelemetryRuntime.js';
 import { LegacyWholeFileCompatibilityTelemetryStore } from './legacyWholeFileCompatibilityTelemetryStore.js';
+import {
+  initializePhysicalResumableAcceptance,
+  physicalResumableAcceptanceDiagnostics,
+  resetPhysicalResumableAcceptanceForTests,
+  type PhysicalResumableAcceptanceProductionDiagnostics,
+} from './physicalResumableAcceptanceProduction.js';
 
 export type LegacyWholeFileCompatibilityProductionDiagnostics =
-  | ({ initialized: true } & LegacyWholeFileCompatibilityRuntimeDiagnostics)
+  | ({
+      initialized: true;
+      physicalResumableAcceptance: PhysicalResumableAcceptanceProductionDiagnostics;
+    } & LegacyWholeFileCompatibilityRuntimeDiagnostics)
   | {
       initialized: false;
+      physicalResumableAcceptance: PhysicalResumableAcceptanceProductionDiagnostics;
       deprecationReadiness: {
         ready: false;
         physicalDeviceResumableAccepted: false;
@@ -18,14 +28,15 @@ let runtime: LegacyWholeFileCompatibilityTelemetryRuntime | null = null;
 let initializing: Promise<void> | null = null;
 
 /**
- * Initializes the durable compatibility telemetry runtime from the same
- * authoritative Desktop state directory that contains media-index.json.
- * Repeated startup calls are idempotent.
+ * Initializes durable compatibility telemetry and physical-device acceptance
+ * evidence from the same authoritative Desktop state directory. Repeated
+ * startup calls are idempotent.
  */
 export async function initializeLegacyWholeFileCompatibilityTelemetry(stateDirectory: string): Promise<void> {
   if (runtime) return;
   if (initializing) return initializing;
   initializing = (async () => {
+    await initializePhysicalResumableAcceptance(stateDirectory);
     const store = new LegacyWholeFileCompatibilityTelemetryStore(
       path.join(stateDirectory, 'legacy-whole-file-compatibility.json'),
     );
@@ -52,9 +63,11 @@ export function recordLegacyWholeFileCompatibility(
 }
 
 export function legacyWholeFileCompatibilityDiagnostics(): LegacyWholeFileCompatibilityProductionDiagnostics {
+  const physicalResumableAcceptance = physicalResumableAcceptanceDiagnostics();
   if (!runtime) {
     return {
       initialized: false,
+      physicalResumableAcceptance,
       deprecationReadiness: {
         ready: false,
         physicalDeviceResumableAccepted: false,
@@ -64,7 +77,8 @@ export function legacyWholeFileCompatibilityDiagnostics(): LegacyWholeFileCompat
   }
   return {
     initialized: true,
-    ...runtime.diagnostics({ physicalDeviceResumableAccepted: false }),
+    physicalResumableAcceptance,
+    ...runtime.diagnostics({ physicalDeviceResumableAccepted: physicalResumableAcceptance.accepted }),
   };
 }
 
@@ -76,4 +90,5 @@ export async function flushLegacyWholeFileCompatibilityTelemetry(): Promise<void
 export function resetLegacyWholeFileCompatibilityTelemetryForTests(): void {
   runtime = null;
   initializing = null;
+  resetPhysicalResumableAcceptanceForTests();
 }
