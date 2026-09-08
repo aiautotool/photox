@@ -335,4 +335,5 @@ export class SqliteRefreshSessionStore implements RefreshSessionStore {
 }
 
 export * from './migration';
+export * from './mediaIndexCatalog.js';
 export * from './workspace.js';

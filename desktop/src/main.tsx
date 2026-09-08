@@ -4,6 +4,7 @@ import './styles.css';
 import './sync.css';
 import { App } from './App';
 import { DriveAllocationManager } from './DriveAllocationManager';
+import { MediaCatalogOperationsPanel } from './MediaCatalogOperationsPanel';
 
 type RendererBoundaryState={error?:Error};
 
@@ -31,6 +32,7 @@ createRoot(root).render(
     <RendererBoundary>
       <App/>
       <DriveAllocationManager/>
+      <MediaCatalogOperationsPanel/>
     </RendererBoundary>
   </React.StrictMode>
 );

@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
-import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, replaceWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
+import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, type MediaReplica, type StorageAccount } from '@photosync/core';
 import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncDateFolder, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk, type DriveFile } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
@@ -21,6 +21,16 @@ import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 import { DesktopWorkspaceAuth } from './workspaceAuth.js';
 import { loadWorkspaceDriveAccounts, type SavedDriveAccountRecord } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation, rendererDriveAccountInfo, type DriveRuntimeAllocation, type RendererDriveAccountInfo } from './driveRuntimeAllocation.js';
+import { openActiveMediaCatalogBackend, type ActiveMediaCatalogBackend } from './mediaCatalogBackend.js';
+import { createMediaProviderOperationGate } from './mediaProviderOperationGate.js';
+import { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoordinator.js';
+import { createMediaIngestRecoveryJournal, recoverDeletionTombstones } from './mediaStartupRecovery.js';
+import { mediaCatalogDiagnosticsForDesktopOperator, mediaCatalogDiagnosticsForWeb } from './mediaCatalogOperationsTransport.js';
+import { prepareLegacyMediaIndexForSqlite } from './legacyMediaIndexPreparation.js';
+import { createResumableMediaProductionRuntime } from './resumableMediaProductionRuntime.js';
+import type { ResumableMediaReceiverRuntime } from './resumableMediaReceiverRuntime.js';
+import type { LegacyWholeFileAuthPrincipal } from './legacyMediaAuditAttribution.js';
+import { resolveLegacyWholeFileReceiveGate } from './legacyWholeFileReceiveGate.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photosync', privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } }]);
 
@@ -31,12 +41,15 @@ const REDIRECT_URI = `http://127.0.0.1:${OAUTH_PORT}/oauth2callback`;
 const PUBLIC_TUNNEL_URL = process.env.PHOTOSYNC_PUBLIC_URL || 'https://photox.aiautotool.com';
 let mainWindow: BrowserWindow | null = null;
 let receiver: http.Server | null = null;
+let resumableMediaRuntime: ResumableMediaReceiverRuntime | null = null;
 let cloudflaredProcess: ChildProcess | null = null;
 let cloudflareMonitor: NodeJS.Timeout | null = null;
 let cloudflareRestart: NodeJS.Timeout | null = null;
 let cloudflareStopping = false;
 let lastStatus: DesktopStatus = { state: 'idle', received: 0, duplicates: 0, cloudUploaded: 0, cloudBlocked: 0 };
 let cloudUploadQueue: Promise<void> = Promise.resolve();
+const mediaProviderOperationGate=createMediaProviderOperationGate();
+const mediaIngestCommitCoordinator=createMediaIngestCommitCoordinator();
 let repairSweepActive=false;
 let repairSweepTimer:NodeJS.Timeout|null=null;
 let migrationStore:SqlitePhotoXStore|null=null;
@@ -47,6 +60,7 @@ let workspaceAuth:DesktopWorkspaceAuth|null=null;
 let localLibraryReconcile:Promise<void>|null=null;
 let cloudLibraryReconcile:Promise<void>|null=null;
 let lastCloudLibraryReconcileAt=0;
+let mediaCatalogBackend:ActiveMediaCatalogBackend<MediaIndexRow>|null=null;
 
 const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
 const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
@@ -129,6 +143,7 @@ type MediaIndexRow = {
   videoError?:string;
   cloud?:CloudDestination;
   cloudReplicas?:CloudDestination[];
+  deletion?:{state:'deleting';claimId:string;startedAt:string};
 };
 type SavedDriveAccount = SavedDriveAccountRecord;
 type RuntimeDriveAccount = { id:string; email:string; client:OAuth2Client; storage:StorageAccount; allocation:DriveRuntimeAllocation; folderId:string; quota:{limit:number;usage:number;free:number} };
@@ -161,8 +176,14 @@ function stableDriveAccountId(email?:string,sub?:string){
 function libraryDir(){ return path.join(app.getPath('pictures'),'PhotoSync'); }
 function stateDir(){ return path.join(app.getPath('userData'),'photosync-state'); }
 function incomingDir(){ return path.join(stateDir(),'incoming'); }
+function resumableIngestDir(){ return path.join(stateDir(),'resumable-ingest'); }
+function ingestRecoveryDir(){ return path.join(stateDir(),'ingest-recovery'); }
+function ingestRecoveryJournal(){return createMediaIngestRecoveryJournal({journalDir:ingestRecoveryDir(),libraryRoot:libraryDir(),incomingRoot:incomingDir()});}
 function videoCacheDir(){ return path.join(stateDir(),'video-cache'); }
 function indexFile(){ return path.join(stateDir(),'media-index.json'); }
+function mediaCatalogDbFile(){ return path.join(stateDir(),'media-catalog.sqlite'); }
+function requireMediaCatalog(){if(!mediaCatalogBackend)throw new Error('MEDIA_CATALOG_NOT_READY');return mediaCatalogBackend;}
+function mediaIndexWriter(){ return requireMediaCatalog().writer; }
 function pairFile(){ return path.join(stateDir(),'pair-code.txt'); }
 function driveAccountsDir(){ return path.join(stateDir(),'google-accounts'); }
 function googlePhotosAccountsDir(){ return path.join(stateDir(),'google-photos-accounts'); }
@@ -186,21 +207,13 @@ function lanAddress(){
   return '127.0.0.1';
 }
 
-async function readAllIndex():Promise<MediaIndexRow[]>{
-  try{
-    const raw=JSON.parse(await fs.readFile(indexFile(),'utf8')) as Omit<MediaIndexRow,'workspaceId'>[]|MediaIndexRow[];
-    const migrated=migrateLegacyWorkspaceRows(raw as MediaIndexRow[],LEGACY_WORKSPACE_ID);
-    if(migrated.migrated){await fs.mkdir(stateDir(),{recursive:true});await fs.writeFile(indexFile(),JSON.stringify(migrated.rows,null,2),'utf8');}
-    return migrated.rows;
-  }catch{return []}
+async function prepareLegacyIndexForSqlite():Promise<void>{
+  const result=await prepareLegacyMediaIndexForSqlite({indexPath:indexFile(),workspaceId:LEGACY_WORKSPACE_ID});
+  if(result.removedStaleTemps)console.info('PhotoX removed stale legacy media-index migration temps',result.removedStaleTemps);
 }
-async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return rowsForWorkspace(await readAllIndex(),workspaceId)}
-async function writeIndex(rows:MediaIndexRow[],workspaceId=LEGACY_WORKSPACE_ID){
-  const normalized=rows.map(row=>({...row,workspaceId}));
-  const all=await readAllIndex();const merged=replaceWorkspaceRows(all,workspaceId,normalized);
-  await fs.mkdir(stateDir(),{recursive:true});await fs.writeFile(indexFile(),JSON.stringify(merged,null,2),'utf8');
-}
-async function updateIndexRow(key:string,patch:Partial<MediaIndexRow>,workspaceId=LEGACY_WORKSPACE_ID){const rows=await readIndex(workspaceId);const index=rows.findIndex(row=>row.key===key);if(index<0)return null;rows[index]={...rows[index],...patch,workspaceId};await writeIndex(rows,workspaceId);return rows[index]}
+async function readAllIndex():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
+async function readAllIndexForRecovery():Promise<MediaIndexRow[]>{return requireMediaCatalog().listAll()}
+async function readIndex(workspaceId=LEGACY_WORKSPACE_ID):Promise<MediaIndexRow[]>{return requireMediaCatalog().listWorkspace(workspaceId)}
 function replicasOf(row:MediaIndexRow){if(row.cloudReplicas?.length)return row.cloudReplicas;if(row.cloud)return [row.cloud];return []}
 function isVerified(replica:CloudDestination){return replica.state==='VERIFIED'||replica.state==='UPLOADED'}
 async function evaluateRow(row:MediaIndexRow){
@@ -214,7 +227,7 @@ async function backupHealthSnapshot():Promise<BackupHealthSnapshot>{
   for(const row of rows){const video=isVideoFilename(row.filename);if(video)snapshot.videos+=1;else snapshot.photos+=1;const result=await evaluateRow(row);if(result.health==='safe')snapshot.safe+=1;else if(result.health==='at_risk')snapshot.atRisk+=1;else if(result.health==='critical')snapshot.critical+=1;else snapshot.unknown+=1;if(result.health!=='safe')snapshot.problems.push({key:row.key,filename:row.filename,health:result.health,reason:result.reasons.join(',')||'verification_required'})}
   return snapshot;
 }
-async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex(row.workspaceId);const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],workspaceId:row.workspaceId,cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all,row.workspaceId)}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:replicas})}
+async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){const updated=await mediaIndexWriter().syncReplicas(row.workspaceId,row.key,replicas);const authoritative=updated?.cloudReplicas as CloudDestination[]|undefined;if(authoritative){row.cloudReplicas=authoritative;row.cloud=authoritative[0]}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:authoritative||replicas})}
 function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').slice(0,220)||`media-${Date.now()}`; }
 
 function isSupportedMediaFilename(filename:string){return /\.(jpe?g|png|heic|heif|webp|gif|tiff?|dng|mp4|mov|m4v|avi|mkv|webm)$/i.test(filename)}
@@ -225,17 +238,15 @@ async function walkMediaFiles(root:string):Promise<string[]>{
 }
 async function reconcileLocalLibrary(workspaceId=LEGACY_WORKSPACE_ID){
   if(localLibraryReconcile)return localLibraryReconcile;
-  localLibraryReconcile=(async()=>{const rows=await readIndex(workspaceId);const byPath=new Map(rows.map(row=>[path.resolve(row.path),row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));let changed=false;
-    for(const filePath of await walkMediaFiles(libraryDir())){if(byPath.has(path.resolve(filePath)))continue;const stat=await fs.stat(filePath);const sha256=await hashFile(filePath);const existing=byHash.get(sha256);if(existing){existing.path=filePath;existing.size=stat.size;changed=true;continue}const filename=path.basename(filePath);const createdAt=stat.birthtimeMs||stat.mtimeMs;const row:MediaIndexRow={workspaceId,key:`import:${sha256}`,assetId:`import:${sha256}`,deviceId:LEGACY_DESKTOP_DEVICE_ID,filename,path:filePath,size:stat.size,createdAt,receivedAt:new Date(createdAt).toISOString(),sha256,mimeType:mimeTypeForFilename(filename),mediaType:isVideoFilename(filename)?'video':'photo',videoProcessing:isVideoFilename(filename)?'queued':undefined,cloudReplicas:[]};rows.push(row);byPath.set(path.resolve(filePath),row);byHash.set(sha256,row);changed=true}
-    if(changed)await writeIndex(rows,workspaceId);
+  localLibraryReconcile=(async()=>{const rows=await readIndex(workspaceId);const byPath=new Map(rows.map(row=>[path.resolve(row.path),row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));
+    for(const filePath of await walkMediaFiles(libraryDir())){if(byPath.has(path.resolve(filePath)))continue;const stat=await fs.stat(filePath);const sha256=await hashFile(filePath);const existing=byHash.get(sha256);if(existing){await mediaIndexWriter().patchVideo(workspaceId,existing.key,{path:filePath,size:stat.size});continue}const filename=path.basename(filePath);const createdAt=stat.birthtimeMs||stat.mtimeMs;const row:MediaIndexRow={workspaceId,key:`import:${sha256}`,assetId:`import:${sha256}`,deviceId:LEGACY_DESKTOP_DEVICE_ID,filename,path:filePath,size:stat.size,createdAt,receivedAt:new Date(createdAt).toISOString(),sha256,mimeType:mimeTypeForFilename(filename),mediaType:isVideoFilename(filename)?'video':'photo',videoProcessing:isVideoFilename(filename)?'queued':undefined,cloudReplicas:[]};await mediaIndexWriter().ingest(row);byPath.set(path.resolve(filePath),row);byHash.set(sha256,row)}
   })().finally(()=>{localLibraryReconcile=null});return localLibraryReconcile;
 }
 function cloudFileIdentity(file:DriveFile){return file.appProperties?.photosyncKey||`cloud:${file.appProperties?.photosyncSha256||file.md5Checksum||file.id}`}
 async function reconcileCloudLibrary(workspaceId=LEGACY_WORKSPACE_ID,force=false){
   if(cloudLibraryReconcile)return cloudLibraryReconcile;if(!force&&Date.now()-lastCloudLibraryReconcileAt<60_000)return;
-  cloudLibraryReconcile=(async()=>{const accounts=await runtimeDriveAccounts(workspaceId);if(!accounts.length)return;const rows=await readIndex(workspaceId);const byKey=new Map(rows.map(row=>[row.key,row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));let changed=false;
-  for(const account of accounts){let files:DriveFile[]=[];try{const token=await account.client.getAccessToken();if(token.token)files=await listPhotoSyncFiles(token.token,account.folderId)}catch(error){console.error('Drive library reconciliation failed',account.id,error);continue}for(const file of files.filter(item=>item.mimeType.startsWith('image/')||item.mimeType.startsWith('video/')||isSupportedMediaFilename(item.name))){const sha=file.appProperties?.photosyncSha256||file.md5Checksum||'';const key=cloudFileIdentity(file);let row=byKey.get(key)||(sha?byHash.get(sha):undefined);if(!row){const timestamp=Date.parse(file.createdTime||file.modifiedTime||'')||Date.now();row={workspaceId,key,assetId:key,deviceId:'google-drive',filename:file.name,path:path.join(libraryDir(),safeFilename(file.name)),size:Number(file.size||0),createdAt:timestamp,receivedAt:new Date(timestamp).toISOString(),sha256:sha,mimeType:file.mimeType||mimeTypeForFilename(file.name),mediaType:file.mimeType.startsWith('video/')||isVideoFilename(file.name)?'video':'photo',cloudReplicas:[]};rows.push(row);byKey.set(key,row);if(sha)byHash.set(sha,row);changed=true}const replicas=replicasOf(row);if(!replicas.some(replica=>replica.accountId===account.id&&replica.remoteFileId===file.id)){replicas.push({state:'VERIFIED',accountId:account.id,accountEmail:account.email,folderId:account.folderId,remotePath:'/PhotoSync/',remoteFileId:file.id,webViewLink:file.webViewLink||`https://drive.google.com/file/d/${file.id}/view`,uploadedAt:file.createdTime,verifiedAt:new Date().toISOString()});row.cloudReplicas=replicas;row.cloud=replicas[0];changed=true}}}
-  if(changed)await writeIndex(rows,workspaceId);
+  cloudLibraryReconcile=(async()=>{const accounts=await runtimeDriveAccounts(workspaceId);if(!accounts.length)return;const rows=await readIndex(workspaceId);const byKey=new Map(rows.map(row=>[row.key,row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));
+  for(const account of accounts){let files:DriveFile[]=[];try{const token=await account.client.getAccessToken();if(token.token)files=await listPhotoSyncFiles(token.token,account.folderId)}catch(error){console.error('Drive library reconciliation failed',account.id,error);continue}for(const file of files.filter(item=>item.mimeType.startsWith('image/')||item.mimeType.startsWith('video/')||isSupportedMediaFilename(item.name))){const sha=file.appProperties?.photosyncSha256||file.md5Checksum||'';const key=cloudFileIdentity(file);let row=byKey.get(key)||(sha?byHash.get(sha):undefined);if(!row){const timestamp=Date.parse(file.createdTime||file.modifiedTime||'')||Date.now();row={workspaceId,key,assetId:key,deviceId:'google-drive',filename:file.name,path:path.join(libraryDir(),safeFilename(file.name)),size:Number(file.size||0),createdAt:timestamp,receivedAt:new Date(timestamp).toISOString(),sha256:sha,mimeType:file.mimeType||mimeTypeForFilename(file.name),mediaType:file.mimeType.startsWith('video/')||isVideoFilename(file.name)?'video':'photo',cloudReplicas:[]};await mediaIndexWriter().ingest(row);byKey.set(key,row);if(sha)byHash.set(sha,row)}const replica:CloudDestination={state:'VERIFIED',accountId:account.id,accountEmail:account.email,folderId:file.parents?.[0]||account.folderId,remotePath:'/PhotoSync/',remoteFileId:file.id,webViewLink:file.webViewLink||`https://drive.google.com/file/d/${file.id}/view`,uploadedAt:file.createdTime,verifiedAt:new Date().toISOString()};const updated=await mediaIndexWriter().upsertReplica(workspaceId,row.key,replica);if(updated)row=updated}}
   })().finally(()=>{lastCloudLibraryReconcileAt=Date.now();cloudLibraryReconcile=null});return cloudLibraryReconcile;
 }
 
@@ -258,14 +269,15 @@ async function streamNodeFile(req:IncomingMessage,res:ServerResponse,filePath:st
 
 async function processVideoRow(key:string,workspaceId=LEGACY_WORKSPACE_ID){
   const row=(await readIndex(workspaceId)).find(item=>item.key===key);if(!row||!isVideoFilename(row.filename))return;
-  await updateIndexRow(key,{videoProcessing:'processing',videoError:undefined},workspaceId);
+  const writer=mediaIndexWriter();
+  await writer.patchVideo(workspaceId,key,{videoProcessing:'processing',videoError:undefined});
   try{
     const processed=await processVideoFile(row.path,row.key,videoCacheDir());
-    await updateIndexRow(key,{...processed,mediaType:'video',mimeType:row.mimeType||mimeTypeForFilename(row.filename),videoProcessing:'ready',videoError:undefined},workspaceId);
+    await writer.patchVideo(workspaceId,key,{...processed,mediaType:'video',mimeType:row.mimeType||mimeTypeForFilename(row.filename),videoProcessing:'ready',videoError:undefined});
     notifyRenderer('photosync:media-processed',{key,...processed});
   }catch(error){
     const message=error instanceof Error?error.message:String(error);
-    await updateIndexRow(key,{videoProcessing:'error',videoError:message},workspaceId);
+    await writer.patchVideo(workspaceId,key,{videoProcessing:'error',videoError:message});
     console.error('Video processing failed',row.filename,error);
   }
 }
@@ -286,36 +298,44 @@ async function listLocalMedia(workspaceId=LEGACY_WORKSPACE_ID):Promise<LocalMedi
 }
 
 async function clearSafeLocalMedia(workspaceId=LEGACY_WORKSPACE_ID){
-  const rows=await readIndex(workspaceId);let cleared=0,bytesFreed=0,skipped=0,changed=false;const root=path.resolve(libraryDir())+path.sep;
+  const rows=await readIndex(workspaceId);let cleared=0,bytesFreed=0,skipped=0;const root=path.resolve(libraryDir())+path.sep;
   for(const row of rows){
     const verifiedAccounts=new Set(replicasOf(row).filter(replica=>isVerified(replica)&&replica.accountId&&replica.remoteFileId).map(replica=>replica.accountId));
     if(verifiedAccounts.size<TARGET_CLOUD_REPLICAS){skipped+=1;continue}
     const source=path.resolve(row.path);if(!source.startsWith(root)){skipped+=1;continue}
     try{const stat=await fs.stat(source);await fs.unlink(source);cleared+=1;bytesFreed+=stat.size}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
     for(const cachePath of [row.thumbnailPath,row.playbackPath])if(cachePath)await fs.unlink(cachePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
-    if(row.thumbnailPath||row.playbackPath){row.thumbnailPath=undefined;row.playbackPath=undefined;changed=true}
+    if(row.thumbnailPath||row.playbackPath)await mediaIndexWriter().patchVideo(workspaceId,row.key,{thumbnailPath:undefined,playbackPath:undefined});
   }
-  if(changed)await writeIndex(rows,workspaceId);notifyRenderer('photosync:storage-updated',{localCacheCleared:true,cleared,bytesFreed,skipped});return {cleared,bytesFreed,skipped};
+  notifyRenderer('photosync:storage-updated',{localCacheCleared:true,cleared,bytesFreed,skipped});return {cleared,bytesFreed,skipped};
 }
 
 async function deleteManagedMedia(key:string,workspaceId=LEGACY_WORKSPACE_ID){
-  const rows=await readIndex(workspaceId);const index=rows.findIndex(row=>row.key===key);if(index<0)throw new Error('MEDIA_NOT_FOUND');const row=rows[index];
-  const accounts=new Map((await savedDriveAccounts(workspaceId)).map(account=>[account.id,account]));const failures:string[]=[];
-  for(const replica of replicasOf(row).filter(replica=>replica.remoteFileId)){
-    if(!replica.accountId){failures.push('Replica thiếu accountId');continue;}
-    const account=accounts.get(replica.accountId);if(!account){failures.push(`Không còn thông tin tài khoản ${replica.accountId}`);continue;}
-    try{
-      const client=oauthClient();client.setCredentials(account.tokens as any);const token=await client.getAccessToken();if(!token.token)throw new Error('Không lấy được access token');
-      const response=await net.fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(replica.remoteFileId!)}`,{method:'DELETE',headers:{authorization:`Bearer ${token.token}`}});
-      if(!response.ok&&response.status!==404)throw new Error(`Drive ${response.status}: ${await response.text()}`);
-    }catch(error){failures.push(`${replica.accountEmail||replica.accountId}: ${error instanceof Error?error.message:String(error)}`)}
-  }
-  if(failures.length)throw new Error(`Không xóa hết replica cloud: ${failures.join(' | ')}`);
-  for(const filePath of [row.thumbnailPath,row.playbackPath,row.path])if(filePath)await fs.unlink(filePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
-  rows.splice(index,1);await writeIndex(rows,workspaceId);
-  const repo=requireWorkspaceRepository();repo.releaseMediaReservation(workspaceId,row.size,{releaseManaged:true,releaseIngress:false});
-  repo.appendAudit({workspaceId,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'media.delete',targetType:'media',targetId:key,metadata:{filename:row.filename,size:row.size}});
-  notifyRenderer('photosync:media-deleted',{key,filename:row.filename});return {deleted:true,key,filename:row.filename};
+  return mediaProviderOperationGate.run(workspaceId,key,async()=>{
+    const writer=mediaIndexWriter();
+    const requestedClaimId=crypto.randomUUID();
+    const claimed=await writer.claimDeletion(workspaceId,key,requestedClaimId);
+    if(!claimed)throw new Error('MEDIA_NOT_FOUND');
+    const claimId=(claimed as MediaIndexRow&{deletion?:{claimId:string}}).deletion?.claimId||requestedClaimId;
+    const row=claimed as MediaIndexRow;
+    const accounts=new Map((await savedDriveAccounts(workspaceId)).map(account=>[account.id,account]));const failures:string[]=[];
+    for(const replica of replicasOf(row).filter(replica=>replica.remoteFileId)){
+      if(!replica.accountId){failures.push('Replica thiếu accountId');continue;}
+      const account=accounts.get(replica.accountId);if(!account){failures.push(`Không còn thông tin tài khoản ${replica.accountId}`);continue;}
+      try{
+        const client=oauthClient();client.setCredentials(account.tokens as any);const token=await client.getAccessToken();if(!token.token)throw new Error('Không lấy được access token');
+        const response=await net.fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(replica.remoteFileId!)}`,{method:'DELETE',headers:{authorization:`Bearer ${token.token}`}});
+        if(!response.ok&&response.status!==404)throw new Error(`Drive ${response.status}: ${await response.text()}`);
+      }catch(error){failures.push(`${replica.accountEmail||replica.accountId}: ${error instanceof Error?error.message:String(error)}`)}
+    }
+    if(failures.length)throw new Error(`Không xóa hết replica cloud: ${failures.join(' | ')}`);
+    for(const filePath of [row.thumbnailPath,row.playbackPath,row.path])if(filePath)await fs.unlink(filePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
+    const removed=await writer.removeClaimed(workspaceId,key,claimId);
+    if(!removed)throw new Error('MEDIA_DELETE_CLAIM_LOST');
+    const repo=requireWorkspaceRepository();repo.releaseMediaReservation(workspaceId,row.size,{releaseManaged:true,releaseIngress:false});
+    repo.appendAudit({workspaceId,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'media.delete',targetType:'media',targetId:key,metadata:{filename:row.filename,size:row.size,claimId}});
+    notifyRenderer('photosync:media-deleted',{key,filename:row.filename});return {deleted:true,key,filename:row.filename};
+  });
 }
 
 async function fetchCloudMedia(row:MediaIndexRow,request:Request):Promise<Response>{
@@ -422,7 +442,6 @@ async function removeDriveAccount(accountId:string){
   return desktopStatus();
 }
 
-
 async function uploadMigrationItemToDrive(input:{accountId:string;source:any;response:Response;signal?:AbortSignal;onBytes?:(bytes:number)=>void;checkpoint?:{kind:'google_drive_resumable_v1';accountId:string;sessionUri:string;nextByte:number;totalBytes:number;targetId?:string;updatedAt:string};onCheckpoint?:(checkpoint:any|null)=>Promise<void>}){
   const account=(await runtimeDriveAccounts()).find(item=>item.id===input.accountId);if(!account)throw new Error('GOOGLE_DRIVE_DESTINATION_NOT_FOUND');
   const token=await account.client.getAccessToken();if(!token.token)throw new Error('GOOGLE_DRIVE_ACCESS_TOKEN_MISSING');
@@ -454,7 +473,7 @@ async function uploadMigrationItemToDrive(input:{accountId:string;source:any;res
   if(!sessionUri){
     sessionUri=await createResumableUploadSession(token.token,{name:filename,mimeType,sizeBytes:totalBytes,folderId:account.folderId,appProperties:{photoxMigration:'true',sourceMediaId:String(input.source.id)}});nextByte=0;
   }
-  const persistCheckpoint=async(targetId?:string)=>input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte,totalBytes,targetId,updatedAt:new Date().toISOString()});
+  const persistCheckpoint=async(targetId?:string)=>input.onCheckpoint?.({kind:'google_drive_resumable_v1',accountId:input.accountId,sessionUri,nextByte,totalBytes, targetId,updatedAt:new Date().toISOString()});
   await persistCheckpoint();input.onBytes?.(nextByte);
   const body=input.response.body;if(!body)throw new Error('GOOGLE_DRIVE_SOURCE_STREAM_MISSING');
   const reader=body.getReader();const chunkSize=8*1024*1024;let skip=nextByte;let pending=Buffer.alloc(0);let completedId:string|undefined;
@@ -485,7 +504,9 @@ async function retryQueuedCloud(){
   try{const rows=await readIndex();for(const row of rows.filter(x=>new Set(replicasOf(x).filter(isVerified).map(r=>r.accountId)).size<TARGET_CLOUD_REPLICAS))await enqueueCloudUpload(row)}finally{repairSweepActive=false}
 }
 
-async function uploadLocalToDrive(row:MediaIndexRow){
+async function uploadLocalToDrive(row:MediaIndexRow){return mediaProviderOperationGate.run(row.workspaceId,row.key,()=>uploadLocalToDriveUnlocked(row));}
+
+async function uploadLocalToDriveUnlocked(row:MediaIndexRow){
   try{await fs.access(row.path)}catch{return}
   const accounts=await runtimeDriveAccounts(row.workspaceId);
   if(!accounts.length){
@@ -511,14 +532,35 @@ async function uploadLocalToDrive(row:MediaIndexRow){
   }
 }
 
-async function receiveMedia(req:IncomingMessage,res:ServerResponse){
+async function receiveMedia(req:IncomingMessage,res:ServerResponse,authorizedPrincipal?:LegacyWholeFileAuthPrincipal){
   const pair=await ensurePairCode();
   const bearer=typeof req.headers.authorization==='string'&&req.headers.authorization.startsWith('Bearer ');
   let requestWorkspace=LEGACY_WORKSPACE_ID;
-  if(bearer){const principal=await requireWorkspaceAuth().authorizeRequest(req,['media:write']);requestWorkspace=principal.workspaceId!;}
-  else {const headerWorkspace=String(req.headers['x-photosync-workspace-id']||'');if(req.headers['x-photosync-pair-code']!==pair&&!workspacePairingChallenges.verify({challenge:String(req.headers['x-photosync-pairing-challenge']||''),workspaceId:headerWorkspace})){res.writeHead(401);res.end('Invalid media credential');return;}if(headerWorkspace)requestWorkspace=headerWorkspace;}
-  const deviceId=String(req.headers['x-photosync-device-id']||'unknown'); const assetId=String(req.headers['x-photosync-asset-id']||''); const key=`${deviceId}:${assetId}`;
-  const rows=await readIndex(requestWorkspace); if(rows.some(x=>x.key===key)){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
+  let principal=authorizedPrincipal;
+  let authMode:'bearer'|'pair-code'|'pairing-challenge'='pair-code';
+  if(bearer){principal=principal||await requireWorkspaceAuth().authorizeRequest(req,['media:write']);requestWorkspace=principal.workspaceId!;authMode='bearer';}
+  else {
+    const headerWorkspace=String(req.headers['x-photosync-workspace-id']||'');
+    const pairCodeValid=req.headers['x-photosync-pair-code']===pair;
+    const pairingChallengeValid=workspacePairingChallenges.verify({challenge:String(req.headers['x-photosync-pairing-challenge']||''),workspaceId:headerWorkspace});
+    if(!pairCodeValid&&!pairingChallengeValid){res.writeHead(401);res.end('Invalid media credential');return;}
+    authMode=pairingChallengeValid?'pairing-challenge':'pair-code';
+    if(headerWorkspace)requestWorkspace=headerWorkspace;
+  }
+  let gate;
+  try{
+    gate=await resolveLegacyWholeFileReceiveGate({
+      req,
+      defaultWorkspaceId:LEGACY_WORKSPACE_ID,
+      legacyOwnerUserId:LEGACY_OWNER_USER_ID,
+      authMode,
+      principal,
+      exists:async({workspaceId,key})=>(await readIndex(workspaceId)).some(item=>item.key===key),
+    });
+  }catch(error){res.writeHead(403,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));return;}
+  requestWorkspace=gate.preflight.workspaceId;
+  const {deviceId,assetId,key,audit:auditAttribution}=gate.preflight;
+  if(gate.state==='duplicate'){lastStatus.duplicates+=1;res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;}
   const filename=safeFilename(decodeURIComponent(String(req.headers['x-photosync-filename']||`media-${Date.now()}`))); const createdAt=Number(req.headers['x-photosync-created-at']||Date.now());
   const declaredSize=Number(req.headers['x-photosync-size']||req.headers['content-length']||0);
   if(!Number.isFinite(declaredSize)||declaredSize<=0){res.writeHead(411,{'content-type':'application/json'});res.end(JSON.stringify({error:'MEDIA_SIZE_REQUIRED'}));return;}
@@ -535,13 +577,47 @@ async function receiveMedia(req:IncomingMessage,res:ServerResponse){
     await pipeline(req,createWriteStream(tmp));
     const stat=await fs.stat(tmp);
     if(stat.size!==declaredSize)throw new Error(`MEDIA_SIZE_MISMATCH:${declaredSize}:${stat.size}`);
-    const hash=await hashFile(tmp); let target=path.join(folder,filename); try{await fs.access(target);target=path.join(folder,`${path.parse(filename).name}-${hash.slice(0,8)}${path.extname(filename)}`)}catch{}
-  await fs.rename(tmp,target); const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]}; rows.push(row); await writeIndex(rows,requestWorkspace);
-  lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
-  res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
-  reservationCommitted=true;
-  repo.appendAudit({workspaceId:requestWorkspace,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:deviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size}});
-  if(declaredMediaType==='video')void processVideoRow(key,requestWorkspace);void enqueueCloudUpload(row);
+    const hash=await hashFile(tmp);
+    let outcome;
+    try{
+      outcome=await mediaIngestCommitCoordinator.run({workspaceId:requestWorkspace,key},{
+        exists:async()=>{const authoritative=await readIndex(requestWorkspace);return authoritative.some(item=>item.key===key);},
+        commit:async()=>{
+          const parsed=path.parse(filename);
+          const uniqueSuffix=crypto.createHash('sha256').update(`${requestWorkspace}\0${key}\0${crypto.randomUUID()}`).digest('hex').slice(0,16);
+          const target=path.join(folder,`${parsed.name}-${uniqueSuffix}${parsed.ext}`);
+          const journal=ingestRecoveryJournal();
+          const recovery=await journal.begin({workspaceId:requestWorkspace,key,tmpPath:tmp,targetPath:target});
+          try{
+            await fs.rename(tmp,target);
+            const row:MediaIndexRow={workspaceId:requestWorkspace,key,assetId,deviceId,filename,path:target,size:stat.size,createdAt,receivedAt:new Date().toISOString(),sha256:hash,mimeType,mediaType:declaredMediaType,videoProcessing:declaredMediaType==='video'?'queued':undefined,cloudReplicas:[]};
+            await mediaIndexWriter().ingest(row);
+            await journal.complete(recovery.journalId);
+            return {row,target};
+          }catch(error){
+            await fs.unlink(target).catch(()=>undefined);
+            await journal.complete(recovery.journalId).catch(()=>undefined);
+            throw error;
+          }
+        },
+      });
+    }catch(error){
+      if(error instanceof Error&&error.message==='MEDIA_INDEX_DUPLICATE_KEY'){
+        await fs.unlink(tmp).catch(()=>undefined);repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;
+        res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;
+      }
+      throw error;
+    }
+    if(outcome.status==='duplicate'){
+      await fs.unlink(tmp).catch(()=>undefined);repo.releaseMediaReservation(requestWorkspace,declaredSize);lastStatus.duplicates+=1;
+      res.writeHead(208,{'content-type':'application/json'});res.end(JSON.stringify({state:'ALREADY_RECEIVED'}));return;
+    }
+    const {row,target}=outcome.value;
+    lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${filename}`,lastRunAt:new Date().toISOString()}; notifyRenderer('photosync:file-received',{name:filename,path:target});
+    res.writeHead(201,{'content-type':'application/json'});res.end(JSON.stringify({state:'LOCAL_STORED',sha256:hash,path:target,processing:row.videoProcessing}));
+    reservationCommitted=true;
+    repo.appendAudit({workspaceId:requestWorkspace,actorUserId:auditAttribution.actorUserId,actorDeviceId:auditAttribution.actorDeviceId,action:'media.ingest',targetType:'media',targetId:key,metadata:{filename,size:stat.size,...auditAttribution.metadata}});
+    if(declaredMediaType==='video')void processVideoRow(key,requestWorkspace);void enqueueCloudUpload(row);
   }catch(error){
     await fs.unlink(tmp).catch(()=>undefined);
     if(!reservationCommitted)repo.releaseMediaReservation(requestWorkspace,declaredSize);
@@ -612,9 +688,42 @@ function stopCloudflareTunnelSupervisor(){
   cloudflaredProcess?.kill();cloudflaredProcess=null;
 }
 
+function createProductionResumableRuntime(){
+  return createResumableMediaProductionRuntime({
+    rootDir:resumableIngestDir(),
+    libraryRoot:libraryDir(),
+    incomingRoot:incomingDir(),
+    journalDir:ingestRecoveryDir(),
+    authorizeRequest:(req,required)=>requireWorkspaceAuth().authorizeRequest(req,required),
+    workspaces:requireWorkspaceRepository(),
+    exists:async({workspaceId,key})=>(await readIndex(workspaceId)).some(item=>item.key===key),
+    ingest:async row=>{await mediaIndexWriter().ingest(row as MediaIndexRow);},
+    onCommitted:async({row,target,actorUserId})=>{
+      const mediaRow=row as MediaIndexRow;
+      lastStatus={...lastStatus,state:'idle',received:lastStatus.received+1,message:`Đã nhận ${mediaRow.filename}`,lastRunAt:new Date().toISOString()};
+      notifyRenderer('photosync:file-received',{name:mediaRow.filename,path:target});
+      requireWorkspaceRepository().appendAudit({workspaceId:mediaRow.workspaceId,actorUserId,actorDeviceId:mediaRow.deviceId,action:'media.ingest',targetType:'media',targetId:mediaRow.key,metadata:{filename:mediaRow.filename,size:mediaRow.size,transport:'resumable'}});
+      if(mediaRow.mediaType==='video')void processVideoRow(mediaRow.key,mediaRow.workspaceId);
+      void enqueueCloudUpload(mediaRow);
+    },
+    coordinator:mediaIngestCommitCoordinator,
+    onCleanupError:error=>console.error('Resumable ingest cleanup failed',error),
+    onJournalCleanupError:error=>console.error('Resumable ingest journal cleanup failed',error),
+    onPostCommitError:error=>console.error('Resumable ingest post-commit work failed',error),
+  });
+}
+
 async function startReceiver(){
-  if(receiver)return; receiver=http.createServer(async(req,res)=>{try{
-    const url=new URL(req.url||'/','http://localhost'); const pair=await ensurePairCode();
+  if(receiver)return;
+  resumableMediaRuntime=createProductionResumableRuntime();
+  resumableMediaRuntime.startCleanup();
+  receiver=http.createServer(async(req,res)=>{try{
+    const url=new URL(req.url||'/','http://localhost');
+    if(url.pathname==='/api/v1/media/uploads'||url.pathname.startsWith('/api/v1/media/uploads/')){
+      const handled=await resumableMediaRuntime?.handle(req,res);
+      if(handled)return;
+    }
+    const pair=await ensurePairCode();
     if(req.method==='POST'&&url.pathname==='/api/v1/auth/pair'){
       const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));const body=JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}');
       try{const session=await requireWorkspaceAuth().exchange({workspaceId:String(body.workspaceId||''),pairingChallenge:String(body.pairingChallenge||''),deviceId:String(body.deviceId||''),deviceName:body.deviceName?String(body.deviceName):undefined,platform:body.platform});res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(session));}catch(error){res.writeHead(401,{'content-type':'application/json'});res.end(JSON.stringify({error:error instanceof Error?error.message:String(error)}));}return;
@@ -630,7 +739,8 @@ async function startReceiver(){
     const legacyPairValid=req.headers['x-photosync-pair-code']===pair; const workspaceChallengeValid=workspacePairingChallenges.verify({challenge,workspaceId:requestWorkspace});
     const bearer=typeof req.headers.authorization==='string'&&req.headers.authorization.startsWith('Bearer ');
     let authorizedWorkspace=LEGACY_WORKSPACE_ID;
-    if(bearer){const scope=url.pathname==='/api/v1/media'&&req.method==='POST'?'media:write':req.method==='DELETE'?'media:delete':url.pathname.startsWith('/api/v1/media/')||url.pathname.startsWith('/api/v1/playback/')||url.pathname.startsWith('/api/v1/thumbnail/')?'media:download':'media:read';try{const principal=await requireWorkspaceAuth().authorizeRequest(req,[scope]);authorizedWorkspace=principal.workspaceId!;}catch(error){res.writeHead(401);res.end(error instanceof Error?error.message:String(error));return;}}
+    let authorizedPrincipal:LegacyWholeFileAuthPrincipal|undefined;
+    if(bearer){const scope=url.pathname==='/api/v1/media'&&req.method==='POST'?'media:write':req.method==='DELETE'?'media:delete':url.pathname.startsWith('/api/v1/media/')||url.pathname.startsWith('/api/v1/playback/')||url.pathname.startsWith('/api/v1/thumbnail/')?'media:download':'media:read';try{const principal=await requireWorkspaceAuth().authorizeRequest(req,[scope]);authorizedWorkspace=principal.workspaceId!;authorizedPrincipal=principal;}catch(error){res.writeHead(401);res.end(error instanceof Error?error.message:String(error));return;}}
     else if(!legacyPairValid&&!workspaceChallengeValid){res.writeHead(401);res.end('Invalid or expired pairing credential');return;}else if(workspaceChallengeValid){authorizedWorkspace=requestWorkspace;}
     if(req.method==='GET'&&url.pathname==='/api/v1/status'){const index=await readIndex(authorizedWorkspace);res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({name:os.hostname(),version:'1',libraryPath:libraryDir(),received:index.length}));return;}
     if(req.method==='GET'&&url.pathname==='/api/v1/library'){
@@ -658,7 +768,7 @@ async function startReceiver(){
       if(!headers['content-type'])headers['content-type']=row.mimeType||mimeTypeForFilename(row.filename);
       res.writeHead(response.status,headers);if(response.body)Readable.fromWeb(response.body as any).pipe(res);else res.end();return;
     }
-    if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res);return;} res.writeHead(404);res.end('Not found');
+    if(req.method==='POST'&&url.pathname==='/api/v1/media'){await receiveMedia(req,res,authorizedPrincipal);return;} res.writeHead(404);res.end('Not found');
   }catch(e){console.error(e);res.writeHead(500);res.end(e instanceof Error?e.message:String(e))}}); receiver.listen(RECEIVER_PORT,'0.0.0.0');
 }
 
@@ -688,6 +798,7 @@ async function startWebEdge(){
     revokeSession:sessionId=>requireWorkspaceAuth().revoke(sessionId),
     appendAudit:async(principal,event)=>{requireWorkspaceRepository().appendAudit({workspaceId:principal.workspaceId,actorUserId:principal.subject,actorDeviceId:principal.deviceId,action:event.action,targetType:event.targetType,targetId:event.targetId,metadata:{...(event.metadata||{}),sessionId:principal.sessionId,role:principal.workspaceRole,source:'web'}});},
     getStatus:desktopStatus,getTunnelStatus:async()=>({connected:Boolean(lastStatus.tunnelHealthy),relayUrl:PUBLIC_TUNNEL_URL,desktopId:os.hostname(),pairingPayload:'',lastError:lastStatus.tunnelHealthy?undefined:lastStatus.message}),
+    getMediaCatalogOperationsDiagnostics:principal=>mediaCatalogDiagnosticsForWeb(requireMediaCatalog(),{workspaceId:principal.workspaceId,workspaceRole:principal.workspaceRole}),
     listLocalMedia,listCloudUploads,getBackupHealth:backupHealthSnapshot,openLibrary:()=>shell.openPath(libraryDir()),addGoogleAccount:connectGoogle,listGoogleAccounts:listDriveAccounts,removeGoogleAccount:removeDriveAccount,
     retryCloud:async()=>{await retryQueuedCloud();return desktopStatus();},listGooglePhotosAccounts:()=>migrations().listAccounts(),connectGooglePhotosAccount:capability=>migrations().connectAccount(capability),removeGooglePhotosAccount:accountId=>migrations().removeAccount(accountId),
     listMigrations:()=>migrations().listJobs(),getMigration:jobId=>migrations().getSnapshot(jobId),createMigration:input=>migrations().createSelection(input),materializeMigration:jobId=>migrations().materializeSelection(jobId),
@@ -704,6 +815,7 @@ function createWindow(){const win=new BrowserWindow({width:1500,height:940,minWi
 
 ipcMain.handle('photosync:status',()=>desktopStatus());
 ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());
+ipcMain.handle('photosync:media-catalog-diagnostics',()=>mediaCatalogDiagnosticsForDesktopOperator(requireMediaCatalog()));
 ipcMain.handle('photosync:list-local',()=>listLocalMedia());
 ipcMain.handle('photosync:list-cloud-uploads',()=>listCloudUploads());
 ipcMain.handle('photosync:open-library',()=>shell.openPath(libraryDir()));
@@ -728,13 +840,12 @@ ipcMain.handle('photosync:migration-resume',async(_event,jobId:string)=>{const s
 ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigrationService().cancel(jobId);return requireMigrationService().getSnapshot(jobId)});
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
-
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await reconcileLocalLibrary();await reconcileCloudLibrary(LEGACY_WORKSPACE_ID,true);await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(incomingDir(),{recursive:true});await fs.mkdir(ingestRecoveryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});await prepareLegacyIndexForSqlite();mediaCatalogBackend=openActiveMediaCatalogBackend<MediaIndexRow>({sqlitePath:mediaCatalogDbFile(),legacyJsonPath:indexFile()});console.info('PhotoX media catalog authority',mediaCatalogBackend.health);const ingestRecovery=await ingestRecoveryJournal().recover(await readAllIndexForRecovery());if(ingestRecovery.scanned||ingestRecovery.invalid.length)console.info('PhotoX ingest restart recovery',ingestRecovery);migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await reconcileLocalLibrary();await reconcileCloudLibrary(LEGACY_WORKSPACE_ID,true);await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
       if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}
       return new Response(Readable.toWeb(createReadStream(sourcePath)) as ReadableStream,{status:200,headers:{'content-type':contentType,'content-length':String(stat.size),'accept-ranges':'bytes','cache-control':'no-store'}});
     }catch{return fetchCloudMedia(row,request)}
-  });createWindow();const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
-app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
+  });createWindow();const deleteRecovery=await recoverDeletionTombstones(await readAllIndexForRecovery(),row=>deleteManagedMedia(row.key,row.workspaceId));if(deleteRecovery.attempted)console.info('PhotoX deletion restart recovery',deleteRecovery);const rows=await readIndex();for(const row of rows.filter(r=>isVideoFilename(r.filename)&&r.videoProcessing!=='ready'))void processVideoRow(row.key);void retryQueuedCloud();repairSweepTimer=setInterval(()=>void retryQueuedCloud(),60_000);app.on('activate',()=>BrowserWindow.getAllWindows().length===0&&createWindow())});
+app.on('before-quit',()=>{if(repairSweepTimer)clearInterval(repairSweepTimer);repairSweepTimer=null;resumableMediaRuntime?.stopCleanup();resumableMediaRuntime=null;stopCloudflareTunnelSupervisor();void webEdgeServer?.stop();webEdgeServer=null;mediaCatalogBackend?.close();mediaCatalogBackend=null;migrationStore?.close();migrationStore=null;workspaceRepository=null;workspaceAuth=null;migrationService=null});
 app.on('window-all-closed',()=>process.platform!=='darwin'&&app.quit());

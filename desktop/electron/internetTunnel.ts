@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PhotoSyncTunnelClient, type TunnelIdentity } from './tunnelClient.js';
+import { proxyResumableTunnelRequest } from './resumableTunnelProxy.js';
 import { getWorkspacePairingChallengeManager } from './pairingChallenge.js';
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -93,6 +94,10 @@ async function startInternetTunnel() {
         console.error('PhotoSync Internet tunnel upload failed', uploadId, error);
       }
     },
+    onResumableRequest: async (request, identity) => proxyResumableTunnelRequest(request, {
+      expectedPairToken: identity.pairToken,
+      receiverBaseUrl: `http://127.0.0.1:${RECEIVER_PORT}`,
+    }),
     onState: state => {
       for (const win of BrowserWindow.getAllWindows()) win.webContents.send('photosync:tunnel-state', state);
     },

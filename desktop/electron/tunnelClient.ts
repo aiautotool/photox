@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import WebSocket from 'ws';
+import type { RelayResumableRequest, RelayResumableResponse } from './resumableTunnelProxy.js';
 
 export type TunnelIdentity = {
   desktopId: string;
@@ -24,6 +25,7 @@ type Options = {
   relayUrl: string;
   getPairingContext?: () => Promise<TunnelPairingContext>;
   onUploadReady: (uploadId: string, identity: TunnelIdentity, relayUrl: string) => Promise<void>;
+  onResumableRequest?: (request: RelayResumableRequest, identity: TunnelIdentity) => Promise<RelayResumableResponse>;
   onState?: (state: TunnelState) => void;
 };
 
@@ -37,6 +39,12 @@ function websocketUrl(relayUrl: string, identity: TunnelIdentity) {
   url.searchParams.set('desktopId', identity.desktopId);
   url.searchParams.set('hostSecret', identity.hostSecret);
   return url.toString();
+}
+
+function proxyFailure(requestId: string, error: unknown): RelayResumableResponse {
+  const body = Buffer.from(JSON.stringify({ error: 'RELAY_DESKTOP_PROXY_FAILED' })).toString('base64');
+  console.error('PhotoSync resumable tunnel proxy failed', requestId, error);
+  return { requestId, status: 502, headers: { 'content-type': 'application/json' }, bodyBase64: body };
 }
 
 export class PhotoSyncTunnelClient {
@@ -113,6 +121,19 @@ export class PhotoSyncTunnelClient {
     this.options.onState?.(this.state);
   }
 
+  private async handleResumableRequest(ws: WebSocket, message: unknown, identity: TunnelIdentity) {
+    if (!this.options.onResumableRequest || !message || typeof message !== 'object') return;
+    const request = message as RelayResumableRequest & { type?: string };
+    if (request.type !== 'resumable.request' || !request.requestId) return;
+    let response: RelayResumableResponse;
+    try {
+      response = await this.options.onResumableRequest(request, identity);
+    } catch (error) {
+      response = proxyFailure(String(request.requestId), error);
+    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resumable.response', ...response }));
+  }
+
   private async connect() {
     if (this.stopped) return;
     const identity = await this.getIdentity();
@@ -125,6 +146,8 @@ export class PhotoSyncTunnelClient {
         const message = JSON.parse(String(raw));
         if (message?.type === 'upload.ready' && message.upload?.id) {
           void this.options.onUploadReady(String(message.upload.id), identity, this.options.relayUrl);
+        } else if (message?.type === 'resumable.request') {
+          void this.handleResumableRequest(ws, message, identity);
         }
       } catch (error) {
         console.error('PhotoSync tunnel message error', error);

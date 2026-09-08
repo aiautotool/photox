@@ -1,71 +1,90 @@
-# PhotoSync Suite
+# PhotoX
 
-# photox
-
-Photo/video sync and storage management for **iOS + Android + Windows + macOS**.
+Photo/video SaaS + edge sync and storage management for **iOS + Android + Windows + macOS + Web**.
 
 ## Architecture
 
-The laptop is the hub. Mobile never talks to Google Drive directly.
+The Desktop/edge node remains the primary local media-processing and provider-storage hub. Mobile uploads through LAN/Internet relay paths; Web reuses the exact Desktop React renderer through a shared `DesktopBridge` contract.
 
 ```text
 Phone Photos / MediaStore
-        ↓ HTTPS
-PhotoSync Relay / Reverse Tunnel
+        ↓ HTTPS / authenticated session
+PhotoX Relay / Reverse Tunnel / LAN
         ↓ WSS + streamed delivery
-PhotoSync Laptop Receiver
-        ↓
-Local Library (Pictures/PhotoSync/YYYY/MM)
-        ↓
-Storage Manager
-   ├── Local copy
-   ├── Google Drive account 1
-   ├── Google Drive account 2
-   └── Google Drive account N
+PhotoX Desktop Edge
+        ├── SQLite media catalog authority
+        ├── Local Library
+        ├── FFmpeg/thumbnail/playback pipeline
+        └── Storage / Replica Manager
+              ├── Local
+              ├── Google Drive account 1..N
+              └── Telegram / other providers
+
+Desktop React renderer
+        ├── Electron IPC DesktopBridge
+        └── Authenticated HTTP/WebSocket DesktopBridge for Web
 ```
 
-## Stack: TypeScript only
+## Stack
 - `mobile/` — React Native + Expo
-- `desktop/` — React + Electron
+- `desktop/` — React + Electron; the same renderer is used for Desktop and Web
 - `relay/` — Internet reverse-tunnel relay
-- `packages/core/` — shared media/quota/storage allocator logic
-- `packages/google-drive/` — Google Drive API client used by desktop only
+- `packages/core/` — shared media/quota/SaaS/storage allocation logic
+- `packages/google-drive/` / provider packages — provider adapters used by Desktop/edge runtime
+- SQLite-backed persistence — workspace/session/jobs/media-catalog and other durable state
 
 ## Pair once, sync later
 
-Desktop creates a persistent `desktopId`, `pairToken`, and `hostSecret`, then connects outbound to the relay. The desktop UI shows a QR code.
+Desktop creates a persistent device identity and pairing/session context, then connects outbound to the relay. The Desktop UI shows a QR code.
 
-Mobile scans that QR once and stores the pairing in Expo SecureStore/Keychain. No IP address and no 6-digit code are required.
+Modern pairing v2 carries workspace/device context and exchanges a short-lived challenge for scoped access/refresh credentials. Mobile persists approved session material in secure storage. Legacy v1 pair-code/pair-token compatibility remains only for older clients during migration.
 
 On later runs:
-- desktop reconnects to the relay automatically when the laptop starts;
-- mobile auto-checks/syncs on app launch and foreground resume;
-- a background task also performs best-effort sync while the app is inactive;
-- no QR scan is required again unless the user explicitly forgets the laptop.
+- Desktop reconnects automatically when the computer starts;
+- Mobile refreshes its authenticated session and syncs on app launch/foreground resume;
+- background tasks perform best-effort sync when the OS schedules them;
+- no QR scan is required again unless the user forgets/revokes the device/session.
 
 ## Mobile responsibilities
 - Read real Photos / MediaStore assets.
-- Scan pairing QR once.
-- Persist the pairing token securely.
-- Upload originals through the Internet relay.
-- Wait until the laptop ACKs that each item has actually reached the desktop storage pipeline.
-- No Google OAuth, no Google Drive quota, no storage allocation logic.
+- Pair with a Desktop/workspace and persist session state securely.
+- Upload originals through authenticated LAN/Internet transports.
+- Wait until Desktop ACKs that each item reached the durable ingest/storage pipeline.
+- Present the mobile library/viewer/editor/albums/search/sync UX using authoritative APIs.
+- Mobile does not own Google Drive quota allocation logic.
 
-## Laptop responsibilities
-- Keep an outbound WSS reverse-tunnel connection to the relay.
-- Receive Internet uploads and feed them into the local receiver pipeline.
-- Store originals in `Pictures/PhotoSync/YYYY/MM`.
-- Index by `deviceId + assetId` and calculate SHA-256.
-- Manage Google OAuth accounts and distribute media to Drive accounts.
+## Desktop / Web responsibilities
+- Keep outbound reverse-tunnel connectivity when configured.
+- Receive uploads and feed them into the local ingest pipeline.
+- Store originals locally according to configured library paths/policies.
+- Maintain the runtime media catalog in transactional SQLite.
+- Manage provider accounts, replicas, verification/repair and background jobs.
+- Manage Google OAuth accounts and distribute media according to real provider quota/policy.
+- Serve the same React UI to Desktop and Web through the shared `DesktopBridge`; Web access adds authenticated HTTP/WebSocket, role, CORS/CSRF/rate-limit/audit and reverse-proxy boundaries as applicable.
 
-## Drive safety rule
+## Google Drive allocation rule
+
+There is **no fixed 10 GiB PhotoX cap**.
 
 ```text
-appUsed + incomingFile <= 10 GiB
-providerFreeAfterUpload >= 5 GiB
+allocationRatio = configuredRatio ?? 2/3
+allocationLimit = floor(authoritativeProviderTotalBytes * allocationRatio)
+ratioRemaining = max(0, allocationLimit - photoXAppUsedBytes)
+providerRemainingAfterReserve = max(0, authoritativeProviderFreeBytes - safetyReserveBytes)
+safeAvailable = min(ratioRemaining, providerRemainingAfterReserve)
 ```
 
-If no Drive has safe capacity, the file remains safe locally and cloud state becomes `BLOCKED`.
+The ratio and safety reserve are configurable per account. Actual provider remaining bytes are always respected. If no Drive account has safe capacity for a whole file, the durable cloud/replication job remains blocked/retryable while the already-ingested local original stays available.
+
+## Google Photos migration
+
+Google Photos source access is **Picker-selected only** through the current Google Photos Picker API. PhotoX does not claim unrestricted full-library crawling. Selected media is staged durably and transferred with a migration ledger, progress, pause/resume/retry and verification to either:
+- another Google Photos account using append-only destination upload; or
+- a connected Google Drive account.
+
+## Media catalog authority
+
+Desktop runtime uses SQLite as the sole active media catalog. `media-index.json` is legacy-only: it may be consumed once as a cutover import source, and JSON exports may be produced for offline recovery, but JSON is not a live runtime writer.
 
 ## Run locally
 Requires Node.js 22+.
@@ -82,7 +101,7 @@ cp desktop/.env.example desktop/.env
 npm run desktop
 ```
 
-For Internet access, point `PHOTOSYNC_RELAY_URL` to a public HTTPS relay. A named Cloudflare Tunnel is recommended for a stable relay hostname. See `docs/RUN_REAL_SYNC.md`.
+For Internet access, point the relay/public Web settings at approved HTTPS endpoints. See `docs/RUN_REAL_SYNC.md` and `docs/WEB_DEPLOYMENT.md`.
 
 Mobile:
 
@@ -94,10 +113,8 @@ npm run android
 npm run ios
 ```
 
-Open **Máy tính** → **Quét QR từ laptop** once.
-
 ## Background caveat
-Android/iOS control when deferrable background tasks execute. Foreground resume sync is immediate; background sync is best effort. For true near-instant wake-up when a laptop comes online while the phone app is suspended, use a headless/silent push trigger from the relay (APNs/FCM/Expo Push) in the production deployment.
+Android/iOS control when deferrable background tasks execute. Foreground resume sync is immediate; background sync is best effort. Near-instant wake-up while the app is suspended requires an approved push-trigger design (APNs/FCM/Expo Push) plus the normal authenticated sync path.
 
 ## Test
 
@@ -106,3 +123,5 @@ npm test
 npm run typecheck
 npm run build
 ```
+
+Completed V4 batches must also pass repository CI. Platform-specific signed installers/device builds that cannot run in the current environment are reported as **NOT VERIFIED**, never as PASS.

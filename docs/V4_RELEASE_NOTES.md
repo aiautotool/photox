@@ -41,6 +41,11 @@ This file is a cumulative release/development note for branch `v4`. It should be
 - Workspace scoping has been added across media/cloud replica records, Google Drive ownership, Telegram contracts, durable jobs, video/derived media, device/session state and subscription state.
 - Legacy SQLite migrations adopt unscoped rows into a designated legacy workspace instead of exposing them cross-tenant.
 - Durable background jobs, reconciliation and migration state are designed for restart/retry behavior.
+- Main-process media ingest now appends through the exact `workspaceId + media key` runtime writer instead of replacing the whole workspace JSON snapshot. The exact catalog boundary rejects duplicate identities even if two callers pass the earlier optimistic duplicate check.
+- Video processing metadata now patches only the target workspace/media row through the serialized runtime writer, preserving concurrent ingest, replica and verifier updates.
+- Legacy Drive upload persistence now synchronizes replicas against the latest committed row instead of replacing a stale replica array. Per-account progress added concurrently is retained, while obsolete account-less queue markers are cleared once the caller snapshot no longer reports a queued condition.
+- CI includes a production wiring regression that prevents ingest, video and replica call sites from silently reverting to whole-workspace `writeIndex()`/`updateIndexRow()` paths.
+- `deleteManagedMedia` intentionally remains on the legacy path until a deletion claim/tombstone is implemented; replacing it with a simple exact `remove()` would still allow an uploader to add a replica between remote cleanup and catalog removal.
 
 ### Devices, sessions and workspace UX
 - Authoritative workspace device/session service supports list/revoke behavior with role and tenant checks.

@@ -33,6 +33,7 @@ export interface WebEdgeHandlers {
   revokeWorkspaceDevice?(principal:WebPrincipal,deviceId:string):Promise<unknown>;
   updateGoogleDriveAllocation?(principal:WebPrincipal,accountId:string,body:unknown):Promise<unknown>;
   repairMedia?(principal:WebPrincipal,key:string):Promise<unknown>;
+  getMediaCatalogOperationsDiagnostics?(principal:WebPrincipal):Promise<unknown>|unknown;
   appendAudit(principal:WebPrincipal,event:WebAuditInput):Promise<void>;
   getStatus():Promise<unknown>;
   getTunnelStatus():Promise<unknown>;
@@ -329,6 +330,11 @@ export class PhotoXWebEdgeServer {
     let match=/^\/api\/web\/v1\/sessions\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceSession?.(principal,id)??Promise.resolve(this.deviceApi().revokeSession(principal,id)));return this.json(res,200,value);}
     match=/^\/api\/web\/v1\/devices\/([^/]+)$/.exec(p);if(m==='DELETE'&&match){const id=decodeURIComponent(match[1]);const value=await (this.handlers.revokeWorkspaceDevice?.(principal,id)??Promise.resolve(this.deviceApi().revokeDevice(principal,id)));return this.json(res,200,value);}
     if(m==='GET'&&p==='/api/web/v1/status')return read(this.handlers.getStatus);
+    if(m==='GET'&&p==='/api/web/v1/operations/media-catalog'){
+      if(!this.requireRole(principal,'admin')){this.json(res,403,{error:'ROLE_FORBIDDEN'});return;}
+      if(!this.handlers.getMediaCatalogOperationsDiagnostics){this.json(res,503,{error:'MEDIA_CATALOG_OPERATIONS_UNAVAILABLE'});return;}
+      return read(()=>Promise.resolve(this.handlers.getMediaCatalogOperationsDiagnostics!(principal)));
+    }
     if(m==='GET'&&p==='/api/web/v1/tunnel')return read(this.handlers.getTunnelStatus);
     if(m==='GET'&&p==='/api/web/v1/library'){
       const raw=await this.handlers.listLocalMedia();const items=Array.isArray(raw)?raw as BrowserMedia[]:[];

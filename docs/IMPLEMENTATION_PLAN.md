@@ -55,8 +55,9 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Backup health calculation and repair sweep structure.
 - Persisted Google Drive replicas are now periodically re-verified against authoritative remote metadata. Missing objects, size mismatch, source SHA-256 app-property mismatch, or MD5 mismatch are downgraded so the existing repair sweep replenishes under-replicated assets; transient provider failures retain last-known VERIFIED state and are retried instead of causing duplicate repair uploads.
 - Remote verification is workspace/account scoped, records `remoteCheckedAt` and the provider MD5 baseline, defaults to a 15-minute cadence, and is configurable with `PHOTOX_REPLICA_VERIFY_INTERVAL_MS` (minimum one minute).
-- Replica-health persistence now merges only the targeted workspace/key/replica fields onto the latest media-index snapshot and skips replicas removed concurrently, with optimistic compare-before-rename retries to avoid replacing newer ingestion/video/repair metadata with a stale verifier snapshot.
-- A per-media repair coordinator now provides exact workspace/key selection, local-original validation, unique verified-account target checks, and in-flight de-duplication. It is regression-tested and CI-gated; IPC/Web/renderer wiring remains the next integration step before replacing the current workspace-wide Repair action.
+- Replica-health persistence merges only the targeted workspace/key/replica fields onto the latest authoritative catalog row and skips replicas removed concurrently, preventing background verification from replacing newer ingestion/video/repair metadata.
+- A per-media repair coordinator provides exact workspace/key selection, local-original validation, unique verified-account target checks, and in-flight de-duplication. It is wired through Electron IPC, authenticated Web role/audit transport and the shared `DesktopBridge`.
+- Per-media repair now reads and atomically merges replica progress through the SQLite media catalog only. Legacy `media-index.json` is not a runtime fallback; exact `(workspaceId,key)` isolation and multi-account replica preservation are CI-gated.
 
 ## Backup UI and cloud management restoration
 - Detailed mobile upload progress restored using real native upload byte callbacks: current filename, uploaded bytes, total bytes, remaining bytes and queue count.
@@ -64,7 +65,7 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - Cloud-only assets can already be downloaded to the device; viewer keeps the original-download path even when compatibility playback uses a derivative.
 - Added authenticated `DELETE /api/v1/media/:key`: managed Google Drive replicas are deleted first; local original/thumbnail/playback and catalog row are removed only after replica deletion succeeds.
 - Mobile viewer exposes `Xóa khỏi cloud` with destructive confirmation and removes the deleted asset from local PhotoX metadata.
-- Shared Desktop/Web Problems UI now drills into each under-replicated item with unique verified-account count, pending/failed replicas, provider messages, local-original availability and truthful replica state. Repair is disabled when no local original can seed a replacement, and the action invokes the existing real workspace repair sweep without marking the item safe until verification succeeds.
+- Shared Desktop/Web Problems UI now drills into each under-replicated item with unique verified-account count, pending/failed replicas, provider messages, local-original availability and truthful replica state. Repair is disabled when no local original can seed a replacement, and the action invokes the real exact-media repair path without marking the item safe until verification succeeds.
 
 ## SaaS V4 priority progress
 ### Google Drive allocation
@@ -140,10 +141,9 @@ Audit against the current PhotoX master requirements, with priority on real impl
 - [ ] Persist upload chunks/jobs and resume from acknowledged byte offsets after restart/network interruption.
 - [ ] Network-change/Wi-Fi/charging policy enforcement and tests.
 - [x] Periodically verify persisted Google Drive replica existence and integrity against authoritative remote metadata before allowing stale VERIFIED state to remain trusted indefinitely; definitive missing/size/SHA-256/MD5 mismatches are downgraded for repair while transient outages defer without duplicating uploads.
-- [x] Merge background verifier mutations onto the latest media-index row/replica snapshot instead of replacing a stale whole-index snapshot; tenant/replica identity regressions cover preservation of concurrent metadata and non-resurrection of removed replicas.
-- [ ] Migrate all media-index writers to one serialized persistence layer or SQLite transaction boundary; optimistic verifier retries reduce the current race but do not replace a single-writer/transactional store.
-- [x] Under-replicated/failed/missing UI drill-down with per-media replica/account/provider details and guarded Repair action backed by the existing real repair sweep.
-- [ ] Wire the new per-media repair coordinator through Electron IPC, authenticated Web role/CSRF/audit, shared `DesktopBridge`, and the existing Repair button; coordinator selection/dedupe/eligibility logic is implemented and CI-gated, but the UI intentionally still uses workspace-wide repair until this wiring is complete.
+- [x] Merge background verifier mutations onto the latest authoritative SQLite catalog row/replica snapshot instead of replacing stale whole-index state; tenant/replica identity regressions cover preservation of concurrent metadata and non-resurrection of removed replicas.
+- [x] SQLite is the sole active Desktop media-catalog authority after one-time legacy import; ingest, video metadata, replica verification/repair and delete mutations use tenant-scoped transactional catalog operations rather than runtime JSON dual-write/fallback.
+- [x] Under-replicated/failed/missing UI drill-down with per-media replica/account/provider details and guarded exact-media Repair action backed by real coordinator/IPC/Web/DesktopBridge logic.
 - [ ] Safe PhotoX Core delete endpoint before enabling permanent delete of cloud-only originals.
 
 ## CI notes

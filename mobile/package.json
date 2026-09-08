@@ -7,12 +7,16 @@
     "start": "expo start --dev-client",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "build": "npm run build:ios && npm run build:android",
+    "build:ios": "expo export --platform ios --output-dir dist-ios --clear",
+    "build:android": "expo export --platform android --output-dir dist-android --clear",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@dariyd/react-native-image-filters": "^1.0.10",
     "@photosync/core": "*",
     "@photox/image-editor": "*",
+    "@photox/mobile-sdk": "*",
     "exifr": "^7.1.3",
     "expo": "^57.0.0",
     "expo-background-task": "~57.0.14",

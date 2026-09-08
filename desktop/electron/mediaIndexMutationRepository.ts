@@ -39,42 +39,54 @@ export function createMediaIndexMutationRepository<T extends MediaIndexIdentity>
     async append(row) {
       const identity = normalizeIdentity(row.workspaceId, row.key);
       const normalized = { ...row, ...identity } as T;
-      await mutateSerializedJsonArray<T>(filePath, rows => {
+      const committed = await mutateSerializedJsonArray<T>(filePath, rows => {
         if (rows.some(item => sameIdentity(item, identity.workspaceId, identity.key))) {
           throw new Error('MEDIA_INDEX_DUPLICATE_KEY');
         }
         return [...rows, normalized];
       }, { tempLabel: 'append-media' });
-      return normalized;
+      return committed.find(item => sameIdentity(item, identity.workspaceId, identity.key)) ?? normalized;
     },
 
     async patch(workspaceId, key, patch) {
       const identity = normalizeIdentity(workspaceId, key);
-      let updated: T | null = null;
-      await mutateSerializedJsonArray<T>(filePath, rows => rows.map(row => {
-        if (!sameIdentity(row, identity.workspaceId, identity.key)) return row;
-        const candidate = typeof patch === 'function'
-          ? patch(row)
-          : ({ ...row, ...patch } as T);
-        updated = {
-          ...candidate,
-          workspaceId: identity.workspaceId,
-          key: identity.key,
-        } as T;
-        return updated;
-      }), { tempLabel: 'patch-media' });
-      return updated;
+      let matchedOnCommittedAttempt = false;
+      const committed = await mutateSerializedJsonArray<T>(filePath, rows => {
+        // mutateSerializedJsonArray may invoke this callback again after detecting
+        // an external writer. Reset attempt-local state so a match from a stale
+        // attempt can never be reported as a successful committed patch.
+        matchedOnCommittedAttempt = false;
+        return rows.map(row => {
+          if (!sameIdentity(row, identity.workspaceId, identity.key)) return row;
+          matchedOnCommittedAttempt = true;
+          const candidate = typeof patch === 'function'
+            ? patch(row)
+            : ({ ...row, ...patch } as T);
+          return {
+            ...candidate,
+            workspaceId: identity.workspaceId,
+            key: identity.key,
+          } as T;
+        });
+      }, { tempLabel: 'patch-media' });
+      if (!matchedOnCommittedAttempt) return null;
+      return committed.find(item => sameIdentity(item, identity.workspaceId, identity.key)) ?? null;
     },
 
     async remove(workspaceId, key) {
       const identity = normalizeIdentity(workspaceId, key);
-      let removed: T | null = null;
-      await mutateSerializedJsonArray<T>(filePath, rows => rows.filter(row => {
-        if (!sameIdentity(row, identity.workspaceId, identity.key)) return true;
-        removed = row;
-        return false;
-      }), { tempLabel: 'remove-media' });
-      return removed;
+      let removedOnCommittedAttempt: T | null = null;
+      await mutateSerializedJsonArray<T>(filePath, rows => {
+        // Retry callbacks must not retain the removed row from an earlier stale
+        // attempt. Only the attempt that actually commits is authoritative.
+        removedOnCommittedAttempt = null;
+        return rows.filter(row => {
+          if (!sameIdentity(row, identity.workspaceId, identity.key)) return true;
+          removedOnCommittedAttempt = row;
+          return false;
+        });
+      }, { tempLabel: 'remove-media' });
+      return removedOnCommittedAttempt;
     },
   };
 }

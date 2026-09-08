@@ -11,6 +11,15 @@ export type DriveRuntimeAllocation = {
   snapshot: StorageAllocationSnapshot;
 };
 
+export type RendererDriveAllocationVerification = {
+  source: 'google-drive-about.storageQuota';
+  status: 'verified' | 'unavailable';
+  blockers: string[];
+  expectedAllocationLimitBytes: number | null;
+  expectedProviderRemainingAfterReserveBytes: number;
+  expectedAvailableBytes: number;
+};
+
 export type RendererDriveAllocationSnapshot = {
   providerTotalBytes: number | null;
   providerFreeBytes: number;
@@ -22,6 +31,7 @@ export type RendererDriveAllocationSnapshot = {
   ratioRemainingBytes: number | null;
   providerRemainingAfterReserveBytes: number;
   availableBytes: number;
+  verification?: RendererDriveAllocationVerification;
 };
 
 export type RendererDriveAccountInfo = {
@@ -36,6 +46,38 @@ export type RendererDriveAccountInfo = {
 
 function finiteNonNegative(value: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function rendererVerification(snapshot: StorageAllocationSnapshot): RendererDriveAllocationVerification {
+  if (snapshot.providerTotalBytes === null || snapshot.allocationLimitBytes === null || snapshot.ratioRemainingBytes === null) {
+    return {
+      source: 'google-drive-about.storageQuota',
+      status: 'unavailable',
+      blockers: ['AUTHORITATIVE_GOOGLE_DRIVE_QUOTA_UNAVAILABLE'],
+      expectedAllocationLimitBytes: null,
+      expectedProviderRemainingAfterReserveBytes: Math.max(0, snapshot.providerFreeBytes - snapshot.safetyReserveBytes),
+      expectedAvailableBytes: 0,
+    };
+  }
+
+  const expectedAllocationLimitBytes = Math.floor(snapshot.providerTotalBytes * snapshot.allocationRatio);
+  const expectedRatioRemainingBytes = Math.max(0, expectedAllocationLimitBytes - snapshot.appUsedBytes);
+  const expectedProviderRemainingAfterReserveBytes = Math.max(0, snapshot.providerFreeBytes - snapshot.safetyReserveBytes);
+  const expectedAvailableBytes = Math.max(0, Math.min(expectedRatioRemainingBytes, expectedProviderRemainingAfterReserveBytes));
+  const blockers: string[] = [];
+  if (snapshot.allocationLimitBytes !== expectedAllocationLimitBytes) blockers.push('ALLOCATION_RATIO_MISMATCH');
+  if (snapshot.ratioRemainingBytes !== expectedRatioRemainingBytes) blockers.push('ALLOCATION_REMAINING_MISMATCH');
+  if (snapshot.providerRemainingAfterReserveBytes !== expectedProviderRemainingAfterReserveBytes) blockers.push('PROVIDER_REMAINING_MISMATCH');
+  if (snapshot.availableBytes !== expectedAvailableBytes) blockers.push('EFFECTIVE_AVAILABLE_MISMATCH');
+
+  return {
+    source: 'google-drive-about.storageQuota',
+    status: blockers.length ? 'unavailable' : 'verified',
+    blockers,
+    expectedAllocationLimitBytes,
+    expectedProviderRemainingAfterReserveBytes,
+    expectedAvailableBytes,
+  };
 }
 
 export function driveRuntimeAllocation(input: {
@@ -74,6 +116,7 @@ export function rendererDriveAllocationSnapshot(snapshot: StorageAllocationSnaps
     ratioRemainingBytes: snapshot.ratioRemainingBytes,
     providerRemainingAfterReserveBytes: snapshot.providerRemainingAfterReserveBytes,
     availableBytes: snapshot.availableBytes,
+    verification: rendererVerification(snapshot),
   };
 }
 
@@ -115,6 +158,14 @@ export function rendererDriveAccountInfo(input: {
       ratioRemainingBytes: null,
       providerRemainingAfterReserveBytes: 0,
       availableBytes: 0,
+      verification: {
+        source: 'google-drive-about.storageQuota',
+        status: 'unavailable',
+        blockers: ['AUTHORITATIVE_GOOGLE_DRIVE_QUOTA_UNAVAILABLE'],
+        expectedAllocationLimitBytes: null,
+        expectedProviderRemainingAfterReserveBytes: 0,
+        expectedAvailableBytes: 0,
+      },
     },
   };
 }

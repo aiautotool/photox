@@ -2,6 +2,8 @@ export * from './DesktopClient';
 export * from './MediaApiClient';
 export * from './PairingStore';
 export * from './PhotoXMobileSDK';
+export * from './ResumableUploadClient';
+export * from './UploadTransportPolicy';
 export * from './media/MediaActions';
 export * from './media/ExpoMediaLibraryAdapter';
 export * from './media/FunctionMediaEditorAdapter';

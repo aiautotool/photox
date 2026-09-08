@@ -8,6 +8,7 @@ export type ReplicaHealthRecord = {
 export type ReplicaHealthIndexRow = {
   workspaceId?: string;
   key: string;
+  deletion?: { state: 'deleting'; claimId: string; startedAt: string };
   cloud?: ReplicaHealthRecord;
   cloudReplicas?: ReplicaHealthRecord[];
   [key: string]: unknown;
@@ -32,7 +33,9 @@ function replicaIdentityMatches(replica: ReplicaHealthRecord, patch: ReplicaHeal
  * It intentionally never replaces a whole media row, so concurrent metadata,
  * processing, and replica additions written by the main process are preserved.
  * If the target replica disappeared meanwhile, the patch is skipped instead of
- * resurrecting a replica that another operation intentionally removed.
+ * resurrecting a replica that another operation intentionally removed. Rows with
+ * an active deletion tombstone are also skipped so an in-flight verifier cannot
+ * race a delete and recreate provider state after remote deletion has started.
  */
 export function applyReplicaHealthPatches<T extends ReplicaHealthIndexRow>(
   latestRows: T[],
@@ -52,6 +55,10 @@ export function applyReplicaHealthPatches<T extends ReplicaHealthIndexRow>(
     }
 
     const row = rows[rowIndex];
+    if (row.deletion?.state === 'deleting') {
+      skipped += 1;
+      continue;
+    }
     const existingReplicas = row.cloudReplicas?.length ? row.cloudReplicas : row.cloud ? [row.cloud] : [];
     const replicaIndex = existingReplicas.findIndex(replica => replicaIdentityMatches(replica, patch));
     if (replicaIndex < 0) {
