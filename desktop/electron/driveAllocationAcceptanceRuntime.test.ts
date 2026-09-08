@@ -65,7 +65,7 @@ test('custom ratio and provider remaining bytes remain authoritative in runtime 
   try {
     const runtime=new DriveAllocationAcceptanceRuntime(dir);
     const observation=await runtime.observeBestEffort({
-      account:account({allocationPolicy:{maxUsageRatio:0.9,safetyReserveBytes:2*GiB}}),
+      account:account({maxUsageRatio:0.9,safetyReserveBytes:2*GiB}),
       email:'owner@example.test',
       quota:{limit:100*GiB,usage:96*GiB},
       appUsedBytes:10*GiB,
