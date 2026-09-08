@@ -15,9 +15,14 @@ export type ResumableMediaHttpLifecycle = {
   finalize(principal: ResumableIngestPrincipal, input: { sessionId: string; sha256: string }): Promise<unknown>;
 };
 
+export type ResumableAcceptanceHttpIngestion = {
+  ingest(input: { workspaceId: string; deviceId: string; report: unknown }): Promise<{ provesAcceptance: boolean }>;
+};
+
 export type ResumableMediaHttpDependencies = {
   authorize(req: IncomingMessage): Promise<ResumableIngestPrincipal>;
   lifecycle: ResumableMediaHttpLifecycle;
+  acceptanceIngestion?: ResumableAcceptanceHttpIngestion;
   maxJsonBytes?: number;
   maxChunkBytes?: number;
 };
@@ -25,6 +30,7 @@ export type ResumableMediaHttpDependencies = {
 const DEFAULT_MAX_JSON_BYTES = 64 * 1024;
 const DEFAULT_MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 const BASE_PATH = '/api/v1/media/uploads';
+const ACCEPTANCE_PATH = `${BASE_PATH}/acceptance`;
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}) {
   res.writeHead(status, {
@@ -110,10 +116,11 @@ export function createResumableMediaIngestHttpHandler(deps: ResumableMediaHttpDe
     if (!inNamespace) return false;
 
     const isCreate = req.method === 'POST' && url.pathname === BASE_PATH;
+    const isAcceptance = req.method === 'POST' && url.pathname === ACCEPTANCE_PATH && Boolean(deps.acceptanceIngestion);
     const statusSessionId = req.method === 'GET' ? sessionIdFromPath(url.pathname) : null;
     const chunkSessionId = req.method === 'PATCH' ? sessionIdFromPath(url.pathname, '/chunks') : null;
     const finalizeSessionId = req.method === 'POST' ? sessionIdFromPath(url.pathname, '/finalize') : null;
-    if (!isCreate && !statusSessionId && !chunkSessionId && !finalizeSessionId) {
+    if (!isCreate && !isAcceptance && !statusSessionId && !chunkSessionId && !finalizeSessionId) {
       sendJson(res, 404, { error: 'RESUMABLE_UPLOAD_ROUTE_NOT_FOUND' });
       return true;
     }
@@ -128,6 +135,17 @@ export function createResumableMediaIngestHttpHandler(deps: ResumableMediaHttpDe
     }
 
     try {
+      if (isAcceptance) {
+        const report = await readJson(req, maxJsonBytes);
+        const result = await deps.acceptanceIngestion!.ingest({
+          workspaceId: principal.workspaceId,
+          deviceId: principal.deviceId,
+          report,
+        });
+        sendJson(res, 201, { provesAcceptance: result.provesAcceptance });
+        return true;
+      }
+
       if (isCreate) {
         const body = await readJson(req, maxJsonBytes);
         const session = await deps.lifecycle.create(principal, {
