@@ -1,6 +1,18 @@
+export type PhysicalResumableAcceptanceDiagnostics = {
+  initialized: boolean;
+  accepted: boolean;
+  releaseCommitSha?: string;
+  requiredPlatforms: string[];
+  acceptedPlatforms: string[];
+  blockers: string[];
+  evidenceCount: number;
+  persistenceHealthy: boolean;
+};
+
 export type LegacyWholeFileCompatibilityDiagnostics =
   | {
       initialized: false;
+      physicalResumableAcceptance?: PhysicalResumableAcceptanceDiagnostics;
       deprecationReadiness: {
         ready: false;
         physicalDeviceResumableAccepted: false;
@@ -9,6 +21,7 @@ export type LegacyWholeFileCompatibilityDiagnostics =
     }
   | {
       initialized: true;
+      physicalResumableAcceptance?: PhysicalResumableAcceptanceDiagnostics;
       snapshot: {
         observedSince: string;
         observedUntil: string;
@@ -49,6 +62,13 @@ export type LegacyWholeFileOperationsView = {
   lastObservedAt?: string;
   lastPersistedAt?: string;
   physicalDeviceResumableAccepted: boolean;
+  physicalEvidenceInitialized: boolean;
+  physicalEvidencePersistenceHealthy: boolean;
+  physicalEvidenceCount: number;
+  physicalReleaseCommitSha?: string;
+  physicalRequiredPlatforms: string[];
+  physicalAcceptedPlatforms: string[];
+  physicalEvidenceBlockers: string[];
   observationProgressPercent: number;
   blockers: string[];
   blockerLabels: string[];
@@ -70,9 +90,23 @@ function blockerLabel(value: string): string {
   return BLOCKER_LABELS[value] ?? value.replaceAll('_', ' ').toLowerCase();
 }
 
+function physicalEvidenceView(diagnostics: LegacyWholeFileCompatibilityDiagnostics | undefined) {
+  const physical = diagnostics?.physicalResumableAcceptance;
+  return {
+    physicalEvidenceInitialized: physical?.initialized ?? false,
+    physicalEvidencePersistenceHealthy: physical?.persistenceHealthy ?? false,
+    physicalEvidenceCount: safeCount(physical?.evidenceCount),
+    physicalReleaseCommitSha: physical?.releaseCommitSha,
+    physicalRequiredPlatforms: [...(physical?.requiredPlatforms ?? ['ios', 'android'])],
+    physicalAcceptedPlatforms: [...(physical?.acceptedPlatforms ?? [])],
+    physicalEvidenceBlockers: [...(physical?.blockers ?? ['PHYSICAL_RESUMABLE_EVIDENCE_NOT_INITIALIZED'])],
+  };
+}
+
 export function buildLegacyWholeFileOperationsView(
   diagnostics: LegacyWholeFileCompatibilityDiagnostics | undefined,
 ): LegacyWholeFileOperationsView {
+  const physical = physicalEvidenceView(diagnostics);
   if (!diagnostics || !diagnostics.initialized) {
     const blockers = diagnostics?.deprecationReadiness.blockers ?? ['TELEMETRY_RUNTIME_NOT_INITIALIZED'];
     return {
@@ -89,6 +123,7 @@ export function buildLegacyWholeFileOperationsView(
       persistenceLabel: 'Chưa khởi tạo',
       persistenceHealthy: false,
       physicalDeviceResumableAccepted: false,
+      ...physical,
       observationProgressPercent: 0,
       blockers,
       blockerLabels: blockers.map(blockerLabel),
@@ -123,6 +158,7 @@ export function buildLegacyWholeFileOperationsView(
     lastObservedAt: snapshot.lastObservedAt,
     lastPersistedAt: persistence.lastPersistedAt,
     physicalDeviceResumableAccepted: readiness.physicalDeviceResumableAccepted,
+    ...physical,
     observationProgressPercent,
     blockers: [...readiness.blockers],
     blockerLabels: readiness.blockers.map(blockerLabel),
