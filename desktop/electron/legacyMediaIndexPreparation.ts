@@ -2,6 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { migrateLegacyWorkspaceRows } from '@photosync/core';
+import { initializeLegacyWholeFileCompatibilityTelemetry } from './legacyWholeFileCompatibilityTelemetryProduction.js';
 
 export type LegacyMediaIndexPreparationResult = {
   status: 'SOURCE_MISSING' | 'ALREADY_SCOPED' | 'MIGRATED';
@@ -53,6 +54,11 @@ async function syncDirectory(directory: string): Promise<void> {
 /**
  * Makes a legacy JSON media index tenant-scoped before the one-time SQLite import.
  *
+ * This is also the earliest production startup point that receives the
+ * authoritative Desktop state directory. Initialize whole-file compatibility
+ * telemetry here so every later receiver request is observed without coupling
+ * the receiver to Electron app-path globals.
+ *
  * Crash contract:
  * - the source file is never modified in-place;
  * - a fully-written + fsync'd unique temp is atomically renamed over the source;
@@ -66,6 +72,9 @@ export async function prepareLegacyMediaIndexForSqlite(options: {
 }): Promise<LegacyMediaIndexPreparationResult> {
   if (!options.indexPath) throw new Error('LEGACY_MEDIA_INDEX_PATH_REQUIRED');
   if (!options.workspaceId.trim()) throw new Error('LEGACY_MEDIA_INDEX_WORKSPACE_REQUIRED');
+
+  const directory = path.dirname(options.indexPath);
+  await initializeLegacyWholeFileCompatibilityTelemetry(directory);
 
   const removedStaleTemps = await removeStaleMigrationTemps(options.indexPath);
   let text: string;
@@ -91,7 +100,6 @@ export async function prepareLegacyMediaIndexForSqlite(options: {
     return { status: 'ALREADY_SCOPED', migratedRows: 0, removedStaleTemps };
   }
 
-  const directory = path.dirname(options.indexPath);
   await fs.mkdir(directory, { recursive: true });
   const tempPath = `${options.indexPath}.${crypto.randomUUID()}.migrating`;
   let renamed = false;
