@@ -91,3 +91,32 @@ test('missing release commit identity fails closed even when evidence exists', a
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test('operations diagnostics expose controlled mode and fail closed on corrupt server authority ledger', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-physical-production-'));
+  const previousReleaseSha = process.env.PHOTOX_RELEASE_COMMIT_SHA;
+  const previousMode = process.env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE;
+  try {
+    resetLegacyWholeFileCompatibilityTelemetryForTests();
+    process.env.PHOTOX_RELEASE_COMMIT_SHA = RELEASE_SHA;
+    process.env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE = 'real-device';
+    await fs.writeFile(path.join(directory, 'physical-resumable-server-authority.json'), '{"version":1,"records":[{"broken":true}]}\n');
+
+    await initializeLegacyWholeFileCompatibilityTelemetry(directory);
+    const physical = legacyWholeFileCompatibilityDiagnostics().physicalResumableAcceptance;
+    assert.equal(physical.captureMode, 'real-device');
+    assert.equal(physical.captureEnabled, true);
+    assert.equal(physical.releaseCommitSha, RELEASE_SHA);
+    assert.equal(physical.serverAuthorityLedgerInitialized, true);
+    assert.equal(physical.serverAuthorityLedgerHealthy, false);
+    assert.equal(physical.serverAuthorityRecordCount, 0);
+    assert.deepEqual(physical.captureBlockers, ['PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_UNHEALTHY']);
+  } finally {
+    if (previousReleaseSha === undefined) delete process.env.PHOTOX_RELEASE_COMMIT_SHA;
+    else process.env.PHOTOX_RELEASE_COMMIT_SHA = previousReleaseSha;
+    if (previousMode === undefined) delete process.env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE;
+    else process.env.PHOTOX_PHYSICAL_RESUMABLE_ACCEPTANCE_MODE = previousMode;
+    resetLegacyWholeFileCompatibilityTelemetryForTests();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
