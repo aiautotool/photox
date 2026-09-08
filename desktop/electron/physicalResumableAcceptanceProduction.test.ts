@@ -51,6 +51,7 @@ test('production readiness derives physical acceptance from exact release eviden
     await initializeLegacyWholeFileCompatibilityTelemetry(directory);
     const diagnostics = legacyWholeFileCompatibilityDiagnostics();
     assert.equal(diagnostics.initialized, true);
+    if (!diagnostics.initialized) throw new Error('TELEMETRY_NOT_INITIALIZED');
     assert.equal(diagnostics.physicalResumableAcceptance.accepted, true);
     assert.deepEqual(diagnostics.physicalResumableAcceptance.acceptedPlatforms, ['ios', 'android']);
     assert.equal(diagnostics.deprecationReadiness.physicalDeviceResumableAccepted, true);
@@ -77,6 +78,8 @@ test('missing release commit identity fails closed even when evidence exists', a
 
     await initializeLegacyWholeFileCompatibilityTelemetry(directory);
     const diagnostics = legacyWholeFileCompatibilityDiagnostics();
+    assert.equal(diagnostics.initialized, true);
+    if (!diagnostics.initialized) throw new Error('TELEMETRY_NOT_INITIALIZED');
     assert.equal(diagnostics.physicalResumableAcceptance.accepted, false);
     assert.ok(diagnostics.physicalResumableAcceptance.blockers.includes('PHYSICAL_RESUMABLE_RELEASE_COMMIT_SHA_MISSING'));
     assert.equal(diagnostics.deprecationReadiness.physicalDeviceResumableAccepted, false);
