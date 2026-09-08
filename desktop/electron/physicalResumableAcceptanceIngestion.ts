@@ -128,6 +128,7 @@ export class PhysicalResumableAcceptanceIngestion {
     private readonly authority: PhysicalResumableServerAuthority,
     private readonly capture: PhysicalResumableAcceptanceCaptureWorkflow,
     expectedReleaseCommitSha?: string,
+    private readonly onEvidencePersisted?: (evidence: PhysicalResumableCapturedEvidence) => Promise<void> | void,
   ) {
     this.expectedReleaseCommitSha = normalizedReleaseCommitSha(expectedReleaseCommitSha);
   }
@@ -198,6 +199,16 @@ export class PhysicalResumableAcceptanceIngestion {
       },
     };
 
-    return this.capture.appendObservedRun(observation);
+    const evidence = await this.capture.appendObservedRun(observation);
+    if (this.onEvidencePersisted) {
+      try {
+        await this.onEvidencePersisted(evidence);
+      } catch {
+        // Evidence durability is authoritative; diagnostics refresh is best-effort
+        // and must never turn a successfully persisted acceptance report into an
+        // HTTP failure that could cause a duplicate client retry.
+      }
+    }
+    return evidence;
   }
 }
