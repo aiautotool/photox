@@ -126,4 +126,21 @@ export class LiveSafeDriveAllocationAcceptance {
     await this.options.ledger.append(observation);
     return observation;
   }
+
+  /**
+   * Production-safe telemetry boundary: callers may invoke this from a quota
+   * refresh path without allowing acceptance persistence/verification failures
+   * to break backup or account refresh behavior.
+   */
+  async observeBestEffort(
+    input:{account:SavedDriveAccountRecord;email:string;appUsedBytes:number},
+    onError?:(error:unknown)=>void,
+  ):Promise<DriveAllocationAcceptanceObservation|undefined> {
+    try {
+      return await this.observe(input);
+    } catch(error) {
+      onError?.(error);
+      return undefined;
+    }
+  }
 }
