@@ -44,21 +44,19 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<false/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Cho phép PhotoSync dùng camera để quét QR ghép nối với laptop.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>PhotoSync cần kết nối tới laptop trong cùng mạng Wi-Fi để đồng bộ ảnh.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PhotoSync cần kết nối tới laptop trong cùng mạng Wi-Fi để đồng bộ ảnh.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Allow $(PRODUCT_NAME) to access your microphone</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Allow $(PRODUCT_NAME) to save photos</string>
+	<string>PhotoSync cần quyền lưu ảnh và video đã tải xuống vào thư viện.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>PhotoSync cần đọc ảnh và video để đồng bộ sang laptop.</string>
 	<key>NSUserActivityTypes</key>
