@@ -79,3 +79,28 @@ test('corrupt durable ledger fails closed and is replaced only by a fresh verifi
     assert.equal((await f.ledger.latest('drive-safe'))?.observedAt,observation.observedAt);
   }finally{await rm(f.dir,{recursive:true,force:true})}
 });
+
+test('best-effort production boundary isolates acceptance failures from quota refresh callers',async()=>{
+  const f=await fixture();
+  try{
+    const errors:unknown[]=[];
+    const harness=new LiveSafeDriveAllocationAcceptance({ledger:f.ledger,refreshQuota:async()=>({limit:0,usage:0})});
+    const result=await harness.observeBestEffort({account:account(),email:'owner@example.com',appUsedBytes:0},error=>errors.push(error));
+    assert.equal(result,undefined);
+    assert.equal(errors.length,1);
+    assert.match(String(errors[0]),/AUTHORITATIVE_GOOGLE_DRIVE_QUOTA_UNAVAILABLE/);
+    assert.deepEqual(await f.ledger.load(),[]);
+  }finally{await rm(f.dir,{recursive:true,force:true})}
+});
+
+test('best-effort production boundary still persists a verified observation when authority is healthy',async()=>{
+  const f=await fixture();
+  try{
+    const harness=new LiveSafeDriveAllocationAcceptance({ledger:f.ledger,refreshQuota:async()=>({limit:60*GIB,usage:10*GIB}),now:()=>new Date('2026-09-08T13:00:00.000Z')});
+    const result=await harness.observeBestEffort({account:account(),email:'owner@example.com',appUsedBytes:2*GIB});
+    assert.ok(result);
+    assert.equal(result?.computed.allocationLimitBytes,40*GIB);
+    assert.equal(result?.computed.availableBytes,38*GIB);
+    assert.deepEqual(await f.ledger.latest('drive-safe'),result);
+  }finally{await rm(f.dir,{recursive:true,force:true})}
+});
