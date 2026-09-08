@@ -1,12 +1,24 @@
 import type { ActiveMediaCatalogBackend } from './mediaCatalogBackend.js';
 import { mediaCatalogDiagnostics, type MediaCatalogOperatorDiagnostics, type MediaCatalogWorkspaceDiagnostics } from './mediaCatalogDiagnostics.js';
 import type { RuntimeMediaIndexRow } from './mediaIndexRuntimeWriter.js';
+import {
+  legacyWholeFileCompatibilityDiagnostics,
+  type LegacyWholeFileCompatibilityProductionDiagnostics,
+} from './legacyWholeFileCompatibilityTelemetryProduction.js';
 
 export type MediaCatalogOperationsRole = 'owner' | 'admin' | 'member' | 'viewer';
 
 export type MediaCatalogOperationsPrincipal = {
   workspaceId: string;
   workspaceRole?: MediaCatalogOperationsRole;
+};
+
+export type MediaCatalogWorkspaceOperationsDiagnostics = MediaCatalogWorkspaceDiagnostics & {
+  legacyWholeFileCompatibility: LegacyWholeFileCompatibilityProductionDiagnostics;
+};
+
+export type MediaCatalogOperatorOperationsDiagnostics = MediaCatalogOperatorDiagnostics & {
+  legacyWholeFileCompatibility: LegacyWholeFileCompatibilityProductionDiagnostics;
 };
 
 const ROLE_RANK: Record<MediaCatalogOperationsRole, number> = {
@@ -26,13 +38,18 @@ function requireAdmin(principal: MediaCatalogOperationsPrincipal): void {
  * Web operations boundary. Even owner/admin Web sessions only receive the
  * workspace-safe diagnostic shape: host filesystem paths and legacy source
  * fingerprints are intentionally local-operator-only recovery metadata.
+ * Whole-file compatibility diagnostics are credential-free, aggregate-only,
+ * and shared with this boundary so operators can judge route deprecation safely.
  */
 export function mediaCatalogDiagnosticsForWeb<T extends RuntimeMediaIndexRow>(
   backend: ActiveMediaCatalogBackend<T>,
   principal: MediaCatalogOperationsPrincipal,
-): MediaCatalogWorkspaceDiagnostics {
+): MediaCatalogWorkspaceOperationsDiagnostics {
   requireAdmin(principal);
-  return mediaCatalogDiagnostics(backend.health, 'workspace');
+  return {
+    ...mediaCatalogDiagnostics(backend.health, 'workspace'),
+    legacyWholeFileCompatibility: legacyWholeFileCompatibilityDiagnostics(),
+  };
 }
 
 /**
@@ -41,6 +58,9 @@ export function mediaCatalogDiagnosticsForWeb<T extends RuntimeMediaIndexRow>(
  */
 export function mediaCatalogDiagnosticsForDesktopOperator<T extends RuntimeMediaIndexRow>(
   backend: ActiveMediaCatalogBackend<T>,
-): MediaCatalogOperatorDiagnostics {
-  return mediaCatalogDiagnostics(backend.health, 'operator');
+): MediaCatalogOperatorOperationsDiagnostics {
+  return {
+    ...mediaCatalogDiagnostics(backend.health, 'operator'),
+    legacyWholeFileCompatibility: legacyWholeFileCompatibilityDiagnostics(),
+  };
 }
