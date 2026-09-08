@@ -30,7 +30,7 @@ Regression coverage includes:
 - production readiness deriving `physicalDeviceResumableAccepted=true` only from exact-release evidence;
 - missing release commit identity remaining blocked.
 
-CI note: the production wiring commit (`a7560706eac4afd4fbb6cf921615af3999db1eb3`) completed full repository CI successfully. The subsequent test-only commit passed repository tests and TypeScript typecheck but its first CI attempt hit a production-build failure; because the production build on the immediately preceding code commit was green and the delta was test-only, the next full CI run must still complete green before this run is considered closed.
+The first regression-only CI attempt exposed a narrower Electron production-build TypeScript union issue in the test. The test now explicitly narrows initialized diagnostics before inspecting runtime blockers. CI run 1031 on commit `1fed15a59ad4c8e5e6dd8201ca9339eab54a8c93` completed repository tests, TypeScript typecheck, production build, Desktop renderer smoke, Electron package and packaged-app smoke successfully.
 
 ## Still NOT VERIFIED
 
