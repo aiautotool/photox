@@ -43,6 +43,12 @@ function formatCommit(value?: string) {
   return value.length > 12 ? value.slice(0, 12) : value;
 }
 
+function captureModeLabel(mode: 'disabled' | 'real-device' | 'invalid') {
+  if (mode === 'real-device') return 'real-device / ENABLED';
+  if (mode === 'invalid') return 'INVALID / fail-closed';
+  return 'Disabled';
+}
+
 export function MediaCatalogOperationsPanel() {
   const bridge = useMemo(() => resolveDesktopBridge(), []);
   const [open, setOpen] = useState(false);
@@ -113,19 +119,29 @@ export function MediaCatalogOperationsPanel() {
             {row('Observation window', `${compatibility.observationProgressPercent}%`)}
             {row('Physical resumable acceptance', compatibility.physicalDeviceResumableAccepted ? 'Đã xác nhận' : 'CHƯA XÁC NHẬN')}
             <div style={{marginTop:12,padding:'12px 14px',border:'1px solid #31475b',borderRadius:12,background:'#09131d'}}>
-              <b>Physical-device evidence</b>
+              <b>Physical-device evidence & controlled capture</b>
               <div style={{marginTop:8}}>
+                {row('Capture mode', captureModeLabel(compatibility.physicalCaptureMode))}
+                {row('Release commit', formatCommit(compatibility.physicalReleaseCommitSha))}
+                {row('Server authority ledger', compatibility.physicalCaptureEnabled
+                  ? compatibility.physicalServerAuthorityInitialized
+                    ? compatibility.physicalServerAuthorityHealthy ? 'Healthy' : 'Không healthy'
+                    : 'Chưa có run'
+                  : 'Không áp dụng')}
+                {row('Authority records', compatibility.physicalServerAuthorityRecordCount.toLocaleString())}
                 {row('Evidence store', compatibility.physicalEvidenceInitialized
                   ? compatibility.physicalEvidencePersistenceHealthy ? 'Healthy' : 'Không healthy'
                   : 'Chưa khởi tạo')}
-                {row('Release commit', formatCommit(compatibility.physicalReleaseCommitSha))}
                 {row('Evidence records', compatibility.physicalEvidenceCount.toLocaleString())}
                 {row('Required platforms', compatibility.physicalRequiredPlatforms.join(', ') || 'Không có')}
                 {row('Accepted platforms', compatibility.physicalAcceptedPlatforms.join(', ') || 'Chưa có')}
               </div>
-              {compatibility.physicalEvidenceBlockers.length > 0 && <ul style={{margin:'8px 0 0',paddingLeft:18,fontSize:12,opacity:.75}}>
+              {compatibility.physicalCaptureBlockers.length > 0 && <div style={{marginTop:10}}><b style={{fontSize:12}}>Capture blockers</b><ul style={{margin:'6px 0 0',paddingLeft:18,fontSize:12,opacity:.75}}>
+                {compatibility.physicalCaptureBlockers.map(blocker => <li key={blocker} style={{marginTop:4}}>{blocker}</li>)}
+              </ul></div>}
+              {compatibility.physicalEvidenceBlockers.length > 0 && <div style={{marginTop:10}}><b style={{fontSize:12}}>Evidence blockers</b><ul style={{margin:'6px 0 0',paddingLeft:18,fontSize:12,opacity:.75}}>
                 {compatibility.physicalEvidenceBlockers.map(blocker => <li key={blocker} style={{marginTop:4}}>{blocker}</li>)}
-              </ul>}
+              </ul></div>}
             </div>
             {compatibility.initialized && <>
               {row('Observed since', formatTimestamp(compatibility.observedSince))}
