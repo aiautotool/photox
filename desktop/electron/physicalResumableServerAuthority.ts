@@ -15,7 +15,7 @@ export type PhysicalResumableAuthorityCounters = {
 };
 
 export type PhysicalResumableAuthoritySources = {
-  counters(workspaceId: string): Promise<PhysicalResumableAuthorityCounters>;
+  counters(workspaceId: string, session: ResumableMediaSession): Promise<PhysicalResumableAuthorityCounters>;
 };
 
 export type PhysicalResumableAuthorityFinalizeResult = {
@@ -141,7 +141,7 @@ export class PhysicalResumableServerAuthorityLedger implements PhysicalResumable
 
   async sessionCreated(principal: ResumableIngestPrincipal, session: ResumableMediaSession): Promise<void> {
     binding(principal, session);
-    const counters = await this.sources.counters(session.workspaceId);
+    const counters = await this.sources.counters(session.workspaceId, session);
     await this.mutate(ledger => {
       const existing = ledger.records.find(item => item.sessionId === session.sessionId);
       if (existing) {
@@ -184,7 +184,7 @@ export class PhysicalResumableServerAuthorityLedger implements PhysicalResumable
     result: PhysicalResumableAuthorityFinalizeResult,
   ): Promise<void> {
     binding(principal, session);
-    const counters = await this.sources.counters(session.workspaceId);
+    const counters = await this.sources.counters(session.workspaceId, session);
     const observedAt = this.isoNow();
     await this.mutate(ledger => {
       const record = ledger.records.find(item => item.sessionId === session.sessionId);
