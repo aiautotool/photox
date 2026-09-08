@@ -9,6 +9,7 @@ import {
   legacyWholeFileCompatibilityDiagnostics,
   resetLegacyWholeFileCompatibilityTelemetryForTests,
 } from './legacyWholeFileCompatibilityTelemetryProduction.js';
+import { refreshPhysicalResumableAcceptance } from './physicalResumableAcceptanceProduction.js';
 import type { PhysicalResumableAcceptanceEvidence } from './physicalResumableAcceptanceEvidence.js';
 
 const RELEASE_SHA = '0123456789abcdef0123456789abcdef01234567';
@@ -56,6 +57,39 @@ test('production readiness derives physical acceptance from exact release eviden
     assert.deepEqual(diagnostics.physicalResumableAcceptance.acceptedPlatforms, ['ios', 'android']);
     assert.equal(diagnostics.deprecationReadiness.physicalDeviceResumableAccepted, true);
     assert.equal(diagnostics.deprecationReadiness.blockers.includes('PHYSICAL_DEVICE_RESUMABLE_NOT_ACCEPTED'), false);
+  } finally {
+    if (previousReleaseSha === undefined) delete process.env.PHOTOX_RELEASE_COMMIT_SHA;
+    else process.env.PHOTOX_RELEASE_COMMIT_SHA = previousReleaseSha;
+    resetLegacyWholeFileCompatibilityTelemetryForTests();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable evidence refresh updates operations readiness without desktop restart', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'photox-physical-production-refresh-'));
+  const previousReleaseSha = process.env.PHOTOX_RELEASE_COMMIT_SHA;
+  try {
+    resetLegacyWholeFileCompatibilityTelemetryForTests();
+    process.env.PHOTOX_RELEASE_COMMIT_SHA = RELEASE_SHA;
+    const store = new PhysicalResumableAcceptanceEvidenceStore(
+      path.join(directory, 'physical-resumable-acceptance-evidence.json'),
+    );
+    await store.append(evidence('ios'));
+    await initializeLegacyWholeFileCompatibilityTelemetry(directory);
+
+    let diagnostics = legacyWholeFileCompatibilityDiagnostics();
+    assert.equal(diagnostics.physicalResumableAcceptance.accepted, false);
+    assert.deepEqual(diagnostics.physicalResumableAcceptance.acceptedPlatforms, ['ios']);
+
+    await store.append(evidence('android'));
+    await refreshPhysicalResumableAcceptance();
+
+    diagnostics = legacyWholeFileCompatibilityDiagnostics();
+    assert.equal(diagnostics.physicalResumableAcceptance.accepted, true);
+    assert.deepEqual(diagnostics.physicalResumableAcceptance.acceptedPlatforms, ['ios', 'android']);
+    assert.equal(diagnostics.physicalResumableAcceptance.evidenceCount, 2);
+    if (!diagnostics.initialized) throw new Error('TELEMETRY_NOT_INITIALIZED');
+    assert.equal(diagnostics.deprecationReadiness.physicalDeviceResumableAccepted, true);
   } finally {
     if (previousReleaseSha === undefined) delete process.env.PHOTOX_RELEASE_COMMIT_SHA;
     else process.env.PHOTOX_RELEASE_COMMIT_SHA = previousReleaseSha;
