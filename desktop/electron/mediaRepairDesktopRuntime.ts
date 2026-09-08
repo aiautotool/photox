@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, migrateLegacyWorkspaceRows, type StorageAccount } from '@photosync/core';
-import { createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
+import { createResumableUploadSession, ensurePhotoSyncDateFolder, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles } from '@photosync/google-drive';
 import { SqlitePhotoXStore, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { loadWorkspaceDriveAccounts } from './driveAccountPolicyStore.js';
 import { driveRuntimeAllocation } from './driveRuntimeAllocation.js';
@@ -45,6 +45,8 @@ type RepairRow = {
   filename: string;
   path: string;
   size: number;
+  createdAt?: number;
+  receivedAt?: string;
   sha256?: string;
   mimeType?: string;
   cloud?: RepairReplica;
@@ -211,12 +213,15 @@ async function uploadExactMedia(workspaceId: string, key: string) {
       if (!sourceSha256) throw new Error('MEDIA_REPAIR_SHA256_REQUIRED');
       const token = await account.client.getAccessToken();
       if (!token.token) throw new Error('DRIVE_ACCESS_TOKEN_UNAVAILABLE');
+      const destination = await ensurePhotoSyncDateFolder(token.token, account.folderId, new Date(latest.createdAt || Date.parse(latest.receivedAt || '')));
+      replica = { ...replica, folderId: destination.folderId, remotePath: destination.remotePath };
+      latest = await saveReplica(workspaceId, key, replica);
       const mimeType = latest.mimeType || mimeTypeForFilename(latest.filename);
       const session = await createResumableUploadSession(token.token, {
         name: latest.filename,
         mimeType,
         sizeBytes: latest.size,
-        folderId: account.folderId,
+        folderId: destination.folderId,
         appProperties: { photosyncKey: latest.key, photosyncSha256: sourceSha256 },
       });
       const response = await fetch(session, {

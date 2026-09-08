@@ -34,10 +34,26 @@ export async function ensurePhotoSyncFolder(accessToken: string): Promise<string
   return folder.id;
 }
 
+function driveQueryLiteral(value:string){return value.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
+
+export async function ensureDriveChildFolder(accessToken:string,parentId:string,name:string):Promise<string>{
+  const q=encodeURIComponent(`name='${driveQueryLiteral(name)}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const existing=await googleFetch<{files:DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)&pageSize=10`,accessToken);
+  if(existing.files[0]?.id)return existing.files[0].id;
+  const folder=await googleFetch<DriveFile>('https://www.googleapis.com/drive/v3/files?fields=id,name',accessToken,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,mimeType:'application/vnd.google-apps.folder',parents:[parentId]})});
+  return folder.id;
+}
+
+export async function ensurePhotoSyncDateFolder(accessToken:string,rootFolderId:string,date:Date):Promise<{folderId:string;remotePath:string}>{
+  const valid=Number.isNaN(date.getTime())?new Date():date;const year=String(valid.getFullYear());const month=String(valid.getMonth()+1).padStart(2,'0');
+  const yearId=await ensureDriveChildFolder(accessToken,rootFolderId,year);const folderId=await ensureDriveChildFolder(accessToken,yearId,month);
+  return {folderId,remotePath:`/PhotoSync/${year}/${month}/`};
+}
+
 export async function listPhotoSyncFiles(accessToken: string, folderId: string): Promise<DriveFile[]> {
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-  const data = await googleFetch<{files: DriveFile[]}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties)`, accessToken);
-  return data.files;
+  const result:DriveFile[]=[];const pending=[folderId];
+  while(pending.length){const parentId=pending.pop()!;let pageToken='';do{const q=encodeURIComponent(`'${parentId}' in parents and trashed=false`);const suffix=pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:'';const data=await googleFetch<{files:DriveFile[];nextPageToken?:string}>(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,md5Checksum,parents,webViewLink,appProperties)${suffix}`,accessToken);for(const file of data.files){if(file.mimeType==='application/vnd.google-apps.folder')pending.push(file.id);else result.push(file)}pageToken=data.nextPageToken||''}while(pageToken)}
+  return result;
 }
 
 export function getDriveFile(accessToken: string, fileId: string): Promise<DriveFile> {

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('photoSyncDesktop', {
   listCloudUploads: () => ipcRenderer.invoke('photosync:list-cloud-uploads'),
   getBackupHealth: () => ipcRenderer.invoke('photosync:backup-health'),
   openLibrary: () => ipcRenderer.invoke('photosync:open-library'),
+  clearLocalCache: () => ipcRenderer.invoke('photosync:clear-local-cache'),
   openExternal: (url: string) => ipcRenderer.invoke('photosync:open-external', url),
   addGoogleAccount: () => ipcRenderer.invoke('photosync:add-google'),
   listGoogleAccounts: () => ipcRenderer.invoke('photosync:list-google-accounts'),

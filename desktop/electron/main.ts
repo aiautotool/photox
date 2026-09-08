@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { OAuth2Client } from 'google-auth-library';
 import { chooseAccount, entitlementsForPlan, evaluateBackupHealth, DEFAULT_PHOTO_POLICY, DEFAULT_VIDEO_POLICY, migrateLegacyWorkspaceRows, replaceWorkspaceRows, rowsForWorkspace, type MediaReplica, type StorageAccount } from '@photosync/core';
-import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk } from '@photosync/google-drive';
+import { DRIVE_SCOPE, createResumableUploadSession, ensurePhotoSyncDateFolder, ensurePhotoSyncFolder, getDriveFile, getStorageQuota, listPhotoSyncFiles, queryResumableUploadSession, uploadResumableChunk, type DriveFile } from '@photosync/google-drive';
 import { isVideoFilename, mimeTypeForFilename, processVideoFile } from './mediaProcessing.js';
 import { SqlitePhotoXStore, SqliteGooglePhotosMigrationLedger, SqliteWorkspaceRepository } from '@photox/persistence-sqlite';
 import { DesktopGooglePhotosMigrationService } from './googlePhotosMigration.js';
@@ -44,6 +44,9 @@ let workspaceRepository:SqliteWorkspaceRepository|null=null;
 let migrationService:DesktopGooglePhotosMigrationService|null=null;
 let webEdgeServer:PhotoXWebEdgeServer|null=null;
 let workspaceAuth:DesktopWorkspaceAuth|null=null;
+let localLibraryReconcile:Promise<void>|null=null;
+let cloudLibraryReconcile:Promise<void>|null=null;
+let lastCloudLibraryReconcileAt=0;
 
 const LEGACY_WORKSPACE_ID=process.env.PHOTOX_WORKSPACE_ID||'legacy-personal';
 const LEGACY_OWNER_USER_ID=process.env.PHOTOX_OWNER_USER_ID||'legacy-owner';
@@ -214,6 +217,28 @@ async function backupHealthSnapshot():Promise<BackupHealthSnapshot>{
 async function persistReplicas(row:MediaIndexRow,replicas:CloudDestination[]){row.cloudReplicas=replicas;row.cloud=replicas[0];const all=await readIndex(row.workspaceId);const i=all.findIndex(x=>x.key===row.key);if(i>=0){all[i]={...all[i],workspaceId:row.workspaceId,cloud:row.cloud,cloudReplicas:replicas};await writeIndex(all,row.workspaceId)}notifyRenderer('photosync:storage-updated',{workspaceId:row.workspaceId,key:row.key,cloudReplicas:replicas})}
 function safeFilename(value:string){ return value.replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').slice(0,220)||`media-${Date.now()}`; }
 
+function isSupportedMediaFilename(filename:string){return /\.(jpe?g|png|heic|heif|webp|gif|tiff?|dng|mp4|mov|m4v|avi|mkv|webm)$/i.test(filename)}
+async function walkMediaFiles(root:string):Promise<string[]>{
+  const result:string[]=[];const pending=[root];
+  while(pending.length){const dir=pending.pop()!;let entries;try{entries=await fs.readdir(dir,{withFileTypes:true})}catch{continue}for(const entry of entries){const target=path.join(dir,entry.name);if(entry.isDirectory())pending.push(target);else if(entry.isFile()&&isSupportedMediaFilename(entry.name))result.push(target)}}
+  return result;
+}
+async function reconcileLocalLibrary(workspaceId=LEGACY_WORKSPACE_ID){
+  if(localLibraryReconcile)return localLibraryReconcile;
+  localLibraryReconcile=(async()=>{const rows=await readIndex(workspaceId);const byPath=new Map(rows.map(row=>[path.resolve(row.path),row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));let changed=false;
+    for(const filePath of await walkMediaFiles(libraryDir())){if(byPath.has(path.resolve(filePath)))continue;const stat=await fs.stat(filePath);const sha256=await hashFile(filePath);const existing=byHash.get(sha256);if(existing){existing.path=filePath;existing.size=stat.size;changed=true;continue}const filename=path.basename(filePath);const createdAt=stat.birthtimeMs||stat.mtimeMs;const row:MediaIndexRow={workspaceId,key:`import:${sha256}`,assetId:`import:${sha256}`,deviceId:LEGACY_DESKTOP_DEVICE_ID,filename,path:filePath,size:stat.size,createdAt,receivedAt:new Date(createdAt).toISOString(),sha256,mimeType:mimeTypeForFilename(filename),mediaType:isVideoFilename(filename)?'video':'photo',videoProcessing:isVideoFilename(filename)?'queued':undefined,cloudReplicas:[]};rows.push(row);byPath.set(path.resolve(filePath),row);byHash.set(sha256,row);changed=true}
+    if(changed)await writeIndex(rows,workspaceId);
+  })().finally(()=>{localLibraryReconcile=null});return localLibraryReconcile;
+}
+function cloudFileIdentity(file:DriveFile){return file.appProperties?.photosyncKey||`cloud:${file.appProperties?.photosyncSha256||file.md5Checksum||file.id}`}
+async function reconcileCloudLibrary(workspaceId=LEGACY_WORKSPACE_ID,force=false){
+  if(cloudLibraryReconcile)return cloudLibraryReconcile;if(!force&&Date.now()-lastCloudLibraryReconcileAt<60_000)return;
+  cloudLibraryReconcile=(async()=>{const accounts=await runtimeDriveAccounts(workspaceId);if(!accounts.length)return;const rows=await readIndex(workspaceId);const byKey=new Map(rows.map(row=>[row.key,row]));const byHash=new Map(rows.filter(row=>row.sha256).map(row=>[row.sha256,row]));let changed=false;
+  for(const account of accounts){let files:DriveFile[]=[];try{const token=await account.client.getAccessToken();if(token.token)files=await listPhotoSyncFiles(token.token,account.folderId)}catch(error){console.error('Drive library reconciliation failed',account.id,error);continue}for(const file of files.filter(item=>item.mimeType.startsWith('image/')||item.mimeType.startsWith('video/')||isSupportedMediaFilename(item.name))){const sha=file.appProperties?.photosyncSha256||file.md5Checksum||'';const key=cloudFileIdentity(file);let row=byKey.get(key)||(sha?byHash.get(sha):undefined);if(!row){const timestamp=Date.parse(file.createdTime||file.modifiedTime||'')||Date.now();row={workspaceId,key,assetId:key,deviceId:'google-drive',filename:file.name,path:path.join(libraryDir(),safeFilename(file.name)),size:Number(file.size||0),createdAt:timestamp,receivedAt:new Date(timestamp).toISOString(),sha256:sha,mimeType:file.mimeType||mimeTypeForFilename(file.name),mediaType:file.mimeType.startsWith('video/')||isVideoFilename(file.name)?'video':'photo',cloudReplicas:[]};rows.push(row);byKey.set(key,row);if(sha)byHash.set(sha,row);changed=true}const replicas=replicasOf(row);if(!replicas.some(replica=>replica.accountId===account.id&&replica.remoteFileId===file.id)){replicas.push({state:'VERIFIED',accountId:account.id,accountEmail:account.email,folderId:account.folderId,remotePath:'/PhotoSync/',remoteFileId:file.id,webViewLink:file.webViewLink||`https://drive.google.com/file/d/${file.id}/view`,uploadedAt:file.createdTime,verifiedAt:new Date().toISOString()});row.cloudReplicas=replicas;row.cloud=replicas[0];changed=true}}}
+  if(changed)await writeIndex(rows,workspaceId);
+  })().finally(()=>{lastCloudLibraryReconcileAt=Date.now();cloudLibraryReconcile=null});return cloudLibraryReconcile;
+}
+
 async function hashFile(filePath:string){
   return await new Promise<string>((resolve,reject)=>{ const hash=crypto.createHash('sha256'); const stream=createReadStream(filePath); stream.on('data',chunk=>hash.update(chunk)); stream.on('end',()=>resolve(hash.digest('hex'))); stream.on('error',reject); });
 }
@@ -246,6 +271,8 @@ async function processVideoRow(key:string,workspaceId=LEGACY_WORKSPACE_ID){
 }
 
 async function listLocalMedia(workspaceId=LEGACY_WORKSPACE_ID):Promise<LocalMedia[]>{
+  await reconcileLocalLibrary(workspaceId);
+  await reconcileCloudLibrary(workspaceId);
   const rows=await readIndex(workspaceId);
   const media:LocalMedia[]=[];
   for(const row of rows){
@@ -256,6 +283,19 @@ async function listLocalMedia(workspaceId=LEGACY_WORKSPACE_ID):Promise<LocalMedi
     if(localAvailable||cloudAvailable)media.push({key:row.key,name:row.filename,path:row.path,url:`photosync://media/${encodeURIComponent(row.key)}`,modifiedAt,sourceDevice:row.deviceId,size:row.size,receivedAt:row.receivedAt,sha256:row.sha256,localAvailable,cloudAvailable});
   }
   return media.sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
+}
+
+async function clearSafeLocalMedia(workspaceId=LEGACY_WORKSPACE_ID){
+  const rows=await readIndex(workspaceId);let cleared=0,bytesFreed=0,skipped=0,changed=false;const root=path.resolve(libraryDir())+path.sep;
+  for(const row of rows){
+    const verifiedAccounts=new Set(replicasOf(row).filter(replica=>isVerified(replica)&&replica.accountId&&replica.remoteFileId).map(replica=>replica.accountId));
+    if(verifiedAccounts.size<TARGET_CLOUD_REPLICAS){skipped+=1;continue}
+    const source=path.resolve(row.path);if(!source.startsWith(root)){skipped+=1;continue}
+    try{const stat=await fs.stat(source);await fs.unlink(source);cleared+=1;bytesFreed+=stat.size}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+    for(const cachePath of [row.thumbnailPath,row.playbackPath])if(cachePath)await fs.unlink(cachePath).catch(error=>{if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error});
+    if(row.thumbnailPath||row.playbackPath){row.thumbnailPath=undefined;row.playbackPath=undefined;changed=true}
+  }
+  if(changed)await writeIndex(rows,workspaceId);notifyRenderer('photosync:storage-updated',{localCacheCleared:true,cleared,bytesFreed,skipped});return {cleared,bytesFreed,skipped};
 }
 
 async function deleteManagedMedia(key:string,workspaceId=LEGACY_WORKSPACE_ID){
@@ -340,7 +380,7 @@ async function connectGoogle(){
       await syncWorkspaceProviderUsage();
       requireWorkspaceRepository().appendAudit({workspaceId:LEGACY_WORKSPACE_ID,actorUserId:LEGACY_OWNER_USER_ID,actorDeviceId:LEGACY_DESKTOP_DEVICE_ID,action:'provider.connect',targetType:'google_drive',targetId:id,metadata:{email:email||id}});
       res.writeHead(200,{'content-type':'text/html;charset=utf-8'});res.end('<h2>Đã thêm Google Drive vào PhotoSync Laptop.</h2><p>Bạn có thể đóng tab này.</p>');server.close();
-      lastStatus={...lastStatus,message:'Đã thêm tài khoản Google Drive',driveAccounts:(await savedDriveAccounts()).length}; resolve(await desktopStatus());void retryQueuedCloud();
+      lastStatus={...lastStatus,message:'Đã thêm tài khoản Google Drive',driveAccounts:(await savedDriveAccounts()).length};await reconcileCloudLibrary(LEGACY_WORKSPACE_ID,true);resolve(await desktopStatus());void retryQueuedCloud();
     }catch(e){server.close();reject(e)}}); server.listen(OAUTH_PORT,'127.0.0.1'); server.on('error',reject);
   });
 }
@@ -446,6 +486,7 @@ async function retryQueuedCloud(){
 }
 
 async function uploadLocalToDrive(row:MediaIndexRow){
+  try{await fs.access(row.path)}catch{return}
   const accounts=await runtimeDriveAccounts(row.workspaceId);
   if(!accounts.length){
     const replicas=replicasOf(row).filter(isVerified);replicas.push({state:'QUEUED',message:'Đang chờ có đủ 2 tài khoản Google Drive hợp lệ; hệ thống sẽ tự thử lại.'});await persistReplicas(row,replicas);return;
@@ -460,8 +501,10 @@ async function uploadLocalToDrive(row:MediaIndexRow){
     let replica:CloudDestination={state:'UPLOADING',accountId:account.id,accountEmail:account.email,folderId:account.folderId,remotePath:'/PhotoSync/'};replicas.push(replica);await persistReplicas(row,replicas);
     try{
       const token=await account.client.getAccessToken();if(!token.token)throw new Error('Drive access token unavailable');
+      const destination=await ensurePhotoSyncDateFolder(token.token,account.folderId,new Date(row.createdAt||Date.parse(row.receivedAt)));
+      replica={...replica,folderId:destination.folderId,remotePath:destination.remotePath};replicas[replicas.length-1]=replica;await persistReplicas(row,replicas);
       const mime=row.mimeType||mimeTypeForFilename(row.filename);
-      const session=await createResumableUploadSession(token.token,{name:row.filename,mimeType:mime,sizeBytes:row.size,folderId:account.folderId,appProperties:{photosyncKey:row.key,photosyncSha256:row.sha256}});
+      const session=await createResumableUploadSession(token.token,{name:row.filename,mimeType:mime,sizeBytes:row.size,folderId:destination.folderId,appProperties:{photosyncKey:row.key,photosyncSha256:row.sha256}});
       const response=await fetch(session,{method:'PUT',headers:{'content-type':mime,'content-length':String(row.size)},body:createReadStream(row.path) as any,duplex:'half'} as any);if(!response.ok)throw new Error(`Drive upload ${response.status}: ${await response.text()}`);const remote=await response.json().catch(()=>({}));if(!remote.id)throw new Error('Drive không trả remoteFileId để xác minh file');
       replica={...replica,state:'VERIFIED',remoteFileId:remote.id,webViewLink:`https://drive.google.com/file/d/${remote.id}/view`,uploadedAt:new Date().toISOString(),verifiedAt:new Date().toISOString()};replicas[replicas.length-1]=replica;lastStatus.cloudUploaded+=1;await persistReplicas(row,replicas);
     }catch(e){replica={...replica,state:'ERROR',message:e instanceof Error?e.message:String(e)};replicas[replicas.length-1]=replica;await persistReplicas(row,replicas);return}
@@ -664,6 +707,7 @@ ipcMain.handle('photosync:backup-health',()=>backupHealthSnapshot());
 ipcMain.handle('photosync:list-local',()=>listLocalMedia());
 ipcMain.handle('photosync:list-cloud-uploads',()=>listCloudUploads());
 ipcMain.handle('photosync:open-library',()=>shell.openPath(libraryDir()));
+ipcMain.handle('photosync:clear-local-cache',()=>clearSafeLocalMedia());
 ipcMain.handle('photosync:open-external',(_event,url:string)=>{if(/^https:\/\/drive\.google\.com\//.test(url))return shell.openExternal(url)});
 ipcMain.handle('photosync:add-google',()=>connectGoogle());
 ipcMain.handle('photosync:list-google-accounts',()=>listDriveAccounts());
@@ -685,7 +729,7 @@ ipcMain.handle('photosync:migration-cancel',(_event,jobId:string)=>{requireMigra
 ipcMain.handle('photosync:migration-retry',async(_event,jobId:string)=>{const service=requireMigrationService();void service.retryFailed(jobId).catch(error=>console.error('Migration retry failed',jobId,error));return (await service.getSnapshot(jobId)).job});
 
 
-app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
+app.whenReady().then(async()=>{await fs.mkdir(libraryDir(),{recursive:true});await fs.mkdir(videoCacheDir(),{recursive:true});await fs.mkdir(googlePhotosAccountsDir(),{recursive:true});migrationStore=new SqlitePhotoXStore({path:migrationDbFile()});workspaceRepository=new SqliteWorkspaceRepository(migrationStore);await bootstrapLegacyWorkspace();workspaceAuth=await DesktopWorkspaceAuth.create({secretFile:authSecretFile(),store:migrationStore,workspaces:workspaceRepository,pairing:workspacePairingChallenges,workspaceId:LEGACY_WORKSPACE_ID,ownerUserId:LEGACY_OWNER_USER_ID});migrationService=new DesktopGooglePhotosMigrationService({accountsDir:googlePhotosAccountsDir(),workspaceId:LEGACY_WORKSPACE_ID,oauthClient,openExternal:url=>shell.openExternal(url),ledger:new SqliteGooglePhotosMigrationLedger(migrationStore),uploadToDrive:uploadMigrationItemToDrive,onUpdated:snapshot=>notifyRenderer('photosync:migration-updated',snapshot)});await reconcileLocalLibrary();await reconcileCloudLibrary(LEGACY_WORKSPACE_ID,true);await startReceiver();await startWebEdge();startCloudflareTunnelSupervisor();protocol.handle('photosync',async request=>{const url=new URL(request.url);if(url.hostname!=='media')return new Response('Not found',{status:404});const key=decodeURIComponent(url.pathname.replace(/^\//,''));const row=(await readIndex()).find(x=>x.key===key);if(!row)return new Response('Not found',{status:404});
     try{
       const usePlayback=isVideoFilename(row.filename)&&Boolean(row.playbackPath);const sourcePath=usePlayback?row.playbackPath!:row.path;const stat=await fs.stat(sourcePath);const range=request.headers.get('range');const contentType=usePlayback?'video/mp4':row.mimeType||mimeTypeForFilename(row.filename);
       if(range){const match=/bytes=(\d+)-(\d*)/.exec(range);if(match){const start=Number(match[1]);const end=match[2]?Math.min(Number(match[2]),stat.size-1):stat.size-1;if(start>=stat.size||end<start)return new Response(null,{status:416,headers:{'content-range':`bytes */${stat.size}`}});return new Response(Readable.toWeb(createReadStream(sourcePath,{start,end})) as ReadableStream,{status:206,headers:{'content-type':contentType,'content-length':String(end-start+1),'content-range':`bytes ${start}-${end}/${stat.size}`,'accept-ranges':'bytes','cache-control':'no-store'}})}}

@@ -7,6 +7,7 @@ export type DriveAllocationSnapshot={providerTotalBytes:number|null;providerFree
 export type DriveAccount = { id:string;email:string;usedBytes:number;freeBytes:number;totalBytes:number;status:'ready'|'unavailable';allocation:DriveAllocationSnapshot };
 export type DriveAllocationUpdateInput={maxUsageRatio?:number;safetyReserveBytes?:number};
 export type MediaRepairResult={workspaceId:string;key:string;status:'queued'|'already_safe';verifiedReplicas:number;targetReplicas:number};
+export type ClearLocalCacheResult={cleared:number;bytesFreed:number;skipped:number};
 export type GooglePhotosAccount={id:string;email:string;capabilities:('picker'|'append')[];status:'ready'|'unavailable'};
 export type WorkspaceDevice={id:string;workspaceId:string;userId:string;name:string;platform:'ios'|'android'|'windows'|'macos'|'linux'|'web'|'unknown';kind:'desktop'|'mobile'|'web'|'service';createdAt:number;lastSeenAt?:number;revokedAt?:number};
 export type WorkspaceSessionSummary={sessionId:string;subject:string;deviceId?:string;scopes:string[];expiresAt:number;createdAt:number;lastUsedAt?:number};
@@ -32,6 +33,7 @@ export interface DesktopBridge {
   listCloudUploads():Promise<CloudUpload[]>;
   getBackupHealth():Promise<BackupHealthSnapshot>;
   openLibrary():Promise<void>;
+  clearLocalCache?():Promise<ClearLocalCacheResult>;
   openExternal(url:string):Promise<void>;
   addGoogleAccount():Promise<DesktopStatus>;
   listGoogleAccounts():Promise<DriveAccount[]>;
