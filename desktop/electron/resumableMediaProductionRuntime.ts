@@ -4,6 +4,7 @@ import type { createMediaIngestCommitCoordinator } from './mediaIngestCommitCoor
 import { PhysicalResumableAcceptanceCaptureWorkflow } from './physicalResumableAcceptanceCapture.js';
 import { PhysicalResumableAcceptanceEvidenceStore } from './physicalResumableAcceptanceEvidenceStore.js';
 import { PhysicalResumableAcceptanceIngestion } from './physicalResumableAcceptanceIngestion.js';
+import { refreshPhysicalResumableAcceptance } from './physicalResumableAcceptanceProduction.js';
 import { PhysicalResumableServerAuthorityLedger } from './physicalResumableServerAuthority.js';
 import type { ResumableMediaSession } from './resumableMediaIngest.js';
 import { createResumableMediaProductionCommit, type ResumableCommittedMediaRow, type ResumableMediaProductionCommitResult } from './resumableMediaProductionCommit.js';
@@ -141,6 +142,12 @@ export function createResumableMediaProductionRuntime(
           ),
         ),
         physicalAcceptance.releaseCommitSha,
+        async () => {
+          await refreshPhysicalResumableAcceptance(
+            physicalAcceptance.stateDirectory,
+            physicalAcceptance.releaseCommitSha,
+          );
+        },
       )
     : undefined;
 
