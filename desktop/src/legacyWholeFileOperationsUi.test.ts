@@ -13,6 +13,12 @@ const healthyMonitoring: LegacyWholeFileCompatibilityDiagnostics = {
     blockers: ['PHYSICAL_RESUMABLE_EVIDENCE_MISSING_ANDROID'],
     evidenceCount: 2,
     persistenceHealthy: true,
+    captureMode: 'real-device',
+    captureEnabled: true,
+    serverAuthorityLedgerInitialized: true,
+    serverAuthorityLedgerHealthy: true,
+    serverAuthorityRecordCount: 3,
+    captureBlockers: [],
   },
   snapshot: {
     observedSince: '2026-09-01T00:00:00.000Z',
@@ -53,7 +59,7 @@ test('operations view exposes coarse compatibility counts and readable blockers'
   assert.ok(view.blockerLabels.some(label => label.includes('whole-file compatibility route')));
 });
 
-test('operations view exposes evidence-derived physical acceptance status read-only', () => {
+test('operations view exposes evidence-derived physical acceptance and controlled capture status read-only', () => {
   const view = buildLegacyWholeFileOperationsView(healthyMonitoring);
   assert.equal(view.physicalEvidenceInitialized, true);
   assert.equal(view.physicalEvidencePersistenceHealthy, true);
@@ -63,6 +69,12 @@ test('operations view exposes evidence-derived physical acceptance status read-o
   assert.deepEqual(view.physicalAcceptedPlatforms, ['ios']);
   assert.deepEqual(view.physicalEvidenceBlockers, ['PHYSICAL_RESUMABLE_EVIDENCE_MISSING_ANDROID']);
   assert.equal(view.physicalDeviceResumableAccepted, false);
+  assert.equal(view.physicalCaptureMode, 'real-device');
+  assert.equal(view.physicalCaptureEnabled, true);
+  assert.equal(view.physicalServerAuthorityInitialized, true);
+  assert.equal(view.physicalServerAuthorityHealthy, true);
+  assert.equal(view.physicalServerAuthorityRecordCount, 3);
+  assert.deepEqual(view.physicalCaptureBlockers, []);
 });
 
 test('operations view fails closed when telemetry runtime is not initialized', () => {
@@ -80,7 +92,26 @@ test('operations view fails closed when telemetry runtime is not initialized', (
   assert.equal(view.physicalDeviceResumableAccepted, false);
   assert.equal(view.physicalEvidenceInitialized, false);
   assert.equal(view.physicalEvidenceCount, 0);
+  assert.equal(view.physicalCaptureMode, 'disabled');
+  assert.equal(view.physicalCaptureEnabled, false);
+  assert.equal(view.physicalServerAuthorityHealthy, true);
   assert.deepEqual(view.blockerLabels, ['Telemetry chưa được khởi tạo']);
+});
+
+test('operations view surfaces unhealthy controlled server authority without inventing acceptance', () => {
+  const diagnostics: LegacyWholeFileCompatibilityDiagnostics = {
+    ...healthyMonitoring,
+    physicalResumableAcceptance: {
+      ...healthyMonitoring.physicalResumableAcceptance!,
+      serverAuthorityLedgerHealthy: false,
+      captureBlockers: ['PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_UNHEALTHY'],
+    },
+  };
+  const view = buildLegacyWholeFileOperationsView(diagnostics);
+  assert.equal(view.physicalCaptureEnabled, true);
+  assert.equal(view.physicalServerAuthorityHealthy, false);
+  assert.deepEqual(view.physicalCaptureBlockers, ['PHYSICAL_RESUMABLE_AUTHORITY_LEDGER_UNHEALTHY']);
+  assert.equal(view.physicalDeviceResumableAccepted, false);
 });
 
 test('operations view never treats unhealthy persistence as retirement-ready', () => {
@@ -117,6 +148,12 @@ test('operations view reports ready only when runtime readiness is authoritative
       blockers: [],
       evidenceCount: 2,
       persistenceHealthy: true,
+      captureMode: 'real-device',
+      captureEnabled: true,
+      serverAuthorityLedgerInitialized: true,
+      serverAuthorityLedgerHealthy: true,
+      serverAuthorityRecordCount: 2,
+      captureBlockers: [],
     },
     snapshot: { ...healthyMonitoring.snapshot, total: 0, byAuthMode: { bearer: 0, 'pair-code': 0, 'pairing-challenge': 0 }, byOutcome: { accepted: 0, duplicate: 0, rejected: 0 } },
     deprecationReadiness: {
